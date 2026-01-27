@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
@@ -15,6 +14,21 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
 	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
+)
+
+// DataSource is an interface for reading block data from either local cache or remote storage.
+// Both Chunker (mmap-based) and CompressedChunker (LRU + compressed cache) implement this interface.
+type DataSource interface {
+	ReadAt(ctx context.Context, b []byte, off int64) (int, error)
+	Slice(ctx context.Context, off, length int64) ([]byte, error)
+	Close() error
+	FileSize() (int64, error)
+}
+
+// Verify that both chunker types implement DataSource.
+var (
+	_ DataSource = (*Chunker)(nil)
+	_ DataSource = (*CompressedChunker)(nil)
 )
 
 type Chunker struct {
@@ -66,24 +80,6 @@ func (c *Chunker) ReadAt(ctx context.Context, b []byte, off int64) (int, error) 
 	return copy(b, slice), nil
 }
 
-func (c *Chunker) WriteTo(ctx context.Context, w io.Writer) (int64, error) {
-	for i := int64(0); i < c.size; i += storage.MemoryChunkSize {
-		chunk := make([]byte, storage.MemoryChunkSize)
-
-		n, err := c.ReadAt(ctx, chunk, i)
-		if err != nil {
-			return 0, fmt.Errorf("failed to slice cache at %d-%d: %w", i, i+storage.MemoryChunkSize, err)
-		}
-
-		_, err = w.Write(chunk[:n])
-		if err != nil {
-			return 0, fmt.Errorf("failed to write chunk %d to writer: %w", i, err)
-		}
-	}
-
-	return c.size, nil
-}
-
 func (c *Chunker) Slice(ctx context.Context, off, length int64) ([]byte, error) {
 	timer := c.metrics.SlicesTimerFactory.Begin()
 
@@ -127,51 +123,19 @@ func (c *Chunker) Slice(ctx context.Context, off, length int64) ([]byte, error) 
 	return b, nil
 }
 
-// fetchToCache ensures that the data at the given offset and length is
-// available in the cache. If the original data was frame-compressed, it fetches
-// and decompresses entire frames, so it may populate more into the cache than
-// just the requested range.
+// fetchToCache ensures that the data at the given offset and length is available in the cache.
+// This chunker only handles uncompressed data; compressed data uses CompressedChunker.
 func (c *Chunker) fetchToCache(ctx context.Context, off, length int64) error {
 	var eg errgroup.Group
 
-	var framesToFetch *storage.FrameTable
-	fetchRange := storage.Range{Start: off, Length: int(length)}
+	startingChunk := header.BlockIdx(off, storage.MemoryChunkSize)
+	startingChunkOffset := header.BlockOffset(startingChunk, storage.MemoryChunkSize)
+	nChunks := header.BlockIdx(length+storage.MemoryChunkSize-1, storage.MemoryChunkSize)
 
-	if c.frameTable.IsCompressed() {
-		var err error
-		framesToFetch, err = c.frameTable.Subset(fetchRange)
-		if err != nil {
-			return fmt.Errorf("failed to get frame subset for range %s: %w", fetchRange, err)
-		}
-		if framesToFetch == nil || len(framesToFetch.Frames) == 0 {
-			return fmt.Errorf("no frames to fetch for range %s", fetchRange)
-		}
-	} else {
-		// If no compression, pretend each chunk is a frame.
-		startingChunk := header.BlockIdx(off, storage.MemoryChunkSize)
-		startingChunkOffset := header.BlockOffset(startingChunk, storage.MemoryChunkSize)
-		nChunks := header.BlockIdx(length+storage.MemoryChunkSize-1, storage.MemoryChunkSize)
-
-		framesToFetch = &storage.FrameTable{
-			CompressionType: storage.CompressionNone,
-			StartAt: storage.FrameOffset{
-				U: startingChunkOffset,
-				C: startingChunkOffset,
-			},
-		}
-		for range nChunks {
-			framesToFetch.Frames = append(framesToFetch.Frames, storage.FrameSize{
-				U: storage.MemoryChunkSize,
-				C: storage.MemoryChunkSize,
-			})
-		}
-	}
-
-	currentOff := framesToFetch.StartAt.U
-	for _, f := range framesToFetch.Frames {
-		// Ensure the closure captures the correct block offset.
+	currentOff := startingChunkOffset
+	for range nChunks {
 		fetchOff := currentOff
-		currentOff += int64(f.U)
+		currentOff += storage.MemoryChunkSize
 
 		eg.Go(func() (err error) {
 			defer func() {
@@ -188,10 +152,7 @@ func (c *Chunker) fetchToCache(ctx context.Context, off, length int64) error {
 				default:
 				}
 
-				// Get the space in the mmapped cache to read the frame into.
-				// The size of the slice is adjusted if the last chunk is not a
-				// multiple of the block size.
-				b, releaseCacheCloseLock, err := c.cache.addressBytes(fetchOff, int64(f.U))
+				b, releaseCacheCloseLock, err := c.cache.addressBytes(fetchOff, storage.MemoryChunkSize)
 				if err != nil {
 					return err
 				}
@@ -199,21 +160,15 @@ func (c *Chunker) fetchToCache(ctx context.Context, off, length int64) error {
 
 				fetchSW := c.metrics.RemoteReadsTimerFactory.Begin()
 
-				// For uncompressed data, GetFrame will read the exact data we need.
-				_, err = c.storage.GetFrame(ctx,
-					c.objectPath, fetchOff, framesToFetch, true, b)
+				_, err = c.storage.GetFrame(ctx, c.objectPath, fetchOff, c.frameTable, true, b)
 				if err != nil {
 					fetchSW.Failure(ctx, int64(len(b)),
 						attribute.String(failureReason, failureTypeRemoteRead),
 					)
-
-					return fmt.Errorf("failed to read frame from base %d: %w", fetchOff, err)
+					return fmt.Errorf("failed to read chunk from base %d: %w", fetchOff, err)
 				}
 
-				// Mark the uncompressed range as cached (not the compressed range
-				// returned by GetFrame).
-				c.cache.setIsCached(fetchOff, int64(f.U))
-
+				c.cache.setIsCached(fetchOff, int64(len(b)))
 				fetchSW.Success(ctx, int64(len(b)))
 
 				return nil
@@ -223,12 +178,7 @@ func (c *Chunker) fetchToCache(ctx context.Context, off, length int64) error {
 		})
 	}
 
-	err := eg.Wait()
-	if err != nil {
-		return fmt.Errorf("failed to ensure data at %s: %w", fetchRange, err)
-	}
-
-	return nil
+	return eg.Wait()
 }
 
 func (c *Chunker) Close() error {
