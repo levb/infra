@@ -265,7 +265,7 @@ func (s *Storage) GetFrame(ctx context.Context, objectPath string, offset int64,
 	// Get the frame info to know both compressed and uncompressed sizes
 	frameStart, frameSize, err := frameTable.FrameFor(rangeU)
 	if err != nil {
-		return Range{}, fmt.Errorf("get frame for range %v: %w", rangeU, err)
+		return Range{}, fmt.Errorf("get frame for range %v, object %s: %w", rangeU, objectPath, err)
 	}
 
 	// Validate buffer size - caller must provide a buffer for the full frame

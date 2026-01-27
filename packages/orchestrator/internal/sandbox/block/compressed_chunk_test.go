@@ -528,7 +528,6 @@ func TestCompressedChunker_EmptySlice(t *testing.T) {
 func TestCompressedChunker_Close(t *testing.T) {
 	t.Parallel()
 
-
 	frameSizeU := int64(4 * 1024 * 1024)
 	compressedData := compressData(t, make([]byte, frameSizeU))
 

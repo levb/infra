@@ -124,11 +124,12 @@ func (b *StorageDiff) Init(ctx context.Context) error {
 	var err error
 
 	if b.frameTable.IsCompressed() {
+		fmt.Printf("<>/<> Init: compressed frame table detected\n")
 		// For compressed data, we need the uncompressed size for the cache.
 		// The cache stores uncompressed data at uncompressed offsets.
 		size = b.frameTable.StartAt.U + b.frameTable.TotalUncompressedSize()
 	} else {
-		// For uncompressed data, the storage size is the data size.
+		fmt.Printf("<>/<> Init: uncompressed frame table detected\n")
 		size, err = b.persistence.Size(ctx, b.objectPath)
 		if err != nil {
 			errMsg := fmt.Errorf("failed to get object size: %w", err)
@@ -140,6 +141,7 @@ func (b *StorageDiff) Init(ctx context.Context) error {
 
 	var dataSource block.DataSource
 
+	fmt.Printf("<>/<> Init: chunker type %d\n", b.chunkerType)
 	switch b.chunkerType {
 	case ChunkerTypeCompressed:
 		// Wrap storage with local file cache for compressed frames

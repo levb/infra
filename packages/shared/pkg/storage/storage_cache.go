@@ -70,6 +70,7 @@ func (c Cache) boolFlag(ctx context.Context, flag featureflags.BoolFlag) bool {
 	if c.flags == nil {
 		return flag.Fallback()
 	}
+
 	return c.flags.BoolFlag(ctx, flag)
 }
 
@@ -78,6 +79,7 @@ func (c Cache) intFlag(ctx context.Context, flag featureflags.IntFlag) int {
 	if c.flags == nil {
 		return flag.Fallback()
 	}
+
 	return c.flags.IntFlag(ctx, flag)
 }
 

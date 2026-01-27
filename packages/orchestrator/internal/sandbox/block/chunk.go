@@ -160,11 +160,14 @@ func (c *Chunker) fetchToCache(ctx context.Context, off, length int64) error {
 
 				fetchSW := c.metrics.RemoteReadsTimerFactory.Begin()
 
+				fmt.Printf("<>/<> fetchToCache: objectPath: %s, offsetU: %#x, frameTable: %+v\n", c.objectPath, fetchOff, c.frameTable)
+
 				_, err = c.storage.GetFrame(ctx, c.objectPath, fetchOff, c.frameTable, true, b)
 				if err != nil {
 					fetchSW.Failure(ctx, int64(len(b)),
 						attribute.String(failureReason, failureTypeRemoteRead),
 					)
+
 					return fmt.Errorf("failed to read chunk from base %d: %w", fetchOff, err)
 				}
 

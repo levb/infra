@@ -3,14 +3,15 @@ package block
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/klauspost/compress/zstd"
 	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
-	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
 
 // CompressedChunker implements a block chunker for compressed data.
@@ -25,7 +26,7 @@ type CompressedChunker struct {
 	objectPath string
 	frameTable *storage.FrameTable
 	frameLRU   *FrameLRU
-	fetchers   *utils.WaitMap
+	fetchGroup singleflight.Group
 	size       int64
 	metrics    metrics.Metrics
 }
@@ -61,7 +62,6 @@ func NewCompressedChunker(
 		objectPath: objectPath,
 		frameTable: frameTable,
 		frameLRU:   frameLRU,
-		fetchers:   utils.NewWaitMap(),
 		size:       size,
 		metrics:    m,
 	}, nil
@@ -78,7 +78,6 @@ func (c *CompressedChunker) ReadAt(ctx context.Context, b []byte, off int64) (in
 }
 
 // Slice returns a slice of the data at the given offset and length.
-// The returned slice may reference cached data and should not be modified.
 func (c *CompressedChunker) Slice(ctx context.Context, off, length int64) ([]byte, error) {
 	timer := c.metrics.SlicesTimerFactory.Begin()
 
@@ -107,10 +106,6 @@ func (c *CompressedChunker) Slice(ctx context.Context, off, length int64) ([]byt
 			return nil, fmt.Errorf("failed to get frame for offset %d: %w", currentOff, err)
 		}
 
-		// if we have the frame in LRU, read directly from it
-
-
-
 		startInFrame := currentOff - frameStarts.U
 		remaining := int(length) - copied
 		available := int(frameSize.U) - int(startInFrame)
@@ -119,7 +114,30 @@ func (c *CompressedChunker) Slice(ctx context.Context, off, length int64) ([]byt
 		copied += toCopy
 
 		eg.Go(func() error {
-			return c.readFromFrame(ctx, frameStarts.U, frameSize, startInFrame, result[resultOff:resultOff+toCopy])
+			// Check LRU cache first
+			if frame, ok := c.frameLRU.Get(frameStarts.U); ok {
+				copy(result[resultOff:], frame.data[startInFrame:startInFrame+int64(toCopy)])
+
+				return nil
+			}
+
+			// Fetch with deduplication - concurrent requests for same frame share one fetch
+			key := strconv.FormatInt(frameStarts.U, 10)
+			dataI, err, _ := c.fetchGroup.Do(key, func() (any, error) {
+				// Double-check LRU after acquiring the fetch slot
+				if frame, ok := c.frameLRU.Get(frameStarts.U); ok {
+					return frame.data, nil
+				}
+
+				return c.fetchAndDecompress(ctx, frameStarts.U, frameSize)
+			})
+			if err != nil {
+				return err
+			}
+			data := dataI.([]byte)
+			copy(result[resultOff:], data[startInFrame:startInFrame+int64(toCopy)])
+
+			return nil
 		})
 	}
 
@@ -136,48 +154,8 @@ func (c *CompressedChunker) Slice(ctx context.Context, off, length int64) ([]byt
 	return result, nil
 }
 
-// readFromFrame reads data from a frame into dst, starting at frameOff within the frame.
-// Uses WaitMap to deduplicate concurrent fetches for the same frame.
-func (c *CompressedChunker) readFromFrame(ctx context.Context, frameOffU int64, frameSize storage.FrameSize, frameOff int64, dst []byte) error {
-	if frame, ok := c.frameLRU.Get(frameOffU); ok {
-		copy(dst, frame.data[frameOff:])
-		return nil
-	}
-
-	var data []byte
-	err := c.fetchers.Wait(frameOffU, func() error {
-		var fetchErr error
-		data, fetchErr = c.fetchFrame(ctx, frameOffU, frameSize)
-		return fetchErr
-	})
-	c.fetchers.Delete(frameOffU)
-
-	if err != nil {
-		return err
-	}
-
-	// Fetcher gets data directly; concurrent waiters get from LRU
-	if data == nil {
-		frame, ok := c.frameLRU.Get(frameOffU)
-		if !ok {
-			return fmt.Errorf("frame %d not in LRU after fetch", frameOffU)
-		}
-		data = frame.data
-	}
-
-	copy(dst, data[frameOff:])
-	return nil
-}
-
-// fetchFrame fetches a compressed frame from storage, decompresses it, and stores in LRU.
-// Returns the decompressed data. Called within WaitMap.Wait for deduplication.
-func (c *CompressedChunker) fetchFrame(ctx context.Context, frameOffU int64, frameSize storage.FrameSize) ([]byte, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
+// fetchAndDecompress fetches a compressed frame from storage, decompresses it, and stores in LRU.
+func (c *CompressedChunker) fetchAndDecompress(ctx context.Context, frameOffU int64, frameSize storage.FrameSize) ([]byte, error) {
 	fetchTimer := c.metrics.RemoteReadsTimerFactory.Begin()
 
 	compressedBuf := make([]byte, frameSize.C)
@@ -185,40 +163,29 @@ func (c *CompressedChunker) fetchFrame(ctx context.Context, frameOffU int64, fra
 	if err != nil {
 		fetchTimer.Failure(ctx, int64(frameSize.C),
 			attribute.String(failureReason, failureTypeRemoteRead))
+
 		return nil, fmt.Errorf("failed to fetch frame at %d: %w", frameOffU, err)
 	}
 	fetchTimer.Success(ctx, int64(frameSize.C))
 
-	decompressed := make([]byte, frameSize.U)
-	n, err := c.decompressFrame(compressedBuf, decompressed)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decompress frame at %d: %w", frameOffU, err)
-	}
-
-	data := decompressed[:n]
-	c.frameLRU.Put(frameOffU, int64(frameSize.U), data)
-
-	return data, nil
-}
-
-// decompressFrame decompresses zstd-compressed data into the provided buffer.
-func (c *CompressedChunker) decompressFrame(compressed, buf []byte) (int, error) {
 	if c.frameTable.CompressionType != storage.CompressionZstd {
-		return 0, fmt.Errorf("unsupported compression type: %d", c.frameTable.CompressionType)
+		return nil, fmt.Errorf("unsupported compression type: %d", c.frameTable.CompressionType)
 	}
 
 	dec, err := zstd.NewReader(nil)
 	if err != nil {
-		return 0, fmt.Errorf("failed to create zstd reader: %w", err)
+		return nil, fmt.Errorf("failed to create zstd reader: %w", err)
 	}
 	defer dec.Close()
 
-	decompressed, err := dec.DecodeAll(compressed, buf[:0])
+	data, err := dec.DecodeAll(compressedBuf, make([]byte, 0, frameSize.U))
 	if err != nil {
-		return 0, fmt.Errorf("failed to decompress: %w", err)
+		return nil, fmt.Errorf("failed to decompress frame at %d: %w", frameOffU, err)
 	}
 
-	return len(decompressed), nil
+	c.frameLRU.Put(frameOffU, int64(frameSize.U), data)
+
+	return data, nil
 }
 
 // Close releases all resources used by the chunker.
@@ -226,6 +193,7 @@ func (c *CompressedChunker) Close() error {
 	if c.frameLRU != nil {
 		c.frameLRU.Purge()
 	}
+
 	return nil
 }
 

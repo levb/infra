@@ -24,6 +24,7 @@ func compressTestBytes(t *testing.T, data []byte) []byte {
 	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
 	require.NoError(t, err)
 	defer enc.Close()
+
 	return enc.EncodeAll(data, nil)
 }
 
@@ -31,6 +32,7 @@ func testBlockMetrics(t *testing.T) blockmetrics.Metrics {
 	t.Helper()
 	m, err := blockmetrics.NewMetrics(noop.NewMeterProvider())
 	require.NoError(t, err)
+
 	return m
 }
 
@@ -66,10 +68,12 @@ func setupMockProvider(t *testing.T, frames map[int64][]byte, frameTable *storag
 				return storage.Range{}, err
 			}
 			n := copy(buf, decompressed)
+
 			return storage.Range{Start: offsetU, Length: n}, nil
 		}
 
 		n := copy(buf, data)
+
 		return storage.Range{Start: offsetU, Length: n}, nil
 	}).Maybe()
 
@@ -431,10 +435,12 @@ func TestStorageDiff_CompressedChunker_ConcurrentReads(t *testing.T) {
 			n, err := sd.ReadAt(ctx, buf, offset)
 			if err != nil {
 				errors <- err
+
 				return
 			}
 			if n != 100 {
 				errors <- assert.AnError
+
 				return
 			}
 			// Verify data
