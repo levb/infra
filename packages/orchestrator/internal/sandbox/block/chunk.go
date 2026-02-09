@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync/atomic"
-	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
@@ -80,15 +78,10 @@ func (c *Chunker) WriteTo(ctx context.Context, w io.Writer) (int64, error) {
 }
 
 func (c *Chunker) Slice(ctx context.Context, off, length int64) ([]byte, error) {
-	start := time.Now()
-	n := sliceLogCounter.Add(1)
 	timer := c.metrics.SlicesTimerFactory.Begin()
 
 	b, err := c.cache.Slice(off, length)
 	if err == nil {
-		if n%sliceLogEveryN == 0 {
-			fmt.Printf("[chunker] slice hit  off=%d len=%d dur=%s\n", off, length, time.Since(start))
-		}
 		timer.Success(ctx, length,
 			attribute.String(pullType, pullTypeLocal))
 
@@ -96,7 +89,6 @@ func (c *Chunker) Slice(ctx context.Context, off, length int64) ([]byte, error) 
 	}
 
 	if !errors.As(err, &BytesNotAvailableError{}) {
-		fmt.Printf("[chunker] slice fail off=%d len=%d dur=%s err=%v\n", off, length, time.Since(start), err)
 		timer.Failure(ctx, length,
 			attribute.String(pullType, pullTypeLocal),
 			attribute.String(failureReason, failureTypeLocalRead))
@@ -106,7 +98,6 @@ func (c *Chunker) Slice(ctx context.Context, off, length int64) ([]byte, error) 
 
 	chunkErr := c.fetchToCache(ctx, off, length)
 	if chunkErr != nil {
-		fmt.Printf("[chunker] slice fail off=%d len=%d dur=%s err=%v\n", off, length, time.Since(start), chunkErr)
 		timer.Failure(ctx, length,
 			attribute.String(pullType, pullTypeRemote),
 			attribute.String(failureReason, failureTypeCacheFetch))
@@ -116,7 +107,6 @@ func (c *Chunker) Slice(ctx context.Context, off, length int64) ([]byte, error) 
 
 	b, cacheErr := c.cache.Slice(off, length)
 	if cacheErr != nil {
-		fmt.Printf("[chunker] slice fail off=%d len=%d dur=%s err=%v\n", off, length, time.Since(start), cacheErr)
 		timer.Failure(ctx, length,
 			attribute.String(pullType, pullTypeLocal),
 			attribute.String(failureReason, failureTypeLocalReadAgain))
@@ -124,9 +114,6 @@ func (c *Chunker) Slice(ctx context.Context, off, length int64) ([]byte, error) 
 		return nil, fmt.Errorf("failed to read from cache after ensuring data at %d-%d: %w", off, off+length, cacheErr)
 	}
 
-	if n%sliceLogEveryN == 0 {
-		fmt.Printf("[chunker] slice miss off=%d len=%d dur=%s\n", off, length, time.Since(start))
-	}
 	timer.Success(ctx, length,
 		attribute.String(pullType, pullTypeRemote))
 
@@ -226,8 +213,4 @@ const (
 	failureTypeLocalReadAgain = "local-read-again"
 	failureTypeRemoteRead     = "remote-read"
 	failureTypeCacheFetch     = "cache-fetch"
-
-	sliceLogEveryN = 100
 )
-
-var sliceLogCounter atomic.Int64
