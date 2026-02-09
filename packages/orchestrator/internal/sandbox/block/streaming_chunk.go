@@ -191,9 +191,9 @@ func (c *StreamingChunker) ReadAt(ctx context.Context, b []byte, off int64) (int
 }
 
 func (c *StreamingChunker) WriteTo(ctx context.Context, w io.Writer) (int64, error) {
-	for i := int64(0); i < c.size; i += storage.MemoryChunkSize {
-		chunk := make([]byte, storage.MemoryChunkSize)
+	chunk := make([]byte, storage.MemoryChunkSize)
 
+	for i := int64(0); i < c.size; i += storage.MemoryChunkSize {
 		n, err := c.ReadAt(ctx, chunk, i)
 		if err != nil {
 			return 0, fmt.Errorf("failed to slice cache at %d-%d: %w", i, i+storage.MemoryChunkSize, err)

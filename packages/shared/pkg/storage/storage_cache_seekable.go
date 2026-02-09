@@ -144,21 +144,10 @@ func (c *cachedSeekable) OpenRangeReader(ctx context.Context, off, length int64)
 		recordCacheReadError(ctx, cacheTypeSeekable, cacheOpOpenRangeReader, err)
 	}
 
-	// Cache miss: get a reader from the inner backend
-	var inner io.ReadCloser
-	if sr, ok := c.inner.(StreamingReader); ok {
-		inner, err = sr.OpenRangeReader(ctx, off, length)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open inner range reader: %w", err)
-		}
-	} else {
-		// Fall back to ReadAt wrapped in a reader
-		buf := make([]byte, length)
-		n, readErr := c.inner.ReadAt(ctx, buf, off)
-		if ignoreEOF(readErr) != nil {
-			return nil, fmt.Errorf("failed to read for range reader: %w", readErr)
-		}
-		inner = io.NopCloser(bytes.NewReader(buf[:n]))
+	// Cache miss: delegate to the inner backend (Seekable embeds StreamingReader).
+	inner, err := c.inner.OpenRangeReader(ctx, off, length)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open inner range reader: %w", err)
 	}
 
 	recordCacheRead(ctx, false, length, cacheTypeSeekable, cacheOpOpenRangeReader)
