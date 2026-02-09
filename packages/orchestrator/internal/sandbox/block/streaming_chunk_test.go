@@ -540,14 +540,18 @@ func TestStreamingChunker_PanicRecovery(t *testing.T) {
 
 // --- Benchmarks ---
 //
-// Upstreams return data instantly (no sleep). Simulated latency is computed
-// analytically based on the offsets requested and a hypothetical per-block
-// network delay:
+// Uses a bandwidth-limited upstream with real time.Sleep to simulate GCS and
+// NFS backends. Measures actual wall-clock latency per caller.
 //
-//   Streaming model: caller at offset O waits (O/blockSize + 1) * perBlockDelay
-//   Bulk model:      every caller waits   (chunkSize/blockSize) * perBlockDelay
-
-const simulatedPerBlockDelay = 10 * time.Microsecond // ~10ms for a full 4MB chunk (1024 blocks)
+// Backend parameters (tuned to match observed production latencies):
+//   GCS: 20ms TTFB + 100 MB/s → 4MB chunk ≈ 62ms  (observed ~60ms)
+//   NFS:  1ms TTFB + 500 MB/s → 4MB chunk ≈  9ms  (observed ~9-10ms)
+//
+// All sub-benchmarks share a pre-generated offset sequence so results are
+// directly comparable across chunker types and backends.
+//
+// Recommended invocation (~1 minute):
+//   go test -bench BenchmarkRandomAccess -benchtime 150x -count=3 -run '^$' ./...
 
 func newBenchmarkMetrics(b *testing.B) metrics.Metrics {
 	b.Helper()
@@ -558,13 +562,89 @@ func newBenchmarkMetrics(b *testing.B) metrics.Metrics {
 	return m
 }
 
-// simulatedGCSDeliveryTime models GCS streaming: data arrives sequentially,
-// one block per simulatedPerBlockDelay. Returns the time until byte position
-// `pos` within a chunk has been delivered.
-func simulatedGCSDeliveryTime(pos, blockSize int64) time.Duration {
-	blockIndex := pos / blockSize
+// realisticUpstream simulates a storage backend with configurable time-to-first-byte
+// and bandwidth. ReadAt blocks for the full transfer duration (bulk fetch model).
+// OpenRangeReader returns a bandwidth-limited progressive reader.
+type realisticUpstream struct {
+	data        []byte
+	blockSize   int64
+	ttfb        time.Duration
+	bytesPerSec float64
+}
 
-	return time.Duration(blockIndex+1) * simulatedPerBlockDelay
+var (
+	_ storage.SeekableReader  = (*realisticUpstream)(nil)
+	_ storage.StreamingReader = (*realisticUpstream)(nil)
+)
+
+func (u *realisticUpstream) ReadAt(_ context.Context, buffer []byte, off int64) (int, error) {
+	transferTime := time.Duration(float64(len(buffer)) / u.bytesPerSec * float64(time.Second))
+	time.Sleep(u.ttfb + transferTime)
+
+	end := min(off+int64(len(buffer)), int64(len(u.data)))
+	n := copy(buffer, u.data[off:end])
+
+	return n, nil
+}
+
+func (u *realisticUpstream) Size(_ context.Context) (int64, error) {
+	return int64(len(u.data)), nil
+}
+
+func (u *realisticUpstream) OpenRangeReader(_ context.Context, off, length int64) (io.ReadCloser, error) {
+	end := min(off+length, int64(len(u.data)))
+
+	return &bandwidthReader{
+		data:        u.data[off:end],
+		blockSize:   int(u.blockSize),
+		ttfb:        u.ttfb,
+		bytesPerSec: u.bytesPerSec,
+	}, nil
+}
+
+// bandwidthReader delivers data at a steady rate after an initial TTFB delay.
+// Uses cumulative timing (time since first byte) so OS scheduling jitter does
+// not compound across blocks.
+type bandwidthReader struct {
+	data        []byte
+	pos         int
+	blockSize   int
+	ttfb        time.Duration
+	bytesPerSec float64
+	startTime   time.Time
+	started     bool
+}
+
+func (r *bandwidthReader) Read(p []byte) (int, error) {
+	if !r.started {
+		r.started = true
+		time.Sleep(r.ttfb)
+		r.startTime = time.Now()
+	}
+
+	if r.pos >= len(r.data) {
+		return 0, io.EOF
+	}
+
+	end := min(r.pos+r.blockSize, len(r.data))
+	n := copy(p, r.data[r.pos:end])
+	r.pos += n
+
+	// Enforce bandwidth: sleep until this many bytes should have arrived.
+	expectedArrival := r.startTime.Add(time.Duration(float64(r.pos) / r.bytesPerSec * float64(time.Second)))
+	if wait := time.Until(expectedArrival); wait > 0 {
+		time.Sleep(wait)
+	}
+
+	if r.pos >= len(r.data) {
+		return n, io.EOF
+	}
+
+	return n, nil
+}
+
+func (r *bandwidthReader) Close() error {
+	return nil
 }
 
 type benchChunker interface {
@@ -575,84 +655,121 @@ type benchChunker interface {
 func BenchmarkRandomAccess(b *testing.B) {
 	size := int64(storage.MemoryChunkSize)
 	data := make([]byte, size)
-	upstream := &fastUpstream{data: data, blockSize: testBlockSize}
 
-	tcs := []struct {
+	backends := []struct {
+		name     string
+		upstream *realisticUpstream
+	}{
+		{
+			name: "GCS",
+			upstream: &realisticUpstream{
+				data:        data,
+				blockSize:   testBlockSize,
+				ttfb:        20 * time.Millisecond,
+				bytesPerSec: 100e6, // 100 MB/s — full 4MB chunk ≈ 62ms (observed ~60ms)
+			},
+		},
+		{
+			name: "NFS",
+			upstream: &realisticUpstream{
+				data:        data,
+				blockSize:   testBlockSize,
+				ttfb:        1 * time.Millisecond,
+				bytesPerSec: 500e6, // 500 MB/s — full 4MB chunk ≈ 9ms (observed ~9-10ms)
+			},
+		},
+	}
+
+	chunkerTypes := []struct {
 		name       string
-		newChunker func(b *testing.B, m metrics.Metrics) benchChunker
-		simLatency func(offsets []int64) float64
+		newChunker func(b *testing.B, m metrics.Metrics, upstream *realisticUpstream) benchChunker
 	}{
 		{
 			name: "StreamingChunker",
-			newChunker: func(b *testing.B, m metrics.Metrics) benchChunker {
+			newChunker: func(b *testing.B, m metrics.Metrics, upstream *realisticUpstream) benchChunker {
 				b.Helper()
 				c, err := NewStreamingChunker(size, testBlockSize, upstream, b.TempDir()+"/cache", m)
 				require.NoError(b, err)
 
 				return c
 			},
-			simLatency: func(offsets []int64) float64 {
-				// Each caller returns when GCS has delivered their block position.
-				var total time.Duration
-				for _, off := range offsets {
-					total += simulatedGCSDeliveryTime(off%size, testBlockSize)
-				}
-
-				return float64(total.Microseconds()) / float64(len(offsets))
-			},
 		},
 		{
 			name: "Chunker",
-			newChunker: func(b *testing.B, m metrics.Metrics) benchChunker {
+			newChunker: func(b *testing.B, m metrics.Metrics, upstream *realisticUpstream) benchChunker {
 				b.Helper()
 				c, err := NewChunker(size, testBlockSize, upstream, b.TempDir()+"/cache", m)
 				require.NoError(b, err)
 
 				return c
 			},
-			simLatency: func(offsets []int64) float64 {
-				// Every caller waits for the full chunk (last block delivered).
-				var total time.Duration
-				for range offsets {
-					total += simulatedGCSDeliveryTime(size-testBlockSize, testBlockSize)
-				}
-
-				return float64(total.Microseconds()) / float64(len(offsets))
-			},
 		},
 	}
 
-	for _, tc := range tcs {
-		b.Run(tc.name, func(b *testing.B) {
-			m := newBenchmarkMetrics(b)
-			numBlocks := size / testBlockSize
-			rng := mathrand.New(mathrand.NewPCG(42, 0))
-			const numCallers = 20
+	// Realistic concurrency: UFFD faults are limited by vCPU count (typically
+	// 1-2 for Firecracker VMs) and NBD requests are largely sequential.
+	const numCallers = 3
 
-			// Suppress default ns/op metric — only simulated latency matters.
-			b.ReportMetric(0, "ns/op")
+	// Pre-generate a fixed sequence of random offsets so all sub-benchmarks
+	// use identical access patterns, making results directly comparable.
+	const maxIters = 500
+	numBlocks := size / testBlockSize
+	rng := mathrand.New(mathrand.NewPCG(42, 0))
 
-			for range b.N {
-				offsets := make([]int64, numCallers)
-				for j := range offsets {
-					offsets[j] = rng.Int64N(numBlocks) * testBlockSize
+	allOffsets := make([][]int64, maxIters)
+	for i := range allOffsets {
+		offsets := make([]int64, numCallers)
+		for j := range offsets {
+			offsets[j] = rng.Int64N(numBlocks) * testBlockSize
+		}
+		allOffsets[i] = offsets
+	}
+
+	for _, backend := range backends {
+		for _, ct := range chunkerTypes {
+			b.Run(backend.name+"/"+ct.name, func(b *testing.B) {
+				m := newBenchmarkMetrics(b)
+
+				b.ReportMetric(0, "ns/op")
+
+				var sumAvg, sumMax float64
+
+				for i := range b.N {
+					offsets := allOffsets[i%maxIters]
+
+					chunker := ct.newChunker(b, m, backend.upstream)
+
+					latencies := make([]time.Duration, numCallers)
+
+					var eg errgroup.Group
+					for ci, off := range offsets {
+						eg.Go(func() error {
+							start := time.Now()
+							_, err := chunker.Slice(context.Background(), off, testBlockSize)
+							latencies[ci] = time.Since(start)
+
+							return err
+						})
+					}
+					require.NoError(b, eg.Wait())
+
+					var totalLatency time.Duration
+					var maxLatency time.Duration
+					for _, l := range latencies {
+						totalLatency += l
+						maxLatency = max(maxLatency, l)
+					}
+
+					avgUs := float64(totalLatency.Microseconds()) / float64(numCallers)
+					sumAvg += avgUs
+					sumMax = max(sumMax, float64(maxLatency.Microseconds()))
+
+					chunker.Close()
 				}
 
-				chunker := tc.newChunker(b, m)
-
-				var eg errgroup.Group
-				for _, off := range offsets {
-					eg.Go(func() error {
-						_, err := chunker.Slice(context.Background(), off, testBlockSize)
-
-						return err
-					})
-				}
-				require.NoError(b, eg.Wait())
-
-				b.ReportMetric(tc.simLatency(offsets), "simulated-avg-us/caller")
-				chunker.Close()
-			}
-		})
+				b.ReportMetric(sumAvg/float64(b.N), "avg-us/caller")
+				b.ReportMetric(sumMax, "worst-us/caller")
+			})
+		}
 	}
 }
