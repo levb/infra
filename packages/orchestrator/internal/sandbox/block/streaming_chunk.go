@@ -209,11 +209,16 @@ func (c *StreamingChunker) WriteTo(ctx context.Context, w io.Writer) (int64, err
 }
 
 func (c *StreamingChunker) Slice(ctx context.Context, off, length int64) ([]byte, error) {
+	start := time.Now()
+	n := sliceLogCounter.Add(1)
 	timer := c.metrics.SlicesTimerFactory.Begin()
 
 	// Fast path: already cached
 	b, err := c.cache.Slice(off, length)
 	if err == nil {
+		if n%sliceLogEveryN == 0 {
+			fmt.Printf("[streaming] slice hit  off=%d len=%d dur=%s\n", off, length, time.Since(start))
+		}
 		timer.Success(ctx, length,
 			attribute.String(pullType, pullTypeLocal))
 
@@ -221,6 +226,7 @@ func (c *StreamingChunker) Slice(ctx context.Context, off, length int64) ([]byte
 	}
 
 	if !errors.As(err, &BytesNotAvailableError{}) {
+		fmt.Printf("[streaming] slice fail off=%d len=%d dur=%s err=%v\n", off, length, time.Since(start), err)
 		timer.Failure(ctx, length,
 			attribute.String(pullType, pullTypeLocal),
 			attribute.String(failureReason, failureTypeLocalRead))
@@ -253,6 +259,7 @@ func (c *StreamingChunker) Slice(ctx context.Context, off, length int64) ([]byte
 	}
 
 	if err := eg.Wait(); err != nil {
+		fmt.Printf("[streaming] slice fail off=%d len=%d dur=%s err=%v\n", off, length, time.Since(start), err)
 		timer.Failure(ctx, length,
 			attribute.String(pullType, pullTypeRemote),
 			attribute.String(failureReason, failureTypeCacheFetch))
@@ -262,6 +269,7 @@ func (c *StreamingChunker) Slice(ctx context.Context, off, length int64) ([]byte
 
 	b, cacheErr := c.cache.Slice(off, length)
 	if cacheErr != nil {
+		fmt.Printf("[streaming] slice fail off=%d len=%d dur=%s err=%v\n", off, length, time.Since(start), cacheErr)
 		timer.Failure(ctx, length,
 			attribute.String(pullType, pullTypeLocal),
 			attribute.String(failureReason, failureTypeLocalReadAgain))
@@ -269,6 +277,9 @@ func (c *StreamingChunker) Slice(ctx context.Context, off, length int64) ([]byte
 		return nil, fmt.Errorf("failed to read from cache after ensuring data at %d-%d: %w", off, off+length, cacheErr)
 	}
 
+	if n%sliceLogEveryN == 0 {
+		fmt.Printf("[streaming] slice miss off=%d len=%d dur=%s\n", off, length, time.Since(start))
+	}
 	timer.Success(ctx, length,
 		attribute.String(pullType, pullTypeRemote))
 
