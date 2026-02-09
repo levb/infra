@@ -133,6 +133,7 @@ func (c *cachedSeekable) OpenRangeReader(ctx context.Context, off, length int64)
 	fp, err := os.Open(chunkPath)
 	if err == nil {
 		recordCacheRead(ctx, true, length, cacheTypeSeekable, cacheOpOpenRangeReader)
+
 		return &fsRangeReadCloser{
 			Reader: io.NewSectionReader(fp, 0, length),
 			file:   fp,
@@ -179,7 +180,7 @@ type cacheWriteThroughReader struct {
 	inner     io.ReadCloser
 	buf       *bytes.Buffer
 	cache     *cachedSeekable
-	ctx       context.Context
+	ctx       context.Context //nolint:containedctx // needed for async cache write-back in Close
 	off       int64
 	chunkPath string
 }
@@ -189,6 +190,7 @@ func (r *cacheWriteThroughReader) Read(p []byte) (int, error) {
 	if n > 0 {
 		r.buf.Write(p[:n])
 	}
+
 	return n, err
 }
 

@@ -29,6 +29,7 @@ var (
 
 type fsRangeReadCloser struct {
 	io.Reader
+
 	file *os.File
 }
 

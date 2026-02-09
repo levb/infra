@@ -41,6 +41,7 @@ var (
 func (s *slowUpstream) ReadAt(_ context.Context, buffer []byte, off int64) (int, error) {
 	end := min(off+int64(len(buffer)), int64(len(s.data)))
 	n := copy(buffer, s.data[off:end])
+
 	return n, nil
 }
 
@@ -210,7 +211,7 @@ func TestStreamingChunker_CacheHit(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	firstCount := readCount.Load()
-	require.Greater(t, firstCount, int64(0))
+	require.Positive(t, firstCount)
 
 	// Second read: should hit cache
 	slice, err := chunker.Slice(t.Context(), 0, testBlockSize)
@@ -233,6 +234,7 @@ var (
 
 func (c *countingUpstream) ReadAt(ctx context.Context, buffer []byte, off int64) (int, error) {
 	c.readCount.Add(1)
+
 	return c.inner.ReadAt(ctx, buffer, off)
 }
 
@@ -242,6 +244,7 @@ func (c *countingUpstream) Size(ctx context.Context) (int64, error) {
 
 func (c *countingUpstream) OpenRangeReader(ctx context.Context, off, length int64) (io.ReadCloser, error) {
 	c.readCount.Add(1)
+
 	return c.inner.OpenRangeReader(ctx, off, length)
 }
 
@@ -282,6 +285,7 @@ func TestStreamingChunker_ConcurrentSameChunk(t *testing.T) {
 			}
 			results[i] = make([]byte, len(slice))
 			copy(results[i], slice)
+
 			return nil
 		})
 	}
@@ -456,6 +460,84 @@ func TestStreamingChunker_MultiChunkSlice(t *testing.T) {
 	require.Equal(t, data[off:off+int64(length)], slice)
 }
 
+// panicUpstream panics during Read after delivering a configurable number of bytes.
+type panicUpstream struct {
+	data       []byte
+	blockSize  int64
+	panicAfter int64 // byte offset at which to panic (0 = panic immediately)
+}
+
+var _ storage.StreamingReader = (*panicUpstream)(nil)
+
+func (u *panicUpstream) OpenRangeReader(_ context.Context, off, length int64) (io.ReadCloser, error) {
+	end := min(off+length, int64(len(u.data)))
+
+	return &panicReader{
+		data:       u.data[off:end],
+		blockSize:  int(u.blockSize),
+		panicAfter: int(u.panicAfter - off),
+	}, nil
+}
+
+type panicReader struct {
+	data       []byte
+	pos        int
+	blockSize  int
+	panicAfter int
+}
+
+func (r *panicReader) Read(p []byte) (int, error) {
+	if r.pos >= r.panicAfter {
+		panic("simulated upstream panic")
+	}
+
+	if r.pos >= len(r.data) {
+		return 0, io.EOF
+	}
+
+	end := min(r.pos+r.blockSize, len(r.data))
+	n := copy(p, r.data[r.pos:end])
+	r.pos += n
+
+	return n, nil
+}
+
+func (r *panicReader) Close() error {
+	return nil
+}
+
+func TestStreamingChunker_PanicRecovery(t *testing.T) {
+	t.Parallel()
+
+	data := makeTestData(t, storage.MemoryChunkSize)
+	panicAt := int64(storage.MemoryChunkSize / 2) // Panic at 2MB
+
+	upstream := &panicUpstream{
+		data:       data,
+		blockSize:  testBlockSize,
+		panicAfter: panicAt,
+	}
+
+	chunker, err := NewStreamingChunker(
+		int64(len(data)), testBlockSize,
+		upstream, t.TempDir()+"/cache",
+		newTestMetrics(t),
+	)
+	require.NoError(t, err)
+	defer chunker.Close()
+
+	// Request data past the panic point — should get an error, not hang or crash
+	lastOff := int64(storage.MemoryChunkSize) - testBlockSize
+	_, err = chunker.Slice(t.Context(), lastOff, testBlockSize)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "panicked")
+
+	// Data before the panic point should still be cached
+	slice, err := chunker.Slice(t.Context(), 0, testBlockSize)
+	require.NoError(t, err)
+	require.Equal(t, data[:testBlockSize], slice)
+}
+
 // --- Benchmarks ---
 //
 // Upstreams return data instantly (no sleep). Simulated latency is computed
@@ -481,6 +563,7 @@ func newBenchmarkMetrics(b *testing.B) metrics.Metrics {
 // `pos` within a chunk has been delivered.
 func simulatedGCSDeliveryTime(pos, blockSize int64) time.Duration {
 	blockIndex := pos / blockSize
+
 	return time.Duration(blockIndex+1) * simulatedPerBlockDelay
 }
 
@@ -495,15 +578,17 @@ func BenchmarkRandomAccess(b *testing.B) {
 	upstream := &fastUpstream{data: data, blockSize: testBlockSize}
 
 	tcs := []struct {
-		name        string
-		newChunker  func(b *testing.B, m metrics.Metrics) benchChunker
-		simLatency  func(offsets []int64) float64
+		name       string
+		newChunker func(b *testing.B, m metrics.Metrics) benchChunker
+		simLatency func(offsets []int64) float64
 	}{
 		{
 			name: "StreamingChunker",
 			newChunker: func(b *testing.B, m metrics.Metrics) benchChunker {
+				b.Helper()
 				c, err := NewStreamingChunker(size, testBlockSize, upstream, b.TempDir()+"/cache", m)
 				require.NoError(b, err)
+
 				return c
 			},
 			simLatency: func(offsets []int64) float64 {
@@ -512,14 +597,17 @@ func BenchmarkRandomAccess(b *testing.B) {
 				for _, off := range offsets {
 					total += simulatedGCSDeliveryTime(off%size, testBlockSize)
 				}
+
 				return float64(total.Microseconds()) / float64(len(offsets))
 			},
 		},
 		{
 			name: "Chunker",
 			newChunker: func(b *testing.B, m metrics.Metrics) benchChunker {
+				b.Helper()
 				c, err := NewChunker(size, testBlockSize, upstream, b.TempDir()+"/cache", m)
 				require.NoError(b, err)
+
 				return c
 			},
 			simLatency: func(offsets []int64) float64 {
@@ -528,6 +616,7 @@ func BenchmarkRandomAccess(b *testing.B) {
 				for range offsets {
 					total += simulatedGCSDeliveryTime(size-testBlockSize, testBlockSize)
 				}
+
 				return float64(total.Microseconds()) / float64(len(offsets))
 			},
 		},
@@ -543,7 +632,7 @@ func BenchmarkRandomAccess(b *testing.B) {
 			// Suppress default ns/op metric — only simulated latency matters.
 			b.ReportMetric(0, "ns/op")
 
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				offsets := make([]int64, numCallers)
 				for j := range offsets {
 					offsets[j] = rng.Int64N(numBlocks) * testBlockSize
@@ -555,6 +644,7 @@ func BenchmarkRandomAccess(b *testing.B) {
 				for _, off := range offsets {
 					eg.Go(func() error {
 						_, err := chunker.Slice(context.Background(), off, testBlockSize)
+
 						return err
 					})
 				}
@@ -566,4 +656,3 @@ func BenchmarkRandomAccess(b *testing.B) {
 		})
 	}
 }
-

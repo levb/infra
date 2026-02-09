@@ -1,11 +1,14 @@
 package block
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/errgroup"
@@ -14,10 +17,18 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
+const (
+	// defaultFetchTimeout is the maximum time a single 4MB chunk fetch may take.
+	// Acts as a safety net: if the upstream hangs, the goroutine won't live forever.
+	defaultFetchTimeout = 60 * time.Second
+)
+
 type rangeWaiter struct {
-	off    int64
-	length int64
-	ch     chan error // buffered cap 1
+	// endByte is the byte offset (relative to chunkOff) at which this waiter's
+	// entire requested range is cached. Equal to the end of the last block
+	// overlapping the requested range. Always a multiple of blockSize.
+	endByte int64
+	ch      chan error // buffered cap 1
 }
 
 const (
@@ -31,47 +42,70 @@ type fetchSession struct {
 	chunkOff int64
 	chunkLen int64
 	cache    *Cache
-	waiters  []*rangeWaiter
+	waiters  []*rangeWaiter // sorted by endByte ascending
 	state    int
 	fetchErr error
+
+	// bytesReady is the byte count (from chunkOff) up to which all blocks are
+	// fully written to mmap and marked cached. Always a multiple of blockSize
+	// during progressive reads. Used to cheaply determine which sorted waiters
+	// are satisfied without calling isCached.
+	bytesReady int64
 }
 
 // registerAndWait adds a waiter for the given range and blocks until the range
 // is cached or the context is cancelled. Returns nil if the range was already
 // cached before registering.
 func (s *fetchSession) registerAndWait(ctx context.Context, off, length int64) error {
+	blockSize := s.cache.BlockSize()
+	// endByte is the byte offset (relative to chunkOff) past which all blocks
+	// covering [off, off+length) are fully cached.
+	lastBlockIdx := (off + length - 1 - s.chunkOff) / blockSize
+	endByte := (lastBlockIdx + 1) * blockSize
+
 	s.mu.Lock()
 
-	// Fast path: already cached
+	// Fast path: already cached (handles pre-existing cache from prior sessions).
 	if s.cache.isCached(off, length) {
 		s.mu.Unlock()
+
 		return nil
 	}
 
-	// Session already done
+	// Session already done — all data that will ever be fetched is in cache.
+	// Unlock first: once state is Done no goroutine mutates the dirty map for
+	// this chunk, so isCached is safe to call without the session lock.
 	if s.state == fetchStateDone {
 		s.mu.Unlock()
 		if s.cache.isCached(off, length) {
 			return nil
 		}
+
 		return fmt.Errorf("fetch completed but range %d-%d not cached", off, off+length)
 	}
 
-	// Session errored
+	// Session errored — partial data may still be usable.
 	if s.state == fetchStateErrored {
+		fetchErr := s.fetchErr
 		s.mu.Unlock()
 		if s.cache.isCached(off, length) {
 			return nil
 		}
-		return fmt.Errorf("fetch failed: %w", s.fetchErr)
+
+		return fmt.Errorf("fetch failed: %w", fetchErr)
 	}
 
 	w := &rangeWaiter{
-		off:    off,
-		length: length,
-		ch:     make(chan error, 1),
+		endByte: endByte,
+		ch:      make(chan error, 1),
 	}
-	s.waiters = append(s.waiters, w)
+
+	// Insert in sorted order so notifyWaiters can iterate front-to-back.
+	idx, _ := slices.BinarySearchFunc(s.waiters, endByte, func(w *rangeWaiter, target int64) int {
+		return cmp.Compare(w.endByte, target)
+	})
+	s.waiters = slices.Insert(s.waiters, idx, w)
+
 	s.mu.Unlock()
 
 	select {
@@ -82,31 +116,43 @@ func (s *fetchSession) registerAndWait(ctx context.Context, off, length int64) e
 	}
 }
 
-// notifyWaiters checks all waiters and notifies those whose ranges are now cached.
+// notifyWaiters notifies waiters whose ranges are satisfied.
+//
+// Because waiters are sorted by endByte and the fetch fills the chunk
+// sequentially, we only need to walk from the front until we hit a waiter
+// whose endByte exceeds bytesReady — all subsequent waiters are unsatisfied.
+//
+// In terminal states (done/errored) all remaining waiters are notified.
+// Must be called with s.mu held.
 func (s *fetchSession) notifyWaiters(sendErr error) {
-	remaining := s.waiters[:0]
-	for _, w := range s.waiters {
-		if sendErr != nil {
-			if s.cache.isCached(w.off, w.length) {
-				w.ch <- nil
-			} else {
+	// Terminal: notify every remaining waiter.
+	if s.state != fetchStateRunning {
+		for _, w := range s.waiters {
+			if sendErr != nil && w.endByte > s.bytesReady {
 				w.ch <- sendErr
+			} else {
+				w.ch <- nil
 			}
-			continue
 		}
-		if s.cache.isCached(w.off, w.length) {
-			w.ch <- nil
-			continue
-		}
-		remaining = append(remaining, w)
+		s.waiters = nil
+
+		return
 	}
-	s.waiters = remaining
+
+	// Progress: pop satisfied waiters from the sorted front.
+	i := 0
+	for i < len(s.waiters) && s.waiters[i].endByte <= s.bytesReady {
+		s.waiters[i].ch <- nil
+		i++
+	}
+	s.waiters = s.waiters[i:]
 }
 
 type StreamingChunker struct {
-	base    storage.StreamingReader
-	cache   *Cache
-	metrics metrics.Metrics
+	upstream     storage.StreamingReader
+	cache        *Cache
+	metrics      metrics.Metrics
+	fetchTimeout time.Duration
 
 	size int64
 
@@ -116,7 +162,7 @@ type StreamingChunker struct {
 
 func NewStreamingChunker(
 	size, blockSize int64,
-	base storage.StreamingReader,
+	upstream storage.StreamingReader,
 	cachePath string,
 	metrics metrics.Metrics,
 ) (*StreamingChunker, error) {
@@ -126,11 +172,12 @@ func NewStreamingChunker(
 	}
 
 	return &StreamingChunker{
-		size:     size,
-		base:     base,
-		cache:    cache,
-		metrics:  metrics,
-		fetchMap: make(map[int64]*fetchSession),
+		size:         size,
+		upstream:     upstream,
+		cache:        cache,
+		metrics:      metrics,
+		fetchTimeout: defaultFetchTimeout,
+		fetchMap:     make(map[int64]*fetchSession),
 	}, nil
 }
 
@@ -169,6 +216,7 @@ func (c *StreamingChunker) Slice(ctx context.Context, off, length int64) ([]byte
 	if err == nil {
 		timer.Success(ctx, length,
 			attribute.String(pullType, pullTypeLocal))
+
 		return b, nil
 	}
 
@@ -176,6 +224,7 @@ func (c *StreamingChunker) Slice(ctx context.Context, off, length int64) ([]byte
 		timer.Failure(ctx, length,
 			attribute.String(pullType, pullTypeLocal),
 			attribute.String(failureReason, failureTypeLocalRead))
+
 		return nil, fmt.Errorf("failed read from cache at offset %d: %w", off, err)
 	}
 
@@ -197,7 +246,8 @@ func (c *StreamingChunker) Slice(ctx context.Context, off, length int64) ([]byte
 				return nil
 			}
 
-			session := c.getOrCreateSession(fetchOff)
+			session := c.getOrCreateSession(ctx, fetchOff)
+
 			return session.registerAndWait(ctx, clippedOff, clippedLen)
 		})
 	}
@@ -206,6 +256,7 @@ func (c *StreamingChunker) Slice(ctx context.Context, off, length int64) ([]byte
 		timer.Failure(ctx, length,
 			attribute.String(pullType, pullTypeRemote),
 			attribute.String(failureReason, failureTypeCacheFetch))
+
 		return nil, fmt.Errorf("failed to ensure data at %d-%d: %w", off, off+length, err)
 	}
 
@@ -214,6 +265,7 @@ func (c *StreamingChunker) Slice(ctx context.Context, off, length int64) ([]byte
 		timer.Failure(ctx, length,
 			attribute.String(pullType, pullTypeLocal),
 			attribute.String(failureReason, failureTypeLocalReadAgain))
+
 		return nil, fmt.Errorf("failed to read from cache after ensuring data at %d-%d: %w", off, off+length, cacheErr)
 	}
 
@@ -223,7 +275,7 @@ func (c *StreamingChunker) Slice(ctx context.Context, off, length int64) ([]byte
 	return b, nil
 }
 
-func (c *StreamingChunker) getOrCreateSession(fetchOff int64) *fetchSession {
+func (c *StreamingChunker) getOrCreateSession(ctx context.Context, fetchOff int64) *fetchSession {
 	s := &fetchSession{
 		chunkOff: fetchOff,
 		chunkLen: min(int64(storage.MemoryChunkSize), c.size-fetchOff),
@@ -240,16 +292,38 @@ func (c *StreamingChunker) getOrCreateSession(fetchOff int64) *fetchSession {
 	c.fetchMap[fetchOff] = s
 	c.fetchMu.Unlock()
 
-	go c.runFetch(s)
+	// Detach from the caller's cancel signal so the shared fetch goroutine
+	// continues even if the first caller's context is cancelled. Trace/value
+	// context is preserved for metrics.
+	go c.runFetch(context.WithoutCancel(ctx), s)
 
 	return s
 }
 
-func (c *StreamingChunker) runFetch(s *fetchSession) {
+func (c *StreamingChunker) runFetch(ctx context.Context, s *fetchSession) {
+	ctx, cancel := context.WithTimeout(ctx, c.fetchTimeout)
+	defer cancel()
+
 	defer func() {
 		c.fetchMu.Lock()
 		delete(c.fetchMap, s.chunkOff)
 		c.fetchMu.Unlock()
+	}()
+
+	// Panic recovery: ensure waiters are always notified even if the fetch
+	// goroutine panics (e.g. nil pointer in upstream reader, mmap fault).
+	// Without this, waiters would block forever on their channels.
+	defer func() {
+		if r := recover(); r != nil {
+			err := fmt.Errorf("fetch panicked: %v", r)
+			s.mu.Lock()
+			if s.state == fetchStateRunning {
+				s.state = fetchStateErrored
+				s.fetchErr = err
+				s.notifyWaiters(err)
+			}
+			s.mu.Unlock()
+		}
 	}()
 
 	mmapSlice, releaseLock, err := c.cache.addressBytes(s.chunkOff, s.chunkLen)
@@ -266,10 +340,9 @@ func (c *StreamingChunker) runFetch(s *fetchSession) {
 
 	fetchTimer := c.metrics.RemoteReadsTimerFactory.Begin()
 
-	err = c.progressiveRead(s, mmapSlice)
-
+	err = c.progressiveRead(ctx, s, mmapSlice)
 	if err != nil {
-		fetchTimer.Failure(context.Background(), s.chunkLen,
+		fetchTimer.Failure(ctx, s.chunkLen,
 			attribute.String(failureReason, failureTypeRemoteRead))
 
 		s.mu.Lock()
@@ -281,7 +354,7 @@ func (c *StreamingChunker) runFetch(s *fetchSession) {
 		return
 	}
 
-	fetchTimer.Success(context.Background(), s.chunkLen)
+	fetchTimer.Success(ctx, s.chunkLen)
 
 	s.mu.Lock()
 	s.state = fetchStateDone
@@ -289,9 +362,8 @@ func (c *StreamingChunker) runFetch(s *fetchSession) {
 	s.mu.Unlock()
 }
 
-func (c *StreamingChunker) progressiveRead(s *fetchSession, mmapSlice []byte) error {
-	// Use background context so the fetch continues even if the original caller cancels
-	reader, err := c.base.OpenRangeReader(context.Background(), s.chunkOff, s.chunkLen)
+func (c *StreamingChunker) progressiveRead(ctx context.Context, s *fetchSession, mmapSlice []byte) error {
+	reader, err := c.upstream.OpenRangeReader(ctx, s.chunkOff, s.chunkLen)
 	if err != nil {
 		return fmt.Errorf("failed to open range reader at %d: %w", s.chunkOff, err)
 	}
@@ -315,6 +387,7 @@ func (c *StreamingChunker) progressiveRead(s *fetchSession, mmapSlice []byte) er
 			prevCompleted = completedBlocks
 
 			s.mu.Lock()
+			s.bytesReady = completedBlocks * blockSize
 			s.notifyWaiters(nil)
 			s.mu.Unlock()
 		}
@@ -323,11 +396,8 @@ func (c *StreamingChunker) progressiveRead(s *fetchSession, mmapSlice []byte) er
 			// Mark final partial block if any
 			if totalRead > prevCompleted*blockSize {
 				c.cache.setIsCached(s.chunkOff+prevCompleted*blockSize, totalRead-prevCompleted*blockSize)
-
-				s.mu.Lock()
-				s.notifyWaiters(nil)
-				s.mu.Unlock()
 			}
+			// Remaining waiters are notified in runFetch via the Done state.
 			break
 		}
 
@@ -338,8 +408,6 @@ func (c *StreamingChunker) progressiveRead(s *fetchSession, mmapSlice []byte) er
 
 	return nil
 }
-
-
 
 func (c *StreamingChunker) Close() error {
 	return c.cache.Close()

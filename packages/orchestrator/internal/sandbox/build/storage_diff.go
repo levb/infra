@@ -16,7 +16,7 @@ func storagePath(buildId string, diffType DiffType) string {
 }
 
 type StorageDiff struct {
-	chunker           *utils.SetOnce[*block.StreamingChunker]
+	chunker           *utils.SetOnce[*block.Chunker]
 	cachePath         string
 	cacheKey          DiffStoreKey
 	storagePath       string
@@ -57,7 +57,7 @@ func newStorageDiff(
 		storagePath:       storagePath,
 		storageObjectType: storageObjectType,
 		cachePath:         cachePath,
-		chunker:           utils.NewSetOnce[*block.StreamingChunker](),
+		chunker:           utils.NewSetOnce[*block.Chunker](),
 		blockSize:         blockSize,
 		metrics:           metrics,
 		persistence:       persistence,
@@ -94,7 +94,7 @@ func (b *StorageDiff) Init(ctx context.Context) error {
 		return errMsg
 	}
 
-	chunker, err := block.NewStreamingChunker(size, b.blockSize, obj, b.cachePath, b.metrics)
+	chunker, err := block.NewChunker(size, b.blockSize, obj, b.cachePath, b.metrics)
 	if err != nil {
 		errMsg := fmt.Errorf("failed to create chunker: %w", err)
 		b.chunker.SetError(errMsg)
