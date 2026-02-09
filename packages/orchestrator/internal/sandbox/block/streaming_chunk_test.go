@@ -695,10 +695,10 @@ func BenchmarkRandomAccess(b *testing.B) {
 			},
 		},
 		{
-			name: "Chunker",
+			name: "FullFetchChunker",
 			newChunker: func(b *testing.B, m metrics.Metrics, upstream *realisticUpstream) benchChunker {
 				b.Helper()
-				c, err := NewChunker(size, testBlockSize, upstream, b.TempDir()+"/cache", m)
+				c, err := NewFullFetchChunker(size, testBlockSize, upstream, b.TempDir()+"/cache", m)
 				require.NoError(b, err)
 
 				return c
