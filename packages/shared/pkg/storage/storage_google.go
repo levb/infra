@@ -12,7 +12,6 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/googleapis/gax-go/v2"
-	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
@@ -33,11 +32,8 @@ const (
 	googleMaxAttempts              = 10
 	gcloudDefaultUploadConcurrency = 16
 
-	gcsOperationAttr       = "operation"
-	gcsOperationAttrReadAt = "ReadAt"
-	gcsOperationAttrWrite  = "Write"
-	gcsOperationAttrStore  = "Store"
-	gcsOperationAttrUpload = "WriteFromFileSystemOneShot"
+	gcsOperationAttr      = "operation"
+	gcsOperationAttrStore = "Store"
 )
 
 var googleWriteTimerFactory = utils.Must(telemetry.NewTimerFactory(meter,
@@ -161,9 +157,6 @@ func (g *GCP) RawSize(ctx context.Context, path string) (n int64, err error) {
 }
 
 func (g *GCP) Upload(ctx context.Context, path string, in io.Reader) (n int64, e error) {
-	timer := googleWriteTimerFactory.Begin(
-		attribute.String(gcsOperationAttr, gcsOperationAttrWrite))
-
 	w := g.handle(path).NewWriter(ctx)
 	defer func() {
 		if err := w.Close(); err != nil {
@@ -173,12 +166,8 @@ func (g *GCP) Upload(ctx context.Context, path string, in io.Reader) (n int64, e
 
 	c, err := io.Copy(w, in)
 	if ignoreEOF(err) != nil {
-		timer.Failure(ctx, c)
-
 		return c, fmt.Errorf("failed to write to %q: %w", path, err)
 	}
-
-	timer.Success(ctx, c)
 
 	return c, nil
 }

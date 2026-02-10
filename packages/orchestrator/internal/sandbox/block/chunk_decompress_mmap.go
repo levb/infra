@@ -176,18 +176,12 @@ func (c *DecompressMMapChunker) fetchDecompressToCache(ctx context.Context, off,
 				}
 				defer releaseCacheCloseLock()
 
-				fetchSW := c.metrics.RemoteReadsTimerFactory.Begin()
-
 				_, err = c.storage.GetFrame(ctx, c.objectPath, fetchOff, framesToFetch, true, b)
 				if err != nil {
-					fetchSW.Failure(ctx, int64(len(b)),
-						attribute.String(failureReason, failureTypeRemoteRead))
-
 					return nil, fmt.Errorf("failed to read frame from base %d: %w", fetchOff, err)
 				}
 
 				c.cache.setIsCached(fetchOff, int64(frameSize))
-				fetchSW.Success(ctx, int64(len(b)))
 
 				return nil, nil
 			})
@@ -236,18 +230,12 @@ func (c *DecompressMMapChunker) fetchUncompressedToCache(ctx context.Context, of
 				}
 				defer releaseCacheCloseLock()
 
-				fetchSW := c.metrics.RemoteReadsTimerFactory.Begin()
-
 				_, err = c.storage.GetFrame(ctx, c.objectPath, fetchOff, nil, false, b)
 				if err != nil {
-					fetchSW.Failure(ctx, int64(len(b)),
-						attribute.String(failureReason, failureTypeRemoteRead))
-
 					return nil, fmt.Errorf("failed to read uncompressed data at %d: %w", fetchOff, err)
 				}
 
 				c.cache.setIsCached(fetchOff, int64(len(b)))
-				fetchSW.Success(ctx, int64(len(b)))
 
 				return nil, nil
 			})

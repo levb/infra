@@ -10,18 +10,14 @@ import (
 
 const (
 	orchestratorBlockSlices      = "orchestrator.blocks.slices"
-	orchestratorBlockChunksFetch = "orchestrator.blocks.chunks.fetch"
 	orchestratorBlockChunksStore = "orchestrator.blocks.chunks.store"
 )
 
 type Metrics struct {
-	// SlicesMetric is used to measure page faulting performance.
+	// SlicesTimerFactory is used to measure page faulting performance.
 	SlicesTimerFactory telemetry.TimerFactory
 
-	// WriteChunksMetric is used to measure the time taken to download chunks from remote storage
-	RemoteReadsTimerFactory telemetry.TimerFactory
-
-	// WriteChunksMetric is used to measure performance of writing chunks to disk.
+	// WriteChunksTimerFactory is used to measure performance of writing chunks to disk.
 	WriteChunksTimerFactory telemetry.TimerFactory
 }
 
@@ -38,15 +34,6 @@ func NewMetrics(meterProvider metric.MeterProvider) (Metrics, error) {
 		"Total page faults",
 	); err != nil {
 		return m, fmt.Errorf("error creating slices timer factory: %w", err)
-	}
-
-	if m.RemoteReadsTimerFactory, err = telemetry.NewTimerFactory(
-		blocksMeter, orchestratorBlockChunksFetch,
-		"Time taken to fetch memory chunks from remote store",
-		"Total bytes fetched from remote store",
-		"Total remote fetches",
-	); err != nil {
-		return m, fmt.Errorf("error creating reads timer factory: %w", err)
 	}
 
 	if m.WriteChunksTimerFactory, err = telemetry.NewTimerFactory(

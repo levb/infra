@@ -176,7 +176,7 @@ func NewGCP(ctx context.Context, bucketName string, limiter *limit.Limiter) (*St
 	}
 
 	return &Storage{
-		Backend: backend,
+		Backend: WrapBackendInstrumentation(backend),
 	}, nil
 }
 
@@ -190,7 +190,7 @@ func GetBuildCacheStorageProvider(ctx context.Context, limiter *limit.Limiter) (
 
 // NewFileSystemStorage creates a Storage backed by local filesystem at basePath.
 func NewFileSystemStorage(basePath string) *Storage {
-	return &Storage{Backend: NewFS(basePath)}
+	return &Storage{Backend: WrapBackendInstrumentation(NewFS(basePath))}
 }
 
 func getStorageForEnvironment(ctx context.Context, limiter *limit.Limiter, localBaseEnv, defaultLocalBase, bucketEnv, bucketUsage string) (*Storage, error) {
@@ -210,7 +210,7 @@ func getStorageForEnvironment(ctx context.Context, limiter *limit.Limiter, local
 	}
 
 	return &Storage{
-		Backend: provider,
+		Backend: WrapBackendInstrumentation(provider),
 	}, nil
 }
 

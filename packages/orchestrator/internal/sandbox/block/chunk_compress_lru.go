@@ -162,17 +162,11 @@ func (c *CompressLRUChunker) getOrFetchFrame(ctx context.Context, frameOffU int6
 // fetchAndDecompress fetches a compressed frame from storage, decompresses it, and stores in LRU.
 // ft is the frame table subset for the specific mapping being read.
 func (c *CompressLRUChunker) fetchAndDecompress(ctx context.Context, frameOffU int64, frameSize storage.FrameSize, ft *storage.FrameTable) ([]byte, error) {
-	fetchTimer := c.metrics.RemoteReadsTimerFactory.Begin()
-
 	compressedBuf := make([]byte, frameSize.C)
 	_, err := c.storage.GetFrame(ctx, c.objectPath, frameOffU, ft, false, compressedBuf)
 	if err != nil {
-		fetchTimer.Failure(ctx, int64(frameSize.C),
-			attribute.String(failureReason, failureTypeRemoteRead))
-
 		return nil, fmt.Errorf("failed to fetch frame at %#x: %w", frameOffU, err)
 	}
-	fetchTimer.Success(ctx, int64(frameSize.C))
 
 	if ft.CompressionType != storage.CompressionZstd {
 		return nil, fmt.Errorf("unsupported compression type: %d", ft.CompressionType)

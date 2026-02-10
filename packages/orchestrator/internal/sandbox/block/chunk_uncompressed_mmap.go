@@ -140,20 +140,12 @@ func (c *UncompressedMMapChunker) fetchToCache(ctx context.Context, off, length 
 				}
 				defer releaseCacheCloseLock()
 
-				fetchSW := c.metrics.RemoteReadsTimerFactory.Begin()
-
 				_, err = c.storage.GetFrame(ctx, c.objectPath, fetchOff, nil, false, b)
 				if err != nil {
-					fetchSW.Failure(ctx, int64(len(b)),
-						attribute.String(failureReason, failureTypeRemoteRead),
-					)
-
 					return fmt.Errorf("failed to read from storage at %d: %w", fetchOff, err)
 				}
 
 				c.cache.setIsCached(fetchOff, int64(len(b)))
-
-				fetchSW.Success(ctx, int64(len(b)))
 
 				return nil
 			})

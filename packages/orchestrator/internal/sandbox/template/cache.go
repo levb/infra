@@ -152,6 +152,8 @@ func (c *Cache) GetTemplate(
 		span.SetAttributes(attribute.Bool("use_cache", false))
 	}
 
+	persistence = storage.WrapProviderInstrumentation(persistence)
+
 	storageTemplate, err := newTemplateFromStorage(
 		c.config,
 		buildID,

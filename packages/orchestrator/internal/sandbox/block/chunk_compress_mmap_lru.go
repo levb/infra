@@ -221,17 +221,10 @@ func (c *CompressMMapLRUChunker) fetchDecompressAndCache(ctx context.Context, fr
 // ft is the frame table subset for the specific mapping being read.
 func (c *CompressMMapLRUChunker) ensureCompressedInMmap(ctx context.Context, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) ([]byte, bool, error) {
 	return c.compressedCache.GetOrFetch(frameStarts.C, int64(frameSize.C), func(buf []byte) error {
-		fetchTimer := c.metrics.RemoteReadsTimerFactory.Begin()
-
 		_, err := c.storage.GetFrame(ctx, c.objectPath, frameStarts.U, ft, false, buf)
 		if err != nil {
-			fetchTimer.Failure(ctx, int64(frameSize.C),
-				attribute.String(failureReason, failureTypeRemoteRead))
-
 			return fmt.Errorf("failed to fetch compressed frame at %#x: %w", frameStarts.C, err)
 		}
-
-		fetchTimer.Success(ctx, int64(frameSize.C))
 
 		return nil
 	})

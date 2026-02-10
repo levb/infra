@@ -255,6 +255,8 @@ func runBuild(
 		span.SetAttributes(attribute.Bool("use_cache", false))
 	}
 
+	templateStorage = storage.WrapProviderInstrumentation(templateStorage)
+
 	index := cache.NewHashIndex(bc.CacheScope, builder.buildStorage, templateStorage)
 
 	uploadTracker := layer.NewUploadTracker()
