@@ -434,7 +434,7 @@ func (c Cache) readAtFromCache(ctx context.Context, chunkPath string, buff []byt
 
 	defer utils.Cleanup(ctx, "failed to close chunk", fp.Close)
 
-	count, err := fp.ReadAt(buff, 0) // offset is in the filename
+	count, err := fp.Read(buff)
 	if ignoreEOF(err) != nil {
 		return 0, fmt.Errorf("failed to read from chunk: %w", err)
 	}
