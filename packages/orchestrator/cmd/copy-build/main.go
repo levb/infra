@@ -108,7 +108,7 @@ func NewHeaderFromPath(_ context.Context, from, headerPath string) (*header.Head
 	return h, nil
 }
 
-func getReferencedData(h *header.Header, objectType storage.ObjectType) ([]string, error) {
+func getReferencedData(h *header.Header, objectType storage.ObjectType) []string {
 	builds := make(map[string]struct{})
 
 	for _, mapping := range h.Mapping {
@@ -132,7 +132,7 @@ func getReferencedData(h *header.Header, objectType storage.ObjectType) ([]strin
 		}
 	}
 
-	return dataReferences, nil
+	return dataReferences
 }
 
 func localCopy(ctx context.Context, from, to *Destination) error {
@@ -216,10 +216,7 @@ func main() {
 		memfileHeader = h
 	}
 
-	dataReferences, err := getReferencedData(memfileHeader, storage.MemfileHeaderObjectType)
-	if err != nil {
-		log.Fatalf("failed to get referenced data: %s", err)
-	}
+	dataReferences := getReferencedData(memfileHeader, storage.MemfileHeaderObjectType)
 
 	filesToCopy = append(filesToCopy, buildMemfileHeaderPath)
 	filesToCopy = append(filesToCopy, dataReferences...)
@@ -245,10 +242,7 @@ func main() {
 		rootfsHeader = h
 	}
 
-	dataReferences, err = getReferencedData(rootfsHeader, storage.RootFSHeaderObjectType)
-	if err != nil {
-		log.Fatalf("failed to get referenced data: %s", err)
-	}
+	dataReferences = getReferencedData(rootfsHeader, storage.RootFSHeaderObjectType)
 
 	filesToCopy = append(filesToCopy, buildRootfsHeaderPath)
 	filesToCopy = append(filesToCopy, dataReferences...)
