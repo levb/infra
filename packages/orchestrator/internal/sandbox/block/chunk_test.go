@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	lz4 "github.com/pierrec/lz4/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -38,6 +39,18 @@ func compressData(t *testing.T, data []byte) []byte {
 	return enc.EncodeAll(data, nil)
 }
 
+// compressDataLZ4 compresses data using lz4
+func compressDataLZ4(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := lz4.NewWriter(&buf)
+	_, err := w.Write(data)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	return buf.Bytes()
+}
+
 func testMetrics(t *testing.T) metrics.Metrics {
 	t.Helper()
 	m, err := metrics.NewMetrics(noop.NewMeterProvider())
@@ -56,10 +69,16 @@ func makeTestData(size int64) []byte {
 	return data
 }
 
-// setupMockStorage creates a MockStorageProvider that returns compressed frames from a map
-func setupMockStorage(t *testing.T, frames map[int64][]byte) *storage.MockStorageProvider {
+// setupMockStorage creates a MockStorageProvider that returns compressed frames from a map.
+// compressionType specifies the compression used so the mock can decompress correctly.
+func setupMockStorage(t *testing.T, frames map[int64][]byte, compressionType ...storage.CompressionType) *storage.MockStorageProvider {
 	t.Helper()
 	mockStorage := storage.NewMockStorageProvider(t)
+
+	ct := storage.CompressionZstd
+	if len(compressionType) > 0 {
+		ct = compressionType[0]
+	}
 
 	mockStorage.EXPECT().
 		GetFrame(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
@@ -70,13 +89,7 @@ func setupMockStorage(t *testing.T, frames map[int64][]byte) *storage.MockStorag
 			}
 
 			if decompress {
-				dec, err := zstd.NewReader(nil)
-				if err != nil {
-					return storage.Range{}, err
-				}
-				defer dec.Close()
-
-				decompressed, err := dec.DecodeAll(data, nil)
+				decompressed, err := decompressTestData(ct, data)
 				if err != nil {
 					return storage.Range{}, err
 				}
@@ -92,6 +105,32 @@ func setupMockStorage(t *testing.T, frames map[int64][]byte) *storage.MockStorag
 		}).Maybe()
 
 	return mockStorage
+}
+
+// decompressTestData decompresses data based on the compression type.
+func decompressTestData(ct storage.CompressionType, data []byte) ([]byte, error) {
+	switch ct {
+	case storage.CompressionZstd:
+		dec, err := zstd.NewReader(nil)
+		if err != nil {
+			return nil, err
+		}
+		defer dec.Close()
+
+		return dec.DecodeAll(data, nil)
+
+	case storage.CompressionLZ4:
+		var buf bytes.Buffer
+		_, err := io.Copy(&buf, lz4.NewReader(bytes.NewReader(data)))
+		if err != nil {
+			return nil, err
+		}
+
+		return buf.Bytes(), nil
+
+	default:
+		return nil, fmt.Errorf("unsupported compression type: %d", ct)
+	}
 }
 
 // setupMockStorageUncompressed creates a MockStorageProvider for UncompressedMMapChunker tests.
@@ -726,6 +765,172 @@ type ChunkerTestContext struct {
 // ChunkerFactory creates a chunker with test data for testing
 type ChunkerFactory func(t *testing.T, dataSize int64) *ChunkerTestContext
 
+// compressLRULZ4Factory creates a CompressLRUChunker for testing with LZ4 compression
+func compressLRULZ4Factory(t *testing.T, dataSize int64) *ChunkerTestContext {
+	t.Helper()
+
+	data := makeTestData(dataSize)
+	compressed := compressDataLZ4(t, data)
+
+	frameTable := &storage.FrameTable{
+		CompressionType: storage.CompressionLZ4,
+		StartAt:         storage.FrameOffset{U: 0, C: 0},
+		Frames: []storage.FrameSize{
+			{U: int32(dataSize), C: int32(len(compressed))},
+		},
+	}
+
+	mockStorage := setupMockStorage(t, map[int64][]byte{0: compressed}, storage.CompressionLZ4)
+
+	chunker, err := NewCompressLRUChunker(
+		dataSize,
+		mockStorage,
+		"test/path",
+		10,
+		testMetrics(t),
+	)
+	require.NoError(t, err)
+
+	return &ChunkerTestContext{
+		Chunker:    chunker,
+		FrameTable: frameTable,
+		Data:       data,
+		DataSize:   dataSize,
+		Mock:       mockStorage,
+	}
+}
+
+// compressMMapLRULZ4Factory creates a CompressMMapLRUChunker for testing with LZ4 compression
+func compressMMapLRULZ4Factory(t *testing.T, dataSize int64) *ChunkerTestContext {
+	t.Helper()
+
+	data := makeTestData(dataSize)
+	compressed := compressDataLZ4(t, data)
+
+	frameTable := &storage.FrameTable{
+		CompressionType: storage.CompressionLZ4,
+		StartAt:         storage.FrameOffset{U: 0, C: 0},
+		Frames: []storage.FrameSize{
+			{U: int32(dataSize), C: int32(len(compressed))},
+		},
+	}
+
+	mockStorage := setupMockStorage(t, map[int64][]byte{0: compressed}, storage.CompressionLZ4)
+	cachePath := filepath.Join(t.TempDir(), "compressed_cache")
+
+	chunker, err := NewCompressMMapLRUChunker(
+		dataSize,
+		int64(len(compressed)),
+		mockStorage,
+		"test/path",
+		cachePath,
+		10,
+		testMetrics(t),
+	)
+	require.NoError(t, err)
+
+	return &ChunkerTestContext{
+		Chunker:    chunker,
+		FrameTable: frameTable,
+		Data:       data,
+		DataSize:   dataSize,
+		Mock:       mockStorage,
+	}
+}
+
+// compressLRULZ4MultiFrameFactory creates a multi-frame CompressLRUChunker for LZ4 testing
+func compressLRULZ4MultiFrameFactory(t *testing.T, dataSize int64) *ChunkerTestContext {
+	t.Helper()
+
+	frameSize := dataSize / 2
+	data := makeTestData(dataSize)
+
+	frame1Data := data[:frameSize]
+	frame2Data := data[frameSize:]
+	compressed1 := compressDataLZ4(t, frame1Data)
+	compressed2 := compressDataLZ4(t, frame2Data)
+
+	frameTable := &storage.FrameTable{
+		CompressionType: storage.CompressionLZ4,
+		StartAt:         storage.FrameOffset{U: 0, C: 0},
+		Frames: []storage.FrameSize{
+			{U: int32(frameSize), C: int32(len(compressed1))},
+			{U: int32(frameSize), C: int32(len(compressed2))},
+		},
+	}
+
+	mockStorage := setupMockStorage(t, map[int64][]byte{
+		0:         compressed1,
+		frameSize: compressed2,
+	}, storage.CompressionLZ4)
+
+	chunker, err := NewCompressLRUChunker(
+		dataSize,
+		mockStorage,
+		"test/path",
+		10,
+		testMetrics(t),
+	)
+	require.NoError(t, err)
+
+	return &ChunkerTestContext{
+		Chunker:    chunker,
+		FrameTable: frameTable,
+		Data:       data,
+		DataSize:   dataSize,
+		Mock:       mockStorage,
+	}
+}
+
+// compressMMapLRULZ4MultiFrameFactory creates a multi-frame CompressMMapLRUChunker for LZ4 testing
+func compressMMapLRULZ4MultiFrameFactory(t *testing.T, dataSize int64) *ChunkerTestContext {
+	t.Helper()
+
+	frameSize := dataSize / 2
+	data := makeTestData(dataSize)
+
+	frame1Data := data[:frameSize]
+	frame2Data := data[frameSize:]
+	compressed1 := compressDataLZ4(t, frame1Data)
+	compressed2 := compressDataLZ4(t, frame2Data)
+
+	totalCompressed := int64(len(compressed1) + len(compressed2))
+
+	frameTable := &storage.FrameTable{
+		CompressionType: storage.CompressionLZ4,
+		StartAt:         storage.FrameOffset{U: 0, C: 0},
+		Frames: []storage.FrameSize{
+			{U: int32(frameSize), C: int32(len(compressed1))},
+			{U: int32(frameSize), C: int32(len(compressed2))},
+		},
+	}
+
+	mockStorage := setupMockStorage(t, map[int64][]byte{
+		0:         compressed1,
+		frameSize: compressed2,
+	}, storage.CompressionLZ4)
+	cachePath := filepath.Join(t.TempDir(), "compressed_cache")
+
+	chunker, err := NewCompressMMapLRUChunker(
+		dataSize,
+		totalCompressed,
+		mockStorage,
+		"test/path",
+		cachePath,
+		10,
+		testMetrics(t),
+	)
+	require.NoError(t, err)
+
+	return &ChunkerTestContext{
+		Chunker:    chunker,
+		FrameTable: frameTable,
+		Data:       data,
+		DataSize:   dataSize,
+		Mock:       mockStorage,
+	}
+}
+
 // compressLRUFactory creates a CompressLRUChunker for testing
 func compressLRUFactory(t *testing.T, dataSize int64) *ChunkerTestContext {
 	t.Helper()
@@ -1102,10 +1307,12 @@ func TestChunkerMatrix_AllChunkers(t *testing.T) {
 	t.Parallel()
 
 	factories := map[string]ChunkerFactory{
-		"CompressLRU":      compressLRUFactory,
-		"CompressMMapLRU":  compressMMapLRUFactory,
-		"DecompressMMap":   decompressMMapFactory,
-		"UncompressedMMap": uncompressedMMapFactory,
+		"CompressLRU":         compressLRUFactory,
+		"CompressMMapLRU":     compressMMapLRUFactory,
+		"CompressLRU_LZ4":     compressLRULZ4Factory,
+		"CompressMMapLRU_LZ4": compressMMapLRULZ4Factory,
+		"DecompressMMap":      decompressMMapFactory,
+		"UncompressedMMap":    uncompressedMMapFactory,
 	}
 
 	tests := []struct {
@@ -1158,8 +1365,10 @@ func TestChunkerMatrix_CompressedChunkers(t *testing.T) {
 
 	// Use multi-frame factories for cross-frame tests
 	factories := map[string]ChunkerFactory{
-		"CompressLRU":     compressLRUMultiFrameFactory,
-		"CompressMMapLRU": compressMMapLRUMultiFrameFactory,
+		"CompressLRU":         compressLRUMultiFrameFactory,
+		"CompressMMapLRU":     compressMMapLRUMultiFrameFactory,
+		"CompressLRU_LZ4":     compressLRULZ4MultiFrameFactory,
+		"CompressMMapLRU_LZ4": compressMMapLRULZ4MultiFrameFactory,
 	}
 
 	tests := []struct {
@@ -1188,8 +1397,10 @@ func TestChunkerMatrix_PartialCacheMiss_SingleFrame(t *testing.T) {
 
 	// Only LRU-based chunkers support partial cache miss with non-aligned reads
 	factories := map[string]ChunkerFactory{
-		"CompressLRU":     compressLRUFactory,
-		"CompressMMapLRU": compressMMapLRUFactory,
+		"CompressLRU":         compressLRUFactory,
+		"CompressMMapLRU":     compressMMapLRUFactory,
+		"CompressLRU_LZ4":     compressLRULZ4Factory,
+		"CompressMMapLRU_LZ4": compressMMapLRULZ4Factory,
 	}
 
 	for factoryName, factory := range factories {
@@ -1222,15 +1433,20 @@ const (
 // benchEnv holds shared test data and configuration for chunker benchmarks.
 // All data is stored in memory to avoid disk I/O during benchmark iterations.
 type benchEnv struct {
-	origData       []byte
+	origData      []byte
+	randomOffsets []int64
+	m             metrics.Metrics
+	uncompPath    string
+}
+
+// compressedBenchEnv extends benchEnv with compression-specific data.
+type compressedBenchEnv struct {
+	*benchEnv
+
 	files          map[string][]byte // in-memory file store, shared across iterations
 	cPath          string            // key for compressed data in files
-	uncompPath     string            // key for uncompressed data in files
 	frameTable     *storage.FrameTable
 	compressedSize int64
-	randomOffsets  []int64
-	seqOffsets     []int64
-	m              metrics.Metrics
 }
 
 func newBenchEnv(b *testing.B) *benchEnv {
@@ -1238,129 +1454,119 @@ func newBenchEnv(b *testing.B) *benchEnv {
 
 	origData := generateBenchData(benchDataSize, 42)
 
-	// Compress entirely in memory using StoreReader → memStorage.
-	cPath := "data.zst"
-	uncompPath := "data.raw"
-	files := map[string][]byte{
-		uncompPath: origData,
-	}
-
-	st, _ := newMemStorage(files)
-	frameTable, err := st.StoreReader(
-		context.Background(), bytes.NewReader(origData), int64(len(origData)),
-		cPath, storage.DefaultCompressionOptions)
-	require.NoError(b, err)
-
 	rng := rand.New(rand.NewSource(12345))
 	randomOffsets := make([]int64, benchRandomReqs)
 	for i := range randomOffsets {
 		randomOffsets[i] = int64(rng.Intn(benchDataSize/benchPageSize)) * benchPageSize
 	}
 
-	numPages := benchDataSize / benchPageSize
-	seqOffsets := make([]int64, numPages)
-	for i := range seqOffsets {
-		seqOffsets[i] = int64(i) * benchPageSize
-	}
-
 	m, _ := metrics.NewMetrics(noop.NewMeterProvider())
 
-	b.Logf("Compression: 1GB -> %dMB (%.2fx), %d frames",
+	return &benchEnv{
+		origData:      origData,
+		randomOffsets: randomOffsets,
+		m:             m,
+		uncompPath:    "data.raw",
+	}
+}
+
+// withCompression compresses the benchmark data and returns a compressedBenchEnv.
+func (env *benchEnv) withCompression(b *testing.B, opts *storage.FramedUploadOptions) *compressedBenchEnv {
+	b.Helper()
+
+	cPath := fmt.Sprintf("data.%s", opts.CompressionType)
+	files := map[string][]byte{
+		env.uncompPath: env.origData,
+	}
+
+	st, _ := newMemStorage(files)
+	frameTable, err := st.StoreReader(
+		context.Background(), bytes.NewReader(env.origData), int64(len(env.origData)),
+		cPath, opts)
+	require.NoError(b, err)
+
+	b.Logf("%s: 1GB -> %dMB (%.2fx), %d frames",
+		opts.CompressionType,
 		frameTable.TotalCompressedSize()>>20,
 		float64(benchDataSize)/float64(frameTable.TotalCompressedSize()),
 		len(frameTable.Frames))
 
-	return &benchEnv{
-		origData:       origData,
+	return &compressedBenchEnv{
+		benchEnv:       env,
 		files:          files,
 		cPath:          cPath,
-		uncompPath:     uncompPath,
 		frameTable:     frameTable,
 		compressedSize: frameTable.TotalCompressedSize(),
-		randomOffsets:  randomOffsets,
-		seqOffsets:     seqOffsets,
-		m:              m,
 	}
 }
 
 func BenchmarkChunkers(b *testing.B) {
 	env := newBenchEnv(b)
 
-	b.Run("UncompressedMMap", func(b *testing.B) {
-		b.Run("ColdSequential", func(b *testing.B) {
-			benchCold(b, env, func(cacheDir string, st *storage.Storage) Chunker {
-				c, err := NewUncompressedMMapChunker(benchDataSize, benchPageSize, st, "data.raw", filepath.Join(cacheDir, "cache"), env.m)
-				require.NoError(b, err)
+	b.Run("Uncompressed/MMap", func(b *testing.B) {
+		files := map[string][]byte{env.uncompPath: env.origData}
+		benchRandom(b, env, func(cacheDir string, st *storage.Storage) Chunker {
+			c, err := NewUncompressedMMapChunker(benchDataSize, benchPageSize, st, env.uncompPath, filepath.Join(cacheDir, "cache"), env.m)
+			require.NoError(b, err)
 
-				return c
-			}, nil)
-		})
-		b.Run("RandomAccess", func(b *testing.B) {
-			benchRandom(b, env, func(cacheDir string, st *storage.Storage) Chunker {
-				c, err := NewUncompressedMMapChunker(benchDataSize, benchPageSize, st, "data.raw", filepath.Join(cacheDir, "cache"), env.m)
-				require.NoError(b, err)
-
-				return c
-			}, nil)
-		})
+			return c
+		}, nil, files)
 	})
 
-	b.Run("DecompressMMap", func(b *testing.B) {
-		b.Run("ColdSequential", func(b *testing.B) {
-			benchCold(b, env, func(cacheDir string, st *storage.Storage) Chunker {
-				c, err := NewDecompressMMapChunker(benchDataSize, env.compressedSize, benchPageSize, st, env.cPath, filepath.Join(cacheDir, "cache"), env.m)
-				require.NoError(b, err)
+	compressionTypes := []struct {
+		name string
+		opts *storage.FramedUploadOptions
+	}{
+		{"Zstd", &storage.FramedUploadOptions{
+			CompressionType:        storage.CompressionZstd,
+			ChunkSize:              storage.MemoryChunkSize,
+			TargetFrameSize:        2 * 1024 * 1024,
+			Level:                  int(zstd.SpeedFastest),
+			CompressionConcurrency: 0,
+			TargetPartSize:         50 * 1024 * 1024,
+		}},
+		{"LZ4", &storage.FramedUploadOptions{
+			CompressionType:        storage.CompressionLZ4,
+			ChunkSize:              storage.MemoryChunkSize,
+			TargetFrameSize:        2 * 1024 * 1024,
+			Level:                  0,
+			CompressionConcurrency: 0,
+			TargetPartSize:         50 * 1024 * 1024,
+		}},
+	}
 
-				return c
-			}, env.frameTable)
+	for _, ct := range compressionTypes {
+		b.Run(ct.name, func(b *testing.B) {
+			cEnv := env.withCompression(b, ct.opts)
+
+			b.Run("DecompressMMap", func(b *testing.B) {
+				benchRandom(b, env, func(cacheDir string, st *storage.Storage) Chunker {
+					c, err := NewDecompressMMapChunker(benchDataSize, cEnv.compressedSize, benchPageSize, st, cEnv.cPath, filepath.Join(cacheDir, "cache"), env.m)
+					require.NoError(b, err)
+
+					return c
+				}, cEnv.frameTable, cEnv.files)
+			})
+
+			b.Run("CompressLRU", func(b *testing.B) {
+				benchRandom(b, env, func(_ string, st *storage.Storage) Chunker {
+					c, err := NewCompressLRUChunker(benchDataSize, st, cEnv.cPath, benchLRUFrames, env.m)
+					require.NoError(b, err)
+
+					return c
+				}, cEnv.frameTable, cEnv.files)
+			})
+
+			b.Run("CompressMMapLRU", func(b *testing.B) {
+				benchRandom(b, env, func(cacheDir string, st *storage.Storage) Chunker {
+					c, err := NewCompressMMapLRUChunker(benchDataSize, cEnv.compressedSize, st, cEnv.cPath, filepath.Join(cacheDir, "cache"), benchLRUFrames, env.m)
+					require.NoError(b, err)
+
+					return c
+				}, cEnv.frameTable, cEnv.files)
+			})
 		})
-		b.Run("RandomAccess", func(b *testing.B) {
-			benchRandom(b, env, func(cacheDir string, st *storage.Storage) Chunker {
-				c, err := NewDecompressMMapChunker(benchDataSize, env.compressedSize, benchPageSize, st, env.cPath, filepath.Join(cacheDir, "cache"), env.m)
-				require.NoError(b, err)
-
-				return c
-			}, env.frameTable)
-		})
-	})
-
-	b.Run("CompressLRU", func(b *testing.B) {
-		b.Run("ColdSequential", func(b *testing.B) {
-			benchCold(b, env, func(_ string, st *storage.Storage) Chunker {
-				c, err := NewCompressLRUChunker(benchDataSize, st, env.cPath, benchLRUFrames, env.m)
-				require.NoError(b, err)
-
-				return c
-			}, env.frameTable)
-		})
-		b.Run("RandomAccess", func(b *testing.B) {
-			benchRandom(b, env, func(_ string, st *storage.Storage) Chunker {
-				c, err := NewCompressLRUChunker(benchDataSize, st, env.cPath, benchLRUFrames, env.m)
-				require.NoError(b, err)
-
-				return c
-			}, env.frameTable)
-		})
-	})
-
-	b.Run("CompressMMapLRU", func(b *testing.B) {
-		b.Run("ColdSequential", func(b *testing.B) {
-			benchCold(b, env, func(cacheDir string, st *storage.Storage) Chunker {
-				c, err := NewCompressMMapLRUChunker(benchDataSize, env.compressedSize, st, env.cPath, filepath.Join(cacheDir, "cache"), benchLRUFrames, env.m)
-				require.NoError(b, err)
-
-				return c
-			}, env.frameTable)
-		})
-		b.Run("RandomAccess", func(b *testing.B) {
-			benchRandom(b, env, func(cacheDir string, st *storage.Storage) Chunker {
-				c, err := NewCompressMMapLRUChunker(benchDataSize, env.compressedSize, st, env.cPath, filepath.Join(cacheDir, "cache"), benchLRUFrames, env.m)
-				require.NoError(b, err)
-
-				return c
-			}, env.frameTable)
-		})
-	})
+	}
 }
 
 type benchChunkerFactory func(cacheDir string, st *storage.Storage) Chunker
@@ -1392,41 +1598,8 @@ func reportBenchMetrics(b *testing.B, elapsed time.Duration, slices int, ms *mem
 	b.ReportMetric(math.Round(simGCS.Seconds()*100)/100, "sim_gcs_s")
 }
 
-// benchCold measures cold-start sequential read of entire dataset.
-func benchCold(b *testing.B, env *benchEnv, factory benchChunkerFactory, ft *storage.FrameTable) {
-	b.Helper()
-
-	ctx := context.Background()
-	sliceCount := len(env.seqOffsets)
-	servedBytes := int64(sliceCount) * benchPageSize
-
-	b.ResetTimer()
-	for b.Loop() {
-		b.StopTimer()
-		st, ms := newMemStorage(env.files)
-		cacheDir := filepath.Join(b.TempDir(), "cache")
-		require.NoError(b, os.MkdirAll(cacheDir, 0o755))
-		chunker := factory(cacheDir, st)
-		b.StartTimer()
-
-		t0 := time.Now()
-		for _, off := range env.seqOffsets {
-			_, err := chunker.Slice(ctx, off, benchPageSize, ft)
-			require.NoError(b, err)
-		}
-		elapsed := time.Since(t0)
-
-		b.StopTimer()
-		reportBenchMetrics(b, elapsed, sliceCount, ms, servedBytes)
-		chunker.Close()
-		b.StartTimer()
-	}
-
-	b.SetBytes(benchDataSize)
-}
-
 // benchRandom measures random access latency with simulated GCS.
-func benchRandom(b *testing.B, env *benchEnv, factory benchChunkerFactory, ft *storage.FrameTable) {
+func benchRandom(b *testing.B, env *benchEnv, factory benchChunkerFactory, ft *storage.FrameTable, files map[string][]byte) {
 	b.Helper()
 
 	ctx := context.Background()
@@ -1435,7 +1608,7 @@ func benchRandom(b *testing.B, env *benchEnv, factory benchChunkerFactory, ft *s
 	b.ResetTimer()
 	for b.Loop() {
 		b.StopTimer()
-		st, ms := newMemStorage(env.files)
+		st, ms := newMemStorage(files)
 		cacheDir := filepath.Join(b.TempDir(), "cache")
 		require.NoError(b, os.MkdirAll(cacheDir, 0o755))
 		chunker := factory(cacheDir, st)

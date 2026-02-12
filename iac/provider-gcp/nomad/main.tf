@@ -406,6 +406,8 @@ locals {
     redis_cluster_url            = local.redis_cluster_url
     redis_tls_ca_base64          = trimspace(data.google_secret_manager_secret_version.redis_tls_ca_base64.secret_data)
     shared_chunk_cache_path      = var.shared_chunk_cache_path
+    compression_type             = var.compression_type
+    compression_level            = var.compression_level
   }
 
   orchestrator_job_check = templatefile("${path.module}/jobs/orchestrator.hcl", merge(
@@ -507,6 +509,8 @@ resource "nomad_job" "template_manager" {
     dockerhub_remote_repository_url = var.dockerhub_remote_repository_url
     launch_darkly_api_key           = trimspace(data.google_secret_manager_secret_version.launch_darkly_api_key.secret_data)
     shared_chunk_cache_path         = var.shared_chunk_cache_path
+    compression_type                = var.compression_type
+    compression_level               = var.compression_level
   })
 }
 

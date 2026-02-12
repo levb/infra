@@ -757,6 +757,14 @@ func (s *Sandbox) doStop(ctx context.Context) error {
 	// We could use select with ctx.Done() to wait for cancellation, but if the process is not exited the whole cleanup will be in a bad state and will result in unexpected behavior.
 	<-s.process.Exit.Done()
 
+	logger.L().Info(ctx, "BENCH_SANDBOX_CLOSE",
+		zap.String("sandbox_id", s.Runtime.SandboxID),
+		zap.Int64("lifetime_ms", time.Since(s.StartedAt).Milliseconds()),
+		zap.String("compression_type", storage.DefaultCompressionOptions.CompressionType.String()),
+		zap.Int("compression_level", storage.DefaultCompressionOptions.Level),
+		zap.Bool("compression_enabled", storage.EnableGCSCompression),
+	)
+
 	uffdStopErr := s.Resources.memory.Stop()
 	if uffdStopErr != nil {
 		errs = append(errs, fmt.Errorf("failed to stop uffd: %w", uffdStopErr))

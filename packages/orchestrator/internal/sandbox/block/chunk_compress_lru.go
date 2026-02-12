@@ -1,11 +1,16 @@
 package block
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"strconv"
+	"sync/atomic"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
+	lz4 "github.com/pierrec/lz4/v4"
 	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/singleflight"
 
@@ -27,6 +32,17 @@ type CompressLRUChunker struct {
 	fetchGroup singleflight.Group
 	virtSize   int64 // uncompressed size - used to cap requests
 	metrics    metrics.Metrics
+
+	// Stats counters
+	slices            atomic.Int64
+	sliceBytes        atomic.Int64
+	fetches           atomic.Int64
+	fetchBytes        atomic.Int64
+	decompressions    atomic.Int64
+	decompInputBytes  atomic.Int64
+	decompOutputBytes atomic.Int64
+	decompDurationNs  atomic.Int64
+	compressionType   atomic.Value // stores storage.CompressionType
 }
 
 // NewCompressLRUChunker creates a new CompressLRUChunker.
@@ -72,6 +88,12 @@ func (c *CompressLRUChunker) Slice(ctx context.Context, off, length int64, ft *s
 }
 
 func (c *CompressLRUChunker) sliceWithStats(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, bool, error) {
+	c.slices.Add(1)
+	c.sliceBytes.Add(length)
+	if ft != nil {
+		c.compressionType.CompareAndSwap(nil, ft.CompressionType)
+	}
+
 	timer := c.metrics.SlicesTimerFactory.Begin()
 
 	// Clamp length to available data
@@ -168,20 +190,42 @@ func (c *CompressLRUChunker) fetchAndDecompress(ctx context.Context, frameOffU i
 		return nil, fmt.Errorf("failed to fetch frame at %#x: %w", frameOffU, err)
 	}
 
-	if ft.CompressionType != storage.CompressionZstd {
+	c.fetches.Add(1)
+	c.fetchBytes.Add(int64(frameSize.C))
+
+	decompStart := time.Now()
+
+	var data []byte
+	switch ft.CompressionType {
+	case storage.CompressionZstd:
+		dec, err := zstd.NewReader(nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create zstd reader: %w", err)
+		}
+		defer dec.Close()
+
+		data, err = dec.DecodeAll(compressedBuf, make([]byte, 0, frameSize.U))
+		if err != nil {
+			return nil, fmt.Errorf("failed to decompress frame at %d: %w", frameOffU, err)
+		}
+
+	case storage.CompressionLZ4:
+		data = make([]byte, frameSize.U)
+		n, err := io.ReadFull(lz4.NewReader(bytes.NewReader(compressedBuf)), data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decompress frame at %d: %w", frameOffU, err)
+		}
+		data = data[:n]
+
+	default:
 		return nil, fmt.Errorf("unsupported compression type: %d", ft.CompressionType)
 	}
 
-	dec, err := zstd.NewReader(nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create zstd reader: %w", err)
-	}
-	defer dec.Close()
-
-	data, err := dec.DecodeAll(compressedBuf, make([]byte, 0, frameSize.U))
-	if err != nil {
-		return nil, fmt.Errorf("failed to decompress frame at %d: %w", frameOffU, err)
-	}
+	decompDur := time.Since(decompStart)
+	c.decompressions.Add(1)
+	c.decompInputBytes.Add(int64(len(compressedBuf)))
+	c.decompOutputBytes.Add(int64(len(data)))
+	c.decompDurationNs.Add(decompDur.Nanoseconds())
 
 	c.frameLRU.put(frameOffU, int64(frameSize.U), data)
 
@@ -211,4 +255,26 @@ func (c *CompressLRUChunker) Size() int64 {
 // LRUStats returns statistics about the frame LRU cache.
 func (c *CompressLRUChunker) LRUStats() (count int, maxCount int) {
 	return c.frameLRU.Len(), DefaultLRUFrameCount
+}
+
+// Stats returns per-chunker statistics.
+func (c *CompressLRUChunker) Stats() ChunkerStats {
+	ct := "unknown"
+	if v := c.compressionType.Load(); v != nil {
+		ct = v.(storage.CompressionType).String()
+	}
+
+	return ChunkerStats{
+		ObjectPath:        c.objectPath,
+		ChunkerType:       "CompressLRU",
+		CompressionType:   ct,
+		Slices:            c.slices.Load(),
+		SliceBytes:        c.sliceBytes.Load(),
+		Fetches:           c.fetches.Load(),
+		FetchBytes:        c.fetchBytes.Load(),
+		Decompressions:    c.decompressions.Load(),
+		DecompInputBytes:  c.decompInputBytes.Load(),
+		DecompOutputBytes: c.decompOutputBytes.Load(),
+		DecompDurationNs:  c.decompDurationNs.Load(),
+	}
 }

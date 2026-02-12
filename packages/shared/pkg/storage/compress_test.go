@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	lz4 "github.com/pierrec/lz4/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -188,6 +189,35 @@ type fakeRanger struct {
 
 func (r *fakeRanger) RangeGet(_ context.Context, _ string, offset int64, length int) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(r.data[offset : offset+int64(length)])), nil
+}
+
+// decompressAll decompresses data based on the compression type.
+func decompressAll(t *testing.T, ct CompressionType, data []byte) []byte {
+	t.Helper()
+
+	switch ct {
+	case CompressionZstd:
+		dec, err := zstd.NewReader(nil)
+		require.NoError(t, err)
+		defer dec.Close()
+
+		decompressed, err := dec.DecodeAll(data, nil)
+		require.NoError(t, err)
+
+		return decompressed
+
+	case CompressionLZ4:
+		var buf bytes.Buffer
+		_, err := io.Copy(&buf, lz4.NewReader(bytes.NewReader(data)))
+		require.NoError(t, err)
+
+		return buf.Bytes()
+
+	default:
+		t.Fatalf("unsupported compression type: %d", ct)
+
+		return nil
+	}
 }
 
 func TestCompressedInfo_Subset(t *testing.T) {
@@ -542,12 +572,8 @@ func TestStoreFile_Compressed_FS(t *testing.T) {
 	require.NoError(t, err)
 	require.Less(t, len(compressedData), dataSize, "compressed data should be smaller")
 
-	// Decompress and verify
-	dec, err := zstd.NewReader(nil)
-	require.NoError(t, err)
-	decompressed, err := dec.DecodeAll(compressedData, nil)
-	require.NoError(t, err)
-	dec.Close()
+	// Decompress and verify (type-aware)
+	decompressed := decompressAll(t, DefaultCompressionOptions.CompressionType, compressedData)
 
 	require.Equal(t, origData, decompressed, "decompressed data should match original")
 
@@ -585,7 +611,7 @@ func TestStoreFile_Compressed_FS_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	// Store with compression
-	frameTable, err := storage.StoreFile(t.Context(), inputFile, "data.zst", DefaultCompressionOptions)
+	frameTable, err := storage.StoreFile(t.Context(), inputFile, "data.compressed", DefaultCompressionOptions)
 	require.NoError(t, err)
 	require.NotNil(t, frameTable)
 
@@ -600,7 +626,7 @@ func TestStoreFile_Compressed_FS_RoundTrip(t *testing.T) {
 
 			// Create buffer large enough for UNCOMPRESSED data
 			frameBuf := make([]byte, frameSize.U)
-			rr, err := storage.GetFrame(t.Context(), "data.zst", offset, frameTable, true, frameBuf)
+			rr, err := storage.GetFrame(t.Context(), "data.compressed", offset, frameTable, true, frameBuf)
 			require.NoError(t, err)
 			require.Equal(t, int(frameSize.U), rr.Length, "should read full uncompressed frame")
 
@@ -743,19 +769,15 @@ func TestStoreFile_DataIntegrity_FS(t *testing.T) {
 			require.NoError(t, err)
 
 			// Store with compression
-			frameTable, err := storage.StoreFile(t.Context(), inputFile, "output.zst", DefaultCompressionOptions)
+			frameTable, err := storage.StoreFile(t.Context(), inputFile, "output.compressed", DefaultCompressionOptions)
 			require.NoError(t, err)
 
 			// Read compressed file
-			compressedData, err := os.ReadFile(tempDir + "/output.zst")
+			compressedData, err := os.ReadFile(tempDir + "/output.compressed")
 			require.NoError(t, err)
 
-			// Decompress and verify
-			dec, err := zstd.NewReader(nil)
-			require.NoError(t, err)
-			decompressed, err := dec.DecodeAll(compressedData, nil)
-			require.NoError(t, err)
-			dec.Close()
+			// Decompress and verify (type-aware)
+			decompressed := decompressAll(t, DefaultCompressionOptions.CompressionType, compressedData)
 
 			require.Equal(t, tc.data, decompressed, "decompressed data should match original")
 

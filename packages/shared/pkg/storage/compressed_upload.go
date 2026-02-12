@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
+	lz4 "github.com/pierrec/lz4/v4"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -262,11 +263,13 @@ func (e *encoder) startFrame() (*frame, error) {
 	switch e.opts.CompressionType {
 	case CompressionZstd:
 		enc, err = newZstdEncoder(frame, e.opts.CompressionConcurrency, e.opts.TargetFrameSize, zstd.EncoderLevel(e.opts.Level))
+	case CompressionLZ4:
+		enc = newLZ4Encoder(frame, e.opts.Level)
 	default:
 		return nil, fmt.Errorf("unsupported compression type: %v", e.opts.CompressionType)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create zstd encoder: %w", err)
+		return nil, fmt.Errorf("failed to create encoder: %w", err)
 	}
 	frame.enc = enc
 
@@ -325,4 +328,15 @@ func newZstdEncoder(out io.Writer, concurrency int, windowSize int, compressionL
 		return zstd.NewWriter(out,
 			zstd.WithEncoderLevel(compressionLevel))
 	}
+}
+
+func newLZ4Encoder(out io.Writer, level int) io.WriteCloser {
+	w := lz4.NewWriter(out)
+	opts := []lz4.Option{lz4.ConcurrencyOption(1)}
+	if level > 0 {
+		opts = append(opts, lz4.CompressionLevelOption(lz4.CompressionLevel(1<<(8+level))))
+	}
+	_ = w.Apply(opts...)
+
+	return w
 }

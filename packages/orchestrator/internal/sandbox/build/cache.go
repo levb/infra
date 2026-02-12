@@ -71,6 +71,35 @@ func NewDiffStore(
 		// buildData will be deleted by calling buildData.Close()
 		defer ds.resetDelete(item.Key())
 
+		// Log per-layer stats before closing
+		stats := buildData.Stats()
+		if stats.Slices > 0 {
+			fields := []zap.Field{
+				zap.String("object", stats.ObjectPath),
+				zap.String("chunker_type", stats.ChunkerType),
+				zap.String("compression_type", stats.CompressionType),
+				zap.Int64("slices", stats.Slices),
+				zap.Int64("slice_bytes", stats.SliceBytes),
+				zap.Int64("fetches", stats.Fetches),
+				zap.Int64("fetch_bytes", stats.FetchBytes),
+				zap.Int64("mmap_rss_bytes", stats.MmapRSSBytes),
+			}
+			if stats.Decompressions > 0 {
+				decompBandwidth := float64(0)
+				if stats.DecompDurationNs > 0 {
+					decompBandwidth = float64(stats.DecompOutputBytes) / 1e6 / (float64(stats.DecompDurationNs) / 1e9)
+				}
+				fields = append(fields,
+					zap.Int64("decompressions", stats.Decompressions),
+					zap.Int64("decomp_input_bytes", stats.DecompInputBytes),
+					zap.Int64("decomp_output_bytes", stats.DecompOutputBytes),
+					zap.Int64("decomp_duration_ns", stats.DecompDurationNs),
+					zap.Float64("decomp_bandwidth_mbs", decompBandwidth),
+				)
+			}
+			logger.L().Info(ctx, "CHUNKER_CLOSE_STATS", fields...)
+		}
+
 		if closeErr := buildData.Close(); closeErr != nil {
 			logger.L().Warn(ctx, "failed to cleanup build data cache for item", zap.Any("item_key", item.Key()), zap.Error(closeErr))
 		}

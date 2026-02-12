@@ -196,3 +196,12 @@ func (b *StorageDiff) FileSize() (int64, error) {
 func (b *StorageDiff) BlockSize() int64 {
 	return b.blockSize
 }
+
+// Stats returns per-chunker statistics, delegating to the underlying chunker.
+func (b *StorageDiff) Stats() block.ChunkerStats {
+	if b.chunker == nil {
+		return block.ChunkerStats{ObjectPath: b.objectPath}
+	}
+
+	return b.chunker.Stats()
+}

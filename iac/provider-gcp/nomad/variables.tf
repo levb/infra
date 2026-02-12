@@ -400,6 +400,18 @@ variable "filestore_cache_cleanup_max_retries" {
   description = "Maximum number of continuous error or miss retries before giving up"
 }
 
+variable "compression_type" {
+  type        = string
+  description = "Compression algorithm: none, lz4, zstd (empty = keep defaults)"
+  default     = ""
+}
+
+variable "compression_level" {
+  type        = string
+  description = "Compression level (integer, empty = codec default)"
+  default     = ""
+}
+
 variable "dockerhub_remote_repository_url" {
   type = string
 }

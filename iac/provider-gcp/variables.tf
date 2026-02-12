@@ -583,3 +583,15 @@ variable "loki_boot_disk_type" {
   type        = string
   default     = "pd-ssd"
 }
+
+variable "compression_type" {
+  description = "Compression algorithm: none, lz4, zstd (empty = keep defaults)"
+  type        = string
+  default     = ""
+}
+
+variable "compression_level" {
+  description = "Compression level (integer, empty = codec default)"
+  type        = string
+  default     = ""
+}

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"unsafe"
 
 	"github.com/edsrzf/mmap-go"
 	"golang.org/x/sync/singleflight"
@@ -168,6 +169,43 @@ func (fc *MMapFrameCache) Close() (e error) {
 	e = errors.Join(e, os.RemoveAll(fc.filePath))
 
 	return e
+}
+
+// ResidentBytes returns the amount of physical memory (RSS) backing the mmap
+// using the mincore syscall.
+func (fc *MMapFrameCache) ResidentBytes() (int64, error) {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+
+	if fc.mmap == nil || fc.closed.Load() {
+		return 0, nil
+	}
+
+	pageSize := os.Getpagesize()
+	mmapLen := len(*fc.mmap)
+	if mmapLen == 0 {
+		return 0, nil
+	}
+
+	numPages := (mmapLen + pageSize - 1) / pageSize
+	vec := make([]byte, numPages)
+
+	_, _, errno := unix.Syscall(unix.SYS_MINCORE,
+		uintptr(unsafe.Pointer(&(*fc.mmap)[0])),
+		uintptr(mmapLen),
+		uintptr(unsafe.Pointer(&vec[0])))
+	if errno != 0 {
+		return 0, fmt.Errorf("mincore failed: %w", errno)
+	}
+
+	resident := 0
+	for _, v := range vec {
+		if v&1 != 0 {
+			resident++
+		}
+	}
+
+	return int64(resident) * int64(pageSize), nil
 }
 
 // FileSize returns the on-disk size of the cache file (sparse allocation).

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
@@ -29,6 +30,12 @@ type UncompressedMMapChunker struct {
 	size int64 // uncompressed size - for uncompressed data, virtSize == rawSize
 
 	fetchers *utils.WaitMap
+
+	// Stats counters
+	slices     atomic.Int64
+	sliceBytes atomic.Int64
+	fetches    atomic.Int64
+	fetchBytes atomic.Int64
 }
 
 // NewUncompressedMMapChunker creates a legacy mmap-based chunker for uncompressed data.
@@ -65,6 +72,9 @@ func (c *UncompressedMMapChunker) Slice(ctx context.Context, off, length int64, 
 }
 
 func (c *UncompressedMMapChunker) sliceWithStats(ctx context.Context, off, length int64, _ *storage.FrameTable) ([]byte, bool, error) {
+	c.slices.Add(1)
+	c.sliceBytes.Add(length)
+
 	timer := c.metrics.SlicesTimerFactory.Begin()
 
 	b, err := c.cache.Slice(off, length)
@@ -147,6 +157,9 @@ func (c *UncompressedMMapChunker) fetchToCache(ctx context.Context, off, length 
 
 				c.cache.setIsCached(fetchOff, int64(len(b)))
 
+				c.fetches.Add(1)
+				c.fetchBytes.Add(int64(len(b)))
+
 				return nil
 			})
 
@@ -168,4 +181,23 @@ func (c *UncompressedMMapChunker) Close() error {
 
 func (c *UncompressedMMapChunker) FileSize() (int64, error) {
 	return c.cache.FileSize()
+}
+
+// Stats returns per-chunker statistics.
+func (c *UncompressedMMapChunker) Stats() ChunkerStats {
+	var rss int64
+	if c.cache != nil {
+		rss, _ = c.cache.ResidentBytes()
+	}
+
+	return ChunkerStats{
+		ObjectPath:      c.objectPath,
+		ChunkerType:     "UncompressedMMap",
+		CompressionType: "none",
+		Slices:          c.slices.Load(),
+		SliceBytes:      c.sliceBytes.Load(),
+		Fetches:         c.fetches.Load(),
+		FetchBytes:      c.fetchBytes.Load(),
+		MmapRSSBytes:    rss,
+	}
 }

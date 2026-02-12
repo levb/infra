@@ -6,6 +6,7 @@ import (
 	"io"
 	"path/filepath"
 
+	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block"
 	"github.com/e2b-dev/infra/packages/shared/pkg/id"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
@@ -36,6 +37,8 @@ type Diff interface {
 	ReadAt(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error)
 	// Slice returns a view into the data. The frame table is used for lazy chunker init.
 	Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error)
+	// Stats returns per-chunker statistics for benchmarking.
+	Stats() block.ChunkerStats
 }
 
 type NoDiff struct{}
@@ -72,6 +75,10 @@ func (n *NoDiff) CacheKey() DiffStoreKey {
 
 func (n *NoDiff) BlockSize() int64 {
 	return 0
+}
+
+func (n *NoDiff) Stats() block.ChunkerStats {
+	return block.ChunkerStats{}
 }
 
 func GenerateDiffCachePath(basePath string, buildId string, diffType DiffType) string {

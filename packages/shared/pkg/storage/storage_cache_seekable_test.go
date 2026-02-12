@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	lz4 "github.com/pierrec/lz4/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -30,6 +31,18 @@ func compressTestData(t *testing.T, data []byte) []byte {
 	defer enc.Close()
 
 	return enc.EncodeAll(data, nil)
+}
+
+// compressTestDataLZ4 compresses data using lz4 and returns the compressed bytes.
+func compressTestDataLZ4(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := lz4.NewWriter(&buf)
+	_, err := w.Write(data)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	return buf.Bytes()
 }
 
 // makeTestData creates test data with a simple pattern.
@@ -317,7 +330,7 @@ func TestDecompressBytes_Errors(t *testing.T) {
 
 	t.Run("unsupported compression", func(t *testing.T) {
 		t.Parallel()
-		_, err := decompressBytes(context.Background(), CompressionLZ4, []byte{}, make([]byte, 10))
+		_, err := decompressBytes(context.Background(), CompressionType(99), []byte{}, make([]byte, 10))
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "unsupported")
 	})
@@ -346,9 +359,37 @@ func TestDecompressStream(t *testing.T) {
 func TestDecompressStream_UnsupportedCompression(t *testing.T) {
 	t.Parallel()
 
-	_, err := decompressStream(context.Background(), CompressionLZ4, bytes.NewReader([]byte{}), make([]byte, 10))
+	_, err := decompressStream(context.Background(), CompressionType(99), bytes.NewReader([]byte{}), make([]byte, 10))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unsupported")
+}
+
+func TestDecompressBytes_LZ4(t *testing.T) {
+	t.Parallel()
+
+	origData := makeTestData(4096, 0)
+	compressed := compressTestDataLZ4(t, origData)
+
+	buf := make([]byte, len(origData))
+	n, err := decompressBytes(context.Background(), CompressionLZ4, compressed, buf)
+
+	require.NoError(t, err)
+	require.Equal(t, len(origData), n)
+	require.Equal(t, origData, buf)
+}
+
+func TestDecompressStream_LZ4(t *testing.T) {
+	t.Parallel()
+
+	origData := makeTestData(8192, 0)
+	compressed := compressTestDataLZ4(t, origData)
+
+	buf := make([]byte, len(origData))
+	n, err := decompressStream(context.Background(), CompressionLZ4, bytes.NewReader(compressed), buf)
+
+	require.NoError(t, err)
+	require.Equal(t, len(origData), n)
+	require.Equal(t, origData, buf)
 }
 
 // =============================================================================
