@@ -50,6 +50,10 @@ var (
 	// When false: Cache stores uncompressed chunks (inner decompresses, cache stores raw data).
 	EnableNFSCompressedCache = false
 
+	// UseCompressedAssets controls whether to read from compressed (.zst) assets at runtime.
+	// Independent of EnableGCSCompression which controls upload behavior.
+	UseCompressedAssets = false
+
 	CompressedChunkerType   = CompressMMapLRUChunker
 	UncompressedChunkerType = UncompressedMMapChunker
 )
@@ -95,6 +99,16 @@ type FrameTable struct {
 	Frames          []FrameSize
 }
 
+// CompressionTypeSuffix returns the object-path suffix for this frame table's
+// compression type. Returns "" when ft is nil.
+func (ft *FrameTable) CompressionTypeSuffix() string {
+	if ft == nil {
+		return ""
+	}
+
+	return ft.CompressionType.Suffix()
+}
+
 type FramedUploadOptions struct {
 	CompressionType        CompressionType
 	Level                  int
@@ -114,6 +128,8 @@ var DefaultCompressionOptions = &FramedUploadOptions{
 	CompressionConcurrency: defaultCompressionConcurrency,
 	TargetPartSize:         defaultUploadPartSize,
 }
+
+var NoCompression = (*FramedUploadOptions)(nil)
 
 // ValidateCompressionOptions checks that compression options are valid.
 // ChunkSize must be a multiple of MemoryChunkSize to ensure alignment.
@@ -146,7 +162,7 @@ type FrameGetter interface {
 }
 
 type FileStorer interface {
-	StoreFile(ctx context.Context, inFilePath, asObjectPath string, opts *FramedUploadOptions) (ft *FrameTable, err error)
+	StoreFile(ctx context.Context, inFilePath, objectPath string, opts *FramedUploadOptions) (ft *FrameTable, err error)
 }
 
 type Blobber interface {

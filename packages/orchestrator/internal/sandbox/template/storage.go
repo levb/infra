@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 
 	blockmetrics "github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/build"
@@ -55,26 +56,65 @@ func NewStorage(
 	metrics blockmetrics.Metrics,
 ) (*Storage, error) {
 	if h == nil {
-		headerObjectPath := buildId + "/" + string(fileType) + storage.HeaderSuffix
 		_, ok := storageHeaderObjectType(fileType)
 		if !ok {
 			return nil, build.UnknownDiffTypeError{DiffType: fileType}
 		}
 
-		headerData, err := persistence.GetBlob(ctx, headerObjectPath)
-		if err != nil {
-			return nil, err
-		}
+		headerObjectPath := buildId + "/" + string(fileType) + storage.HeaderSuffix
 
-		diffHeader, err := header.Deserialize(headerData)
+		if storage.UseCompressedAssets {
+			// Fetch both default and compressed headers in parallel.
+			compressedHeaderPath := headerObjectPath + storage.DefaultCompressionOptions.CompressionType.Suffix()
+			var defaultData, compressedData []byte
+			var defaultErr, compressedErr error
 
-		// If we can't find the diff header in storage, we switch to templates without a headers
-		if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
-			return nil, fmt.Errorf("failed to deserialize header: %w", err)
-		}
+			eg, egCtx := errgroup.WithContext(ctx)
+			eg.Go(func() error {
+				defaultData, defaultErr = persistence.GetBlob(egCtx, headerObjectPath)
 
-		if err == nil {
-			h = diffHeader
+				return nil // don't fail the group; we handle errors below
+			})
+			eg.Go(func() error {
+				compressedData, compressedErr = persistence.GetBlob(egCtx, compressedHeaderPath)
+
+				return nil
+			})
+			_ = eg.Wait()
+
+			// Prefer compressed header if available.
+			if compressedErr == nil {
+				if diffHeader, err := header.Deserialize(compressedData); err == nil {
+					h = diffHeader
+				}
+			}
+			// Fall back to default header.
+			if h == nil && defaultErr == nil {
+				diffHeader, err := header.Deserialize(defaultData)
+				if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
+					return nil, fmt.Errorf("failed to deserialize header: %w", err)
+				}
+				if err == nil {
+					h = diffHeader
+				}
+			}
+			// If both failed with non-NotExist errors, propagate.
+			if h == nil && defaultErr != nil && !errors.Is(defaultErr, storage.ErrObjectNotExist) {
+				return nil, defaultErr
+			}
+		} else {
+			headerData, err := persistence.GetBlob(ctx, headerObjectPath)
+			if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
+				return nil, err
+			}
+
+			if err == nil {
+				diffHeader, err := header.Deserialize(headerData)
+				if err != nil {
+					return nil, fmt.Errorf("failed to deserialize header: %w", err)
+				}
+				h = diffHeader
+			}
 		}
 	}
 

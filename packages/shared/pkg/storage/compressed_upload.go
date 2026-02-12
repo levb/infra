@@ -25,6 +25,19 @@ func (c CompressionType) String() string {
 	}
 }
 
+// Suffix returns the object-path suffix for this compression type
+// (e.g. ".zst" for zstd, ".lz4" for LZ4, "" for none).
+func (c CompressionType) Suffix() string {
+	switch c {
+	case CompressionZstd:
+		return ".zst"
+	case CompressionLZ4:
+		return ".lz4"
+	default:
+		return ""
+	}
+}
+
 type encoder struct {
 	opts                 *FramedUploadOptions
 	maxUploadConcurrency int

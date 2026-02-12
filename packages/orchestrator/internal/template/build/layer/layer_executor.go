@@ -321,13 +321,13 @@ func (lb *LayerExecutor) startUpload(
 		}
 		completeDataFileUpload()
 
-		// Phase 2: Wait for all layers, then finalize headers
+		// Phase 2: Wait for all layers, then upload compressed headers
 		if err := waitForAllDataFileUploads(ctx); err != nil {
 			return fmt.Errorf("error waiting for data uploads: %w", err)
 		}
 
-		if err := result.TemplateBuild.FinalizeHeaders(ctx, pending); err != nil {
-			return fmt.Errorf("error finalizing headers: %w", err)
+		if err := result.TemplateBuild.UploadCompressedHeaders(ctx, pending); err != nil {
+			return fmt.Errorf("error uploading compressed headers: %w", err)
 		}
 
 		// Wait for previous uploads before saving cache entry

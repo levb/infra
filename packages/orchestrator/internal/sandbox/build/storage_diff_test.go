@@ -602,3 +602,152 @@ func TestStorageDiff_CompressedChunker_MultipleFrames(t *testing.T) {
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, size, int64(0))
 }
+
+// TestStorageDiff_CompressedPath_UsesZstSuffix verifies that when a compressed FrameTable
+// is provided, the chunker calls Size with the .zst object path.
+func TestStorageDiff_CompressedPath_UsesZstSuffix(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	frameSizeU := int64(4 * 1024 * 1024)
+	testData := make([]byte, frameSizeU)
+	for i := range testData {
+		testData[i] = byte(i % 256)
+	}
+	compressedData := compressTestBytes(t, testData)
+
+	frameTable := &storage.FrameTable{
+		CompressionType: storage.CompressionZstd,
+		StartAt:         storage.FrameOffset{U: 0, C: 0},
+		Frames: []storage.FrameSize{
+			{U: int32(frameSizeU), C: int32(len(compressedData))},
+		},
+	}
+
+	buildId := "test-build-zst-path"
+	provider := storage.NewMockStorageProvider(t)
+
+	// Track which path Size is called with.
+	var sizePath string
+	provider.EXPECT().Size(mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, path string) (int64, int64, error) {
+			sizePath = path
+
+			return frameSizeU, int64(len(compressedData)), nil
+		},
+	)
+
+	// Return compressed data that can be decompressed.
+	provider.EXPECT().GetFrame(
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+	).RunAndReturn(func(_ context.Context, _ string, offsetU int64, ft *storage.FrameTable, decompress bool, buf []byte) (storage.Range, error) {
+		data := compressedData
+		isCompressed := ft != nil && ft.CompressionType == storage.CompressionZstd
+		if decompress && isCompressed {
+			dec, err := zstd.NewReader(nil)
+			if err != nil {
+				return storage.Range{}, err
+			}
+			defer dec.Close()
+			decompressed, err := dec.DecodeAll(data, nil)
+			if err != nil {
+				return storage.Range{}, err
+			}
+			n := copy(buf, decompressed)
+
+			return storage.Range{Start: offsetU, Length: n}, nil
+		}
+		n := copy(buf, data)
+
+		return storage.Range{Start: offsetU, Length: n}, nil
+	}).Maybe()
+
+	// Mock GetBlob for header fetch (kept for compatibility).
+	headerPath := buildId + "/" + string(Rootfs) + storage.HeaderSuffix
+	bid := uuid.NewSHA1(uuid.NameSpaceOID, []byte(buildId))
+	metadata := &header.Metadata{
+		Version: 4, BuildId: bid, BaseBuildId: bid,
+		Size: uint64(frameSizeU), BlockSize: uint64(storage.MemoryChunkSize), Generation: 1,
+	}
+	h, err := header.NewHeader(metadata, nil)
+	require.NoError(t, err)
+	require.NoError(t, h.AddFrames(frameTable))
+	headerData, err := header.Serialize(h.Metadata, h.Mapping)
+	require.NoError(t, err)
+	provider.EXPECT().GetBlob(mock.Anything, headerPath).Return(headerData, nil).Maybe()
+
+	sd, err := newStorageDiff(tmpDir, buildId, Rootfs, int64(storage.MemoryChunkSize), testBlockMetrics(t), provider)
+	require.NoError(t, err)
+	defer sd.Close()
+
+	// Trigger lazy chunker init with a compressed frame table.
+	buf := make([]byte, 100)
+	_, err = sd.ReadAt(ctx, buf, 0, frameTable)
+	require.NoError(t, err)
+
+	// Size should have been called with the compression-type-suffixed path.
+	expectedPath := buildId + "/" + string(Rootfs) + frameTable.CompressionTypeSuffix()
+	assert.Equal(t, expectedPath, sizePath, "compressed frame table should cause Size to be called with compression-suffixed path")
+}
+
+// TestStorageDiff_UncompressedPath_UsesDefaultPath verifies that when no compressed
+// FrameTable is provided (nil or CompressionNone), the chunker calls Size with the default path.
+func TestStorageDiff_UncompressedPath_UsesDefaultPath(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	frameSizeU := int64(4 * 1024 * 1024)
+	testData := make([]byte, frameSizeU)
+	for i := range testData {
+		testData[i] = byte(i % 256)
+	}
+
+	buildId := "test-build-default-path"
+	provider := storage.NewMockStorageProvider(t)
+
+	var sizePath string
+	provider.EXPECT().Size(mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, path string) (int64, int64, error) {
+			sizePath = path
+
+			return frameSizeU, frameSizeU, nil
+		},
+	)
+
+	provider.EXPECT().GetFrame(
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+	).RunAndReturn(func(_ context.Context, _ string, _ int64, _ *storage.FrameTable, _ bool, buf []byte) (storage.Range, error) {
+		n := copy(buf, testData[:len(buf)])
+
+		return storage.Range{Start: 0, Length: n}, nil
+	}).Maybe()
+
+	headerPath := buildId + "/" + string(Memfile) + storage.HeaderSuffix
+	bid := uuid.NewSHA1(uuid.NameSpaceOID, []byte(buildId))
+	metadata := &header.Metadata{
+		Version: 4, BuildId: bid, BaseBuildId: bid,
+		Size: uint64(frameSizeU), BlockSize: uint64(storage.MemoryChunkSize), Generation: 1,
+	}
+	h, err := header.NewHeader(metadata, nil)
+	require.NoError(t, err)
+	headerData, err := header.Serialize(h.Metadata, h.Mapping)
+	require.NoError(t, err)
+	provider.EXPECT().GetBlob(mock.Anything, headerPath).Return(headerData, nil).Maybe()
+
+	sd, err := newStorageDiff(tmpDir, buildId, Memfile, int64(storage.MemoryChunkSize), testBlockMetrics(t), provider)
+	require.NoError(t, err)
+	defer sd.Close()
+
+	// Use nil frame table (uncompressed).
+	buf := make([]byte, 100)
+	_, err = sd.ReadAt(ctx, buf, 0, nil)
+	require.NoError(t, err)
+
+	// Size should have been called with the default path (no .zst).
+	expectedPath := buildId + "/" + string(Memfile)
+	assert.Equal(t, expectedPath, sizePath, "nil frame table should cause Size to be called with default path")
+}

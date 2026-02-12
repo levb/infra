@@ -106,45 +106,77 @@ type DataUploadResult struct {
 // UploadData uploads all data files (rootfs, memfile, snapfile, metadata) in parallel.
 // It returns the frame tables generated from compression, which should be added
 // to PendingFrameTables for later use when finalizing headers.
-func (t *TemplateBuild) UploadData(ctx context.Context, metadataPath string, fcSnapfilePath string, memfilePath *string, rootfsPath *string) (*DataUploadResult, error) {
+func (t *TemplateBuild) UploadData(
+	ctx context.Context,
+	metadataFilePath string,
+	snapFilePath string,
+	memfileFilePath *string,
+	rootfsFilePath *string,
+) (*DataUploadResult, error) {
 	eg, ctx := errgroup.WithContext(ctx)
 
-	result := &DataUploadResult{}
-	var rootfsFTMu, memfileFTMu sync.Mutex
+	var rootfsFT, memfileFT *storage.FrameTable
 
+	// Uncompressed uploads to default paths ensure rollback safety:
+	// flipping UseCompressedAssets=false makes readers use these paths immediately.
 	eg.Go(func() error {
-		// RootFS data
-		if rootfsPath != nil {
-			ft, err := t.persistence.StoreFile(ctx, *rootfsPath, t.files.StorageRootfsPath(), storage.DefaultCompressionOptions)
+		if rootfsFilePath != nil {
+			_, err := t.persistence.StoreFile(
+				ctx, *rootfsFilePath, t.files.StorageRootfsPath(), storage.NoCompression)
 			if err != nil {
 				return fmt.Errorf("error when uploading rootfs data: %w", err)
 			}
-			rootfsFTMu.Lock()
-			result.RootfsFrameTable = ft
-			rootfsFTMu.Unlock()
 		}
 
 		return nil
 	})
 
 	eg.Go(func() error {
-		// Memfile data
-		if memfilePath != nil {
-			ft, err := t.persistence.StoreFile(ctx, *memfilePath, t.files.StorageMemfilePath(), storage.DefaultCompressionOptions)
+		if memfileFilePath != nil {
+			_, err := t.persistence.StoreFile(
+				ctx, *memfileFilePath, t.files.StorageMemfilePath(), storage.NoCompression)
 			if err != nil {
 				return fmt.Errorf("error when uploading memfile data: %w", err)
 			}
-			memfileFTMu.Lock()
-			result.MemfileFrameTable = ft
-			memfileFTMu.Unlock()
 		}
 
 		return nil
 	})
 
+	// TODO LEV consider moving compression to a separate, backgroup process.
+	//
+	// TODO LEV centralize the logic of choosing the compression options, the
+	// only thing that matters here ATM is a bool to compress or not.
+	if storage.EnableGCSCompression {
+		eg.Go(func() error {
+			if rootfsFilePath != nil {
+				ft, err := t.persistence.StoreFile(
+					ctx, *rootfsFilePath, t.files.StorageRootfsCompressedPath(storage.DefaultCompressionOptions.CompressionType), storage.DefaultCompressionOptions)
+				if err != nil {
+					return fmt.Errorf("error when uploading compressed rootfs data: %w", err)
+				}
+				rootfsFT = ft
+			}
+
+			return nil
+		})
+
+		eg.Go(func() error {
+			if memfileFilePath != nil {
+				ft, err := t.persistence.StoreFile(
+					ctx, *memfileFilePath, t.files.StorageMemfileCompressedPath(storage.DefaultCompressionOptions.CompressionType), storage.DefaultCompressionOptions)
+				if err != nil {
+					return fmt.Errorf("error when uploading compressed memfile data: %w", err)
+				}
+				memfileFT = ft
+			}
+
+			return nil
+		})
+	}
+
 	eg.Go(func() error {
-		// Snap file
-		err := storage.StoreBlobFromFile(ctx, t.persistence, fcSnapfilePath, t.files.StorageSnapfilePath())
+		err := storage.StoreBlobFromFile(ctx, t.persistence, snapFilePath, t.files.StorageSnapfilePath())
 		if err != nil {
 			return fmt.Errorf("error when uploading snapfile: %w", err)
 		}
@@ -153,8 +185,7 @@ func (t *TemplateBuild) UploadData(ctx context.Context, metadataPath string, fcS
 	})
 
 	eg.Go(func() error {
-		// Metadata
-		err := storage.StoreBlobFromFile(ctx, t.persistence, metadataPath, t.files.StorageMetadataPath())
+		err := storage.StoreBlobFromFile(ctx, t.persistence, metadataFilePath, t.files.StorageMetadataPath())
 		if err != nil {
 			return fmt.Errorf("error when uploading metadata: %w", err)
 		}
@@ -162,62 +193,83 @@ func (t *TemplateBuild) UploadData(ctx context.Context, metadataPath string, fcS
 		return nil
 	})
 
+	// Uncompressed headers (like main's Upload) — no frame tables needed.
+	if t.rootfsHeader != nil {
+		eg.Go(func() error {
+			serialized, err := header.Serialize(t.rootfsHeader.Metadata, t.rootfsHeader.Mapping)
+			if err != nil {
+				return fmt.Errorf("error when serializing rootfs header: %w", err)
+			}
+
+			return t.persistence.StoreBlob(ctx, t.files.StorageRootfsHeaderPath(), bytes.NewReader(serialized))
+		})
+	}
+
+	if t.memfileHeader != nil {
+		eg.Go(func() error {
+			serialized, err := header.Serialize(t.memfileHeader.Metadata, t.memfileHeader.Mapping)
+			if err != nil {
+				return fmt.Errorf("error when serializing memfile header: %w", err)
+			}
+
+			return t.persistence.StoreBlob(ctx, t.files.StorageMemfileHeaderPath(), bytes.NewReader(serialized))
+		})
+	}
+
 	if err := eg.Wait(); err != nil {
 		return nil, err
 	}
 
-	return result, nil
+	return &DataUploadResult{
+		RootfsFrameTable:  rootfsFT,
+		MemfileFrameTable: memfileFT,
+	}, nil
 }
 
-// FinalizeHeaders applies pending frame tables to headers, serializes them,
-// and uploads them to storage. This should be called after all data uploads are complete
-// so pending contains frame tables from all builds referenced by the headers.
-func (t *TemplateBuild) FinalizeHeaders(ctx context.Context, pending *PendingFrameTables) error {
+// UploadCompressedHeaders applies pending frame tables to headers, serializes them,
+// and uploads compressed header variants to storage. This is a no-op when
+// EnableGCSCompression is false. Uncompressed headers are already uploaded by UploadData.
+//
+// This should be called after all data uploads are complete so pending contains
+// frame tables from all builds referenced by the headers.
+func (t *TemplateBuild) UploadCompressedHeaders(ctx context.Context, pending *PendingFrameTables) error {
+	if !storage.EnableGCSCompression {
+		return nil
+	}
+
+	// Apply frame tables (mutates headers — safe, uncompressed already uploaded by UploadData).
+	if err := pending.ApplyToHeader(t.rootfsHeader, "rootfs.ext4"); err != nil {
+		return fmt.Errorf("failed to apply frame tables to rootfs header: %w", err)
+	}
+
+	if err := pending.ApplyToHeader(t.memfileHeader, "memfile"); err != nil {
+		return fmt.Errorf("failed to apply frame tables to memfile header: %w", err)
+	}
+
+	// Serialize and upload compressed headers in parallel.
 	eg, ctx := errgroup.WithContext(ctx)
 
-	eg.Go(func() error {
-		if t.rootfsHeader == nil {
-			return nil
-		}
-
-		if err := pending.ApplyToHeader(t.rootfsHeader, "rootfs.ext4"); err != nil {
-			return fmt.Errorf("failed to apply frame tables to rootfs header: %w", err)
-		}
-
+	if t.rootfsHeader != nil {
 		serialized, err := header.Serialize(t.rootfsHeader.Metadata, t.rootfsHeader.Mapping)
 		if err != nil {
-			return fmt.Errorf("error when serializing rootfs header: %w", err)
+			return fmt.Errorf("error when serializing compressed rootfs header: %w", err)
 		}
 
-		err = t.persistence.StoreBlob(ctx, t.files.StorageRootfsHeaderPath(), bytes.NewReader(serialized))
-		if err != nil {
-			return fmt.Errorf("error when uploading rootfs header: %w", err)
-		}
+		eg.Go(func() error {
+			return t.persistence.StoreBlob(ctx, t.files.StorageRootfsHeaderCompressedPath(storage.DefaultCompressionOptions.CompressionType), bytes.NewReader(serialized))
+		})
+	}
 
-		return nil
-	})
-
-	eg.Go(func() error {
-		if t.memfileHeader == nil {
-			return nil
-		}
-
-		if err := pending.ApplyToHeader(t.memfileHeader, "memfile"); err != nil {
-			return fmt.Errorf("failed to apply frame tables to memfile header: %w", err)
-		}
-
+	if t.memfileHeader != nil {
 		serialized, err := header.Serialize(t.memfileHeader.Metadata, t.memfileHeader.Mapping)
 		if err != nil {
-			return fmt.Errorf("error when serializing memfile header: %w", err)
+			return fmt.Errorf("error when serializing compressed memfile header: %w", err)
 		}
 
-		err = t.persistence.StoreBlob(ctx, t.files.StorageMemfileHeaderPath(), bytes.NewReader(serialized))
-		if err != nil {
-			return fmt.Errorf("error when uploading memfile header: %w", err)
-		}
-
-		return nil
-	})
+		eg.Go(func() error {
+			return t.persistence.StoreBlob(ctx, t.files.StorageMemfileHeaderCompressedPath(storage.DefaultCompressionOptions.CompressionType), bytes.NewReader(serialized))
+		})
+	}
 
 	return eg.Wait()
 }
@@ -225,9 +277,9 @@ func (t *TemplateBuild) FinalizeHeaders(ctx context.Context, pending *PendingFra
 // Upload uploads data files and headers for a single build.
 // This is appropriate for single-layer uploads (e.g., pausing a sandbox) where
 // parent frame tables are already embedded in the header from previous builds.
-// For parallel multi-layer builds, use UploadData + FinalizeHeaders with a shared
+// For parallel multi-layer builds, use UploadData + UploadCompressedHeaders with a shared
 // PendingFrameTables to coordinate frame tables across concurrent uploads.
-func (t *TemplateBuild) Upload(ctx context.Context, metadataPath string, fcSnapfilePath string, memfilePath *string, rootfsPath *string) chan error {
+func (t *TemplateBuild) Upload(ctx context.Context, metadataFilePath string, snapFilePath string, memfileFilePath *string, rootfsFilePath *string) chan error {
 	done := make(chan error)
 
 	go func() {
@@ -235,7 +287,7 @@ func (t *TemplateBuild) Upload(ctx context.Context, metadataPath string, fcSnapf
 		pending := NewPendingFrameTables()
 
 		// Upload data files
-		result, err := t.UploadData(ctx, metadataPath, fcSnapfilePath, memfilePath, rootfsPath)
+		result, err := t.UploadData(ctx, metadataFilePath, snapFilePath, memfileFilePath, rootfsFilePath)
 		if err != nil {
 			done <- err
 
@@ -251,9 +303,10 @@ func (t *TemplateBuild) Upload(ctx context.Context, metadataPath string, fcSnapf
 			pending.Add(buildId+"/memfile", result.MemfileFrameTable)
 		}
 
-		// Finalize headers (only has this build's frame tables, not parents')
-		// This is why this method is deprecated - use the two-phase approach instead
-		err = t.FinalizeHeaders(ctx, pending)
+		// Upload compressed headers (only has this build's frame tables, not parents').
+		// For multi-layer builds, use UploadData + UploadCompressedHeaders with a shared
+		// PendingFrameTables instead.
+		err = t.UploadCompressedHeaders(ctx, pending)
 		done <- err
 	}()
 

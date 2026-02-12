@@ -36,12 +36,28 @@ func (t TemplateFiles) StorageMemfileHeaderPath() string {
 	return fmt.Sprintf("%s/%s%s", t.StorageDir(), MemfileName, HeaderSuffix)
 }
 
+func (t TemplateFiles) StorageMemfileCompressedPath(ct CompressionType) string {
+	return t.StorageMemfilePath() + ct.Suffix()
+}
+
+func (t TemplateFiles) StorageMemfileHeaderCompressedPath(ct CompressionType) string {
+	return t.StorageMemfileHeaderPath() + ct.Suffix()
+}
+
 func (t TemplateFiles) StorageRootfsPath() string {
 	return fmt.Sprintf("%s/%s", t.StorageDir(), RootfsName)
 }
 
 func (t TemplateFiles) StorageRootfsHeaderPath() string {
 	return fmt.Sprintf("%s/%s%s", t.StorageDir(), RootfsName, HeaderSuffix)
+}
+
+func (t TemplateFiles) StorageRootfsCompressedPath(ct CompressionType) string {
+	return t.StorageRootfsPath() + ct.Suffix()
+}
+
+func (t TemplateFiles) StorageRootfsHeaderCompressedPath(ct CompressionType) string {
+	return t.StorageRootfsHeaderPath() + ct.Suffix()
 }
 
 func (t TemplateFiles) StorageSnapfilePath() string {
