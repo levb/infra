@@ -21,14 +21,15 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
 )
 
-const nilUUID = "00000000-0000-0000-0000-000000000000"
-
 func main() {
 	build := flag.String("build", "", "build ID")
 	template := flag.String("template", "", "template ID or alias (requires E2B_API_KEY)")
 	storagePath := flag.String("storage", ".local-build", "storage: local path or gs://bucket")
 	memfile := flag.Bool("memfile", false, "inspect memfile artifact")
 	rootfs := flag.Bool("rootfs", false, "inspect rootfs artifact")
+	compressed := flag.Bool("compressed", false, "read compressed header (.compressed.header.lz4)")
+	summary := flag.Bool("summary", false, "show only metadata + summary (skip per-mapping listing)")
+	listFiles := flag.Bool("list-files", false, "list all files for this build with existence and size info")
 	data := flag.Bool("data", false, "inspect data blocks (default: header only)")
 	start := flag.Int64("start", 0, "start block (only with -data)")
 	end := flag.Int64("end", 0, "end block, 0 = all (only with -data)")
@@ -58,6 +59,12 @@ func main() {
 	}
 
 	ctx := context.Background()
+
+	// Handle list-files mode
+	if *listFiles {
+		printFileList(ctx, *storagePath, *build)
+		os.Exit(0)
+	}
 
 	// Handle validation mode
 	if *validateAll || *validateMemfile || *validateRootfs {
@@ -99,20 +106,36 @@ func main() {
 		artifactName = "rootfs.ext4"
 	}
 
-	// Read header
-	headerFile := artifactName + ".header"
-	headerData, headerSource, err := cmdutil.ReadFile(ctx, *storagePath, *build, headerFile)
-	if err != nil {
-		log.Fatalf("failed to read header: %s", err)
-	}
+	// Read header (compressed or default)
+	var h *header.Header
+	var headerSource string
 
-	h, err := header.Deserialize(headerData)
-	if err != nil {
-		log.Fatalf("failed to deserialize header: %s", err)
+	if *compressed {
+		var err error
+		h, headerSource, err = cmdutil.ReadCompressedHeader(ctx, *storagePath, *build, artifactName)
+		if err != nil {
+			log.Fatalf("failed to read compressed header: %s", err)
+		}
+		if h == nil {
+			log.Fatalf("compressed header not found for %s", artifactName)
+		}
+		headerSource += " [compressed header]"
+	} else {
+		headerFile := artifactName + storage.HeaderSuffix
+		headerData, source, err := cmdutil.ReadFile(ctx, *storagePath, *build, headerFile)
+		if err != nil {
+			log.Fatalf("failed to read header: %s", err)
+		}
+
+		h, err = header.Deserialize(headerData)
+		if err != nil {
+			log.Fatalf("failed to deserialize header: %s", err)
+		}
+		headerSource = source
 	}
 
 	// Print header info
-	printHeader(h, headerSource)
+	printHeader(h, headerSource, *summary)
 
 	// If -data flag, also inspect data blocks
 	if *data {
@@ -122,12 +145,16 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, "Usage: inspect-build (-build <uuid> | -template <id-or-alias>) [-storage <path>] [-memfile|-rootfs] [-data [-start N] [-end N]]\n")
-	fmt.Fprintf(os.Stderr, "       inspect-build (-build <uuid> | -template <id-or-alias>) [-storage <path>] -validate-all|-validate-memfile|-validate-rootfs\n\n")
+	fmt.Fprintf(os.Stderr, "Usage: inspect-build (-build <uuid> | -template <id-or-alias>) [-storage <path>] [-memfile|-rootfs] [-compressed] [-summary] [-data [-start N] [-end N]]\n")
+	fmt.Fprintf(os.Stderr, "       inspect-build (-build <uuid> | -template <id-or-alias>) [-storage <path>] -validate-all|-validate-memfile|-validate-rootfs\n")
+	fmt.Fprintf(os.Stderr, "       inspect-build (-build <uuid> | -template <id-or-alias>) [-storage <path>] -list-files\n\n")
 	fmt.Fprintf(os.Stderr, "The -template flag requires E2B_API_KEY environment variable.\n")
 	fmt.Fprintf(os.Stderr, "Set E2B_DOMAIN for non-production environments.\n\n")
 	fmt.Fprintf(os.Stderr, "Examples:\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123                           # inspect memfile header\n")
+	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -compressed               # inspect compressed memfile header\n")
+	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -summary                  # metadata + summaries only\n")
+	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -list-files               # list all build files\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -template base -storage gs://bucket     # inspect by template alias\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -template gtjfpksmxd9ct81x1f8e          # inspect by template ID\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -rootfs                   # inspect rootfs header\n")
@@ -138,7 +165,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -validate-memfile         # validate memfile integrity\n")
 }
 
-func printHeader(h *header.Header, source string) {
+func printHeader(h *header.Header, source string, summaryOnly bool) {
 	// Validate mappings
 	err := header.ValidateMappings(h.Mapping, h.Metadata.Size, h.Metadata.BlockSize)
 	if err != nil {
@@ -156,19 +183,21 @@ func printHeader(h *header.Header, source string) {
 	fmt.Printf("Block size         %d B\n", h.Metadata.BlockSize)
 	fmt.Printf("Blocks             %d\n", (h.Metadata.Size+h.Metadata.BlockSize-1)/h.Metadata.BlockSize)
 
-	totalSize := int64(unsafe.Sizeof(header.BuildMap{})) * int64(len(h.Mapping)) / 1024
-	var sizeMessage string
-	if totalSize == 0 {
-		sizeMessage = "<1 KiB"
-	} else {
-		sizeMessage = fmt.Sprintf("%d KiB", totalSize)
-	}
+	if !summaryOnly {
+		totalSize := int64(unsafe.Sizeof(header.BuildMap{})) * int64(len(h.Mapping)) / 1024
+		var sizeMessage string
+		if totalSize == 0 {
+			sizeMessage = "<1 KiB"
+		} else {
+			sizeMessage = fmt.Sprintf("%d KiB", totalSize)
+		}
 
-	fmt.Printf("\nMAPPING (%d maps, uses %s in storage)\n", len(h.Mapping), sizeMessage)
-	fmt.Printf("=======\n")
+		fmt.Printf("\nMAPPING (%d maps, uses %s in storage)\n", len(h.Mapping), sizeMessage)
+		fmt.Printf("=======\n")
 
-	for _, mapping := range h.Mapping {
-		fmt.Println(formatMappingWithCompression(mapping, h.Metadata.BlockSize))
+		for _, mapping := range h.Mapping {
+			fmt.Println(cmdutil.FormatMappingWithCompression(mapping, h.Metadata.BlockSize))
+		}
 	}
 
 	fmt.Printf("\nMAPPING SUMMARY\n")
@@ -186,139 +215,57 @@ func printHeader(h *header.Header, source string) {
 			additionalInfo = " (current)"
 		case h.Metadata.BaseBuildId.String():
 			additionalInfo = " (parent)"
-		case nilUUID:
+		case cmdutil.NilUUID:
 			additionalInfo = " (sparse)"
 		}
 		fmt.Printf("%s%s: %d blocks, %d MiB (%0.2f%%)\n", buildID, additionalInfo, uint64(size)/h.Metadata.BlockSize, uint64(size)/1024/1024, float64(size)/float64(h.Metadata.Size)*100)
 	}
 
 	// Print compression summary
-	printCompressionSummary(h)
+	cmdutil.PrintCompressionSummary(h)
 }
 
-// formatMappingWithCompression returns mapping info with compression details.
-func formatMappingWithCompression(mapping *header.BuildMap, blockSize uint64) string {
-	base := mapping.Format(blockSize)
+// printFileList prints a table of all expected files for this build with existence and size info.
+func printFileList(ctx context.Context, storagePath, buildID string) {
+	fmt.Printf("\nFILES for build %s\n", buildID)
+	fmt.Printf("====================\n")
+	fmt.Printf("%-45s  %6s  %12s\n", "FILE", "EXISTS", "SIZE")
+	fmt.Printf("%-45s  %6s  %12s\n", strings.Repeat("-", 45), strings.Repeat("-", 6), strings.Repeat("-", 12))
 
-	if mapping.FrameTable == nil {
-		return base + " [uncompressed]"
+	// Check all artifacts
+	for _, a := range cmdutil.MainArtifacts() {
+		files := []string{a.File, a.HeaderFile, a.CompressedFile, a.CompressedHeaderFile}
+		for _, f := range files {
+			info := cmdutil.ProbeFile(ctx, storagePath, buildID, f)
+			printFileInfo(info)
+		}
 	}
 
-	ft := mapping.FrameTable
-	var totalU, totalC int64
-	for _, frame := range ft.Frames {
-		totalU += int64(frame.U)
-		totalC += int64(frame.C)
+	// Snapfile and metadata
+	for _, f := range []string{storage.SnapfileName, storage.MetadataName} {
+		info := cmdutil.ProbeFile(ctx, storagePath, buildID, f)
+		printFileInfo(info)
 	}
-
-	ratio := float64(totalU) / float64(totalC)
-	compressionType := "unknown"
-	switch ft.CompressionType {
-	case storage.CompressionNone:
-		compressionType = "none"
-	case storage.CompressionZstd:
-		compressionType = "zstd"
-	}
-
-	return fmt.Sprintf("%s [%s: %d frames, U=%d C=%d ratio=%.2fx]",
-		base, compressionType, len(ft.Frames), totalU, totalC, ratio)
 }
 
-// printCompressionSummary prints compression statistics for the header.
-func printCompressionSummary(h *header.Header) {
-	var compressedMappings, uncompressedMappings int
-	var totalUncompressedBytes, totalCompressedBytes int64
-	var totalFrames int
-
-	// Per-build compression stats
-	type buildStats struct {
-		uncompressedBytes int64
-		compressedBytes   int64
-		frames            int
-		compressed        bool
-	}
-	buildCompressionStats := make(map[string]*buildStats)
-
-	for _, mapping := range h.Mapping {
-		buildID := mapping.BuildId.String()
-		if buildID == nilUUID {
-			continue // Skip sparse regions
-		}
-
-		if _, ok := buildCompressionStats[buildID]; !ok {
-			buildCompressionStats[buildID] = &buildStats{}
-		}
-		stats := buildCompressionStats[buildID]
-
-		if mapping.FrameTable != nil && mapping.FrameTable.CompressionType != storage.CompressionNone {
-			compressedMappings++
-			stats.compressed = true
-
-			for _, frame := range mapping.FrameTable.Frames {
-				totalUncompressedBytes += int64(frame.U)
-				totalCompressedBytes += int64(frame.C)
-				stats.uncompressedBytes += int64(frame.U)
-				stats.compressedBytes += int64(frame.C)
-			}
-			totalFrames += len(mapping.FrameTable.Frames)
-			stats.frames += len(mapping.FrameTable.Frames)
-		} else {
-			uncompressedMappings++
-			totalUncompressedBytes += int64(mapping.Length)
-			stats.uncompressedBytes += int64(mapping.Length)
-		}
-	}
-
-	fmt.Printf("\nCOMPRESSION SUMMARY\n")
-	fmt.Printf("===================\n")
-
-	if compressedMappings == 0 && uncompressedMappings == 0 {
-		fmt.Printf("No data mappings (all sparse)\n")
-
-		return
-	}
-
-	fmt.Printf("Mappings:          %d compressed, %d uncompressed\n", compressedMappings, uncompressedMappings)
-
-	if compressedMappings > 0 {
-		ratio := float64(totalUncompressedBytes) / float64(totalCompressedBytes)
-		savings := 100.0 * (1.0 - float64(totalCompressedBytes)/float64(totalUncompressedBytes))
-		fmt.Printf("Total frames:      %d\n", totalFrames)
-		fmt.Printf("Uncompressed size: %d B (%.2f MiB)\n", totalUncompressedBytes, float64(totalUncompressedBytes)/1024/1024)
-		fmt.Printf("Compressed size:   %d B (%.2f MiB)\n", totalCompressedBytes, float64(totalCompressedBytes)/1024/1024)
-		fmt.Printf("Compression ratio: %.2fx (%.1f%% space savings)\n", ratio, savings)
+func printFileInfo(info cmdutil.FileInfo) {
+	if info.Exists {
+		fmt.Printf("%-45s  %6s  %12s\n", info.Name, "yes", formatSize(info.Size))
 	} else {
-		fmt.Printf("All mappings are uncompressed\n")
+		fmt.Printf("%-45s  %6s  %12s\n", info.Name, "no", "-")
 	}
+}
 
-	// Per-build breakdown if there are multiple builds with compression
-	hasCompressedBuilds := false
-	for _, stats := range buildCompressionStats {
-		if stats.compressed {
-			hasCompressedBuilds = true
-
-			break
-		}
-	}
-
-	if hasCompressedBuilds {
-		fmt.Printf("\nPer-build compression:\n")
-		for buildID, stats := range buildCompressionStats {
-			label := buildID[:8] + "..."
-			if buildID == h.Metadata.BuildId.String() {
-				label += " (current)"
-			} else if buildID == h.Metadata.BaseBuildId.String() {
-				label += " (parent)"
-			}
-
-			if stats.compressed {
-				ratio := float64(stats.uncompressedBytes) / float64(stats.compressedBytes)
-				fmt.Printf("  %s: %d frames, U=%d C=%d (%.2fx)\n",
-					label, stats.frames, stats.uncompressedBytes, stats.compressedBytes, ratio)
-			} else {
-				fmt.Printf("  %s: uncompressed, %d B\n", label, stats.uncompressedBytes)
-			}
-		}
+func formatSize(size int64) string {
+	switch {
+	case size >= 1024*1024*1024:
+		return fmt.Sprintf("%.1f GiB", float64(size)/1024/1024/1024)
+	case size >= 1024*1024:
+		return fmt.Sprintf("%.1f MiB", float64(size)/1024/1024)
+	case size >= 1024:
+		return fmt.Sprintf("%.1f KiB", float64(size)/1024)
+	default:
+		return fmt.Sprintf("%d B", size)
 	}
 }
 
@@ -463,13 +410,29 @@ func validateArtifact(ctx context.Context, storagePath, buildID, artifactName st
 	dataMD5 := hex.EncodeToString(hash.Sum(nil))
 	fmt.Printf("  Data MD5 (storage): %s\n", dataMD5)
 
+	// 6. Validate compressed header if it exists
+	compressedH, _, compErr := cmdutil.ReadCompressedHeader(ctx, storagePath, buildID, artifactName)
+
+	switch {
+	case compErr != nil:
+		fmt.Printf("  Compressed header: read error: %s\n", compErr)
+	case compressedH != nil:
+		if err := header.ValidateHeader(compressedH); err != nil {
+			fmt.Printf("  Compressed header: validation FAILED: %s\n", err)
+		} else {
+			fmt.Printf("  Compressed header: validated ✓ (mappings=%d)\n", len(compressedH.Mapping))
+		}
+	default:
+		fmt.Printf("  Compressed header: not present\n")
+	}
+
 	return nil
 }
 
 // validateMapping validates a single mapping's data integrity.
 func validateMapping(ctx context.Context, storagePath, artifactName string, h *header.Header, mapping *header.BuildMap, _ int) error {
 	// Skip nil UUID mappings - these are sparse/zero regions with no backing data
-	if mapping.BuildId.String() == nilUUID {
+	if mapping.BuildId.String() == cmdutil.NilUUID {
 		return nil // Sparse region, nothing to validate
 	}
 
@@ -639,7 +602,7 @@ func resolveTemplateID(input string) (string, error) {
 		return "", fmt.Errorf("template %q not found. Available aliases: %s", input, strings.Join(availableAliases, ", "))
 	}
 
-	if match.BuildID == "" || match.BuildID == nilUUID {
+	if match.BuildID == "" || match.BuildID == cmdutil.NilUUID {
 		return "", fmt.Errorf("template %q has no successful build", input)
 	}
 

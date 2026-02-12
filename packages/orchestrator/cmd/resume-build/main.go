@@ -40,6 +40,7 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	sbxlogger "github.com/e2b-dev/infra/packages/shared/pkg/logger/sandbox"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
+	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
 	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
 
@@ -979,19 +980,34 @@ func printTemplateInfo(ctx context.Context, tmpl template.Template, meta metadat
 	if memfile, err := tmpl.Memfile(ctx); err == nil {
 		if size, err := memfile.Size(ctx); err == nil {
 			blockSize := memfile.BlockSize()
-			fmt.Printf("   Memfile: %d MB (%d KB blocks)\n", size>>20, blockSize>>10)
+			fmt.Printf("   Memfile: %d MB (%d KB blocks)%s\n", size>>20, blockSize>>10, compressionLabel(memfile.Header()))
 		}
 	}
 
 	if rootfs, err := tmpl.Rootfs(); err == nil {
 		if size, err := rootfs.Size(ctx); err == nil {
-			fmt.Printf("   Rootfs: %d MB (%d KB blocks)\n", size>>20, rootfs.BlockSize()>>10)
+			fmt.Printf("   Rootfs: %d MB (%d KB blocks)%s\n", size>>20, rootfs.BlockSize()>>10, compressionLabel(rootfs.Header()))
 		}
 	}
 
 	if meta.Prefetch != nil && meta.Prefetch.Memory != nil {
 		fmt.Printf("   Prefetch: %d blocks\n", meta.Prefetch.Memory.Count())
 	}
+}
+
+// compressionLabel returns a label like " [zstd]" if the header has compressed mappings.
+func compressionLabel(h *header.Header) string {
+	if h == nil {
+		return ""
+	}
+
+	for _, mapping := range h.Mapping {
+		if storage.IsCompressed(mapping.FrameTable) {
+			return fmt.Sprintf(" [%s compressed]", mapping.FrameTable.CompressionType.String())
+		}
+	}
+
+	return ""
 }
 
 // runCommandInSandbox runs a command inside the sandbox via envd
@@ -1107,8 +1123,8 @@ func printArtifactSizes(_, buildID string) {
 	fmt.Println("\n📦 Artifacts:")
 
 	for _, a := range cmdutil.MainArtifacts() {
-		path := filepath.Join(dir, a.File)
-		_, actual, err := cmdutil.GetFileSizes(path)
+		p := filepath.Join(dir, a.File)
+		_, actual, err := cmdutil.GetFileSizes(p)
 		if err != nil {
 			continue
 		}
@@ -1117,18 +1133,24 @@ func printArtifactSizes(_, buildID string) {
 		totalSize, blockSize := cmdutil.GetHeaderInfo(headerPath)
 		if totalSize == 0 {
 			fmt.Printf("   %s: %d MB (this layer)\n", a.Name, actual>>20)
-
-			continue
+		} else {
+			pct := float64(actual) / float64(totalSize) * 100
+			fmt.Printf("   %s: %d MB diff / %d MB total (%.1f%%), block size: %d KB\n",
+				a.Name, actual>>20, totalSize>>20, pct, blockSize>>10)
 		}
 
-		pct := float64(actual) / float64(totalSize) * 100
-		fmt.Printf("   %s: %d MB diff / %d MB total (%.1f%%), block size: %d KB\n",
-			a.Name, actual>>20, totalSize>>20, pct, blockSize>>10)
+		// Show compressed data size if it exists
+		if a.CompressedFile != "" {
+			compPath := filepath.Join(dir, a.CompressedFile)
+			if compActual, compErr := cmdutil.GetActualFileSize(compPath); compErr == nil {
+				fmt.Printf("   %s (compressed): %d MB\n", a.Name, compActual>>20)
+			}
+		}
 	}
 
 	for _, a := range cmdutil.SmallArtifacts() {
-		path := filepath.Join(dir, a.File)
-		if actual, err := cmdutil.GetActualFileSize(path); err == nil {
+		p := filepath.Join(dir, a.File)
+		if actual, err := cmdutil.GetActualFileSize(p); err == nil {
 			fmt.Printf("   %s: %d KB\n", a.Name, actual>>10)
 		}
 	}

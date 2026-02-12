@@ -72,16 +72,30 @@ func GetActualFileSize(path string) (int64, error) {
 
 // ArtifactInfo contains information about a build artifact.
 type ArtifactInfo struct {
-	Name       string
-	File       string
-	HeaderFile string
+	Name                 string
+	File                 string
+	HeaderFile           string
+	CompressedFile       string // e.g., "memfile.zst"
+	CompressedHeaderFile string // e.g., "memfile.compressed.header.lz4"
 }
 
 // MainArtifacts returns the list of main artifacts (rootfs, memfile).
 func MainArtifacts() []ArtifactInfo {
 	return []ArtifactInfo{
-		{"Rootfs", storage.RootfsName, storage.RootfsName + storage.HeaderSuffix},
-		{"Memfile", storage.MemfileName, storage.MemfileName + storage.HeaderSuffix},
+		{
+			Name:                 "Rootfs",
+			File:                 storage.RootfsName,
+			HeaderFile:           storage.RootfsName + storage.HeaderSuffix,
+			CompressedFile:       storage.RootfsName + storage.DefaultCompressionOptions.CompressionType.Suffix(),
+			CompressedHeaderFile: storage.RootfsName + storage.CompressedHeaderSuffix,
+		},
+		{
+			Name:                 "Memfile",
+			File:                 storage.MemfileName,
+			HeaderFile:           storage.MemfileName + storage.HeaderSuffix,
+			CompressedFile:       storage.MemfileName + storage.DefaultCompressionOptions.CompressionType.Suffix(),
+			CompressedHeaderFile: storage.MemfileName + storage.CompressedHeaderSuffix,
+		},
 	}
 }
 
@@ -89,7 +103,9 @@ func MainArtifacts() []ArtifactInfo {
 func SmallArtifacts() []struct{ Name, File string } {
 	return []struct{ Name, File string }{
 		{"Rootfs header", storage.RootfsName + storage.HeaderSuffix},
+		{"Rootfs compressed header", storage.RootfsName + storage.CompressedHeaderSuffix},
 		{"Memfile header", storage.MemfileName + storage.HeaderSuffix},
+		{"Memfile compressed header", storage.MemfileName + storage.CompressedHeaderSuffix},
 		{"Snapfile", storage.SnapfileName},
 		{"Metadata", storage.MetadataName},
 	}

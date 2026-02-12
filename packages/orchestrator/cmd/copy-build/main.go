@@ -135,6 +135,32 @@ func getReferencedData(h *header.Header, objectType storage.ObjectType) []string
 	return dataReferences
 }
 
+// getCompressedDataReferences returns compressed data paths (.zst) for all builds referenced by the header.
+func getCompressedDataReferences(h *header.Header, objectType storage.ObjectType) []string {
+	builds := make(map[string]struct{})
+
+	for _, mapping := range h.Mapping {
+		builds[mapping.BuildId.String()] = struct{}{}
+	}
+
+	delete(builds, uuid.Nil.String())
+
+	var refs []string
+
+	for build := range builds {
+		tmpl := storage.TemplateFiles{BuildID: build}
+
+		switch objectType {
+		case storage.MemfileHeaderObjectType:
+			refs = append(refs, tmpl.CompressedPath(storage.MemfileName))
+		case storage.RootFSHeaderObjectType:
+			refs = append(refs, tmpl.CompressedPath(storage.RootfsName))
+		}
+	}
+
+	return refs
+}
+
 func localCopy(ctx context.Context, from, to *Destination) error {
 	command := []string{
 		"rsync",
@@ -181,21 +207,23 @@ func main() {
 	buildId := flag.String("build", "", "build id")
 	from := flag.String("from", "", "from destination")
 	to := flag.String("to", "", "to destination")
+	skipCompressed := flag.Bool("skip-compressed", false, "skip compressed variants (.zst data, .compressed.header.lz4)")
 
 	flag.Parse()
 
 	fmt.Printf("Copying build '%s' from '%s' to '%s'\n", *buildId, *from, *to)
 
-	template := storage.TemplateFiles{
+	tmpl := storage.TemplateFiles{
 		BuildID: *buildId,
 	}
 
 	ctx := context.Background()
 
 	var filesToCopy []string
+	var optionalFiles []string // files that may not exist (compressed variants)
 
 	// Extract all files referenced by the build memfile header
-	buildMemfileHeaderPath := template.HeaderPath(storage.MemfileName)
+	buildMemfileHeaderPath := tmpl.HeaderPath(storage.MemfileName)
 
 	var memfileHeader *header.Header
 	if strings.HasPrefix(*from, "gs://") {
@@ -222,7 +250,7 @@ func main() {
 	filesToCopy = append(filesToCopy, dataReferences...)
 
 	// Extract all files referenced by the build rootfs header
-	buildRootfsHeaderPath := template.HeaderPath(storage.RootfsName)
+	buildRootfsHeaderPath := tmpl.HeaderPath(storage.RootfsName)
 
 	var rootfsHeader *header.Header
 	if strings.HasPrefix(*from, "gs://") {
@@ -247,45 +275,94 @@ func main() {
 	filesToCopy = append(filesToCopy, buildRootfsHeaderPath)
 	filesToCopy = append(filesToCopy, dataReferences...)
 
+	// Add compressed variants (optional — may not exist for older builds)
+	if !*skipCompressed {
+		// Compressed headers for this build
+		optionalFiles = append(optionalFiles,
+			tmpl.CompressedHeaderPath(storage.MemfileName),
+			tmpl.CompressedHeaderPath(storage.RootfsName),
+		)
+
+		// Compressed data files for all referenced builds
+		optionalFiles = append(optionalFiles, getCompressedDataReferences(memfileHeader, storage.MemfileHeaderObjectType)...)
+		optionalFiles = append(optionalFiles, getCompressedDataReferences(rootfsHeader, storage.RootFSHeaderObjectType)...)
+	}
+
 	// Add the snapfile to the list of files to copy
-	snapfilePath := template.Path(storage.SnapfileName)
+	snapfilePath := tmpl.Path(storage.SnapfileName)
 	filesToCopy = append(filesToCopy, snapfilePath)
 
-	metadataPath := template.Path(storage.MetadataName)
+	metadataPath := tmpl.Path(storage.MetadataName)
 	filesToCopy = append(filesToCopy, metadataPath)
 
+	// Combine required and optional files
+	optionalSet := make(map[string]struct{}, len(optionalFiles))
+	for _, f := range optionalFiles {
+		optionalSet[f] = struct{}{}
+	}
+
+	allFiles := append(filesToCopy, optionalFiles...)
+
 	// sort files to copy
-	sort.Strings(filesToCopy)
+	sort.Strings(allFiles)
 
 	googleStorageClient, err := googleStorage.NewClient(ctx)
 	if err != nil {
 		log.Fatalf("failed to create Google Storage client: %s", err)
 	}
 
-	fmt.Printf("Copying %d files\n", len(filesToCopy))
+	fmt.Printf("Copying %d files (%d required, %d optional)\n", len(allFiles), len(filesToCopy), len(optionalFiles))
 
-	var errgroup errgroup.Group
+	var eg errgroup.Group
 
-	errgroup.SetLimit(20)
+	eg.SetLimit(20)
 
-	var done atomic.Int32
+	var copied, skipped, notFound atomic.Int32
 
-	for _, file := range filesToCopy {
-		errgroup.Go(func() error {
+	for _, file := range allFiles {
+		_, isOptional := optionalSet[file]
+
+		eg.Go(func() error {
 			var fromDestination *Destination
 			if strings.HasPrefix(*from, "gs://") {
 				bucketName, _ := strings.CutPrefix(*from, "gs://")
 				fromObject := googleStorageClient.Bucket(bucketName).Object(file)
 				d, destErr := NewDestinationFromObject(ctx, fromObject)
 				if destErr != nil {
+					if isOptional {
+						notFound.Add(1)
+
+						return nil
+					}
+
 					return fmt.Errorf("failed to create destination from object: %w", destErr)
+				}
+
+				// For optional GCS files, CRC=0 means the object doesn't exist
+				if isOptional && d.CRC == 0 {
+					notFound.Add(1)
+
+					return nil
 				}
 
 				fromDestination = d
 			} else {
 				d, destErr := NewDestinationFromPath(*from, file)
 				if destErr != nil {
+					if isOptional {
+						notFound.Add(1)
+
+						return nil
+					}
+
 					return fmt.Errorf("failed to create destination from path: %w", destErr)
+				}
+
+				// For optional local files, CRC=0 means the file doesn't exist
+				if isOptional && d.CRC == 0 {
+					notFound.Add(1)
+
+					return nil
 				}
 
 				fromDestination = d
@@ -315,15 +392,15 @@ func main() {
 				}
 			}
 
-			fmt.Printf("+ copying '%s' to '%s'\n", fromDestination.Path, toDestination.Path)
-
 			if fromDestination.CRC == toDestination.CRC && fromDestination.CRC != 0 {
-				fmt.Printf("-> [%d/%d] '%s' already exists, skipping\n", done.Load(), len(filesToCopy), toDestination.Path)
+				fmt.Printf("-> '%s' already exists, skipping\n", toDestination.Path)
 
-				done.Add(1)
+				skipped.Add(1)
 
 				return nil
 			}
+
+			fmt.Printf("+ copying '%s' to '%s'\n", fromDestination.Path, toDestination.Path)
 
 			if fromDestination.isLocal && toDestination.isLocal {
 				err := localCopy(ctx, fromDestination, toDestination)
@@ -337,17 +414,17 @@ func main() {
 				}
 			}
 
-			done.Add(1)
-
-			fmt.Printf("-> [%d/%d] '%s' copied\n", done.Load(), len(filesToCopy), toDestination.Path)
+			copied.Add(1)
 
 			return nil
 		})
 	}
 
-	if err := errgroup.Wait(); err != nil {
+	if err := eg.Wait(); err != nil {
 		log.Fatalf("failed to copy files: %s", err)
 	}
 
+	fmt.Printf("\nSummary: %d copied, %d skipped (already exist), %d not found (optional)\n",
+		copied.Load(), skipped.Load(), notFound.Load())
 	fmt.Printf("Build '%s' copied to '%s'\n", *buildId, *to)
 }
