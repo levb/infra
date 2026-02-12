@@ -31,53 +31,41 @@ func TestFrameTable_CompressionTypeSuffix(t *testing.T) {
 	assert.Empty(t, nilFT.CompressionTypeSuffix())
 }
 
-func TestTemplateFiles_CompressedPaths(t *testing.T) {
+func TestTemplateFiles_Path(t *testing.T) {
 	t.Parallel()
 
 	tf := TemplateFiles{BuildID: "test-build-123"}
 
-	tests := []struct {
-		name     string
-		method   func(CompressionType) string
-		ct       CompressionType
-		expected string
-	}{
-		{
-			name:     "StorageMemfileCompressedPath/zstd",
-			method:   tf.StorageMemfileCompressedPath,
-			ct:       CompressionZstd,
-			expected: "test-build-123/memfile.zst",
-		},
-		{
-			name:     "StorageMemfileHeaderCompressedPath/zstd",
-			method:   tf.StorageMemfileHeaderCompressedPath,
-			ct:       CompressionZstd,
-			expected: "test-build-123/memfile.header.zst",
-		},
-		{
-			name:     "StorageRootfsCompressedPath/zstd",
-			method:   tf.StorageRootfsCompressedPath,
-			ct:       CompressionZstd,
-			expected: "test-build-123/rootfs.ext4.zst",
-		},
-		{
-			name:     "StorageRootfsHeaderCompressedPath/zstd",
-			method:   tf.StorageRootfsHeaderCompressedPath,
-			ct:       CompressionZstd,
-			expected: "test-build-123/rootfs.ext4.header.zst",
-		},
-		{
-			name:     "StorageRootfsCompressedPath/lz4",
-			method:   tf.StorageRootfsCompressedPath,
-			ct:       CompressionLZ4,
-			expected: "test-build-123/rootfs.ext4.lz4",
-		},
-	}
+	assert.Equal(t, "test-build-123/memfile", tf.Path(MemfileName))
+	assert.Equal(t, "test-build-123/rootfs.ext4", tf.Path(RootfsName))
+	assert.Equal(t, "test-build-123/snapfile", tf.Path(SnapfileName))
+	assert.Equal(t, "test-build-123/metadata.json", tf.Path(MetadataName))
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.expected, tc.method(tc.ct))
-		})
-	}
+func TestTemplateFiles_HeaderPath(t *testing.T) {
+	t.Parallel()
+
+	tf := TemplateFiles{BuildID: "test-build-123"}
+
+	assert.Equal(t, "test-build-123/memfile.header", tf.HeaderPath(MemfileName))
+	assert.Equal(t, "test-build-123/rootfs.ext4.header", tf.HeaderPath(RootfsName))
+}
+
+func TestTemplateFiles_CompressedPath(t *testing.T) {
+	t.Parallel()
+
+	tf := TemplateFiles{BuildID: "test-build-123"}
+
+	// CompressedPath uses DefaultCompressionOptions (currently zstd).
+	assert.Equal(t, "test-build-123/memfile.zst", tf.CompressedPath(MemfileName))
+	assert.Equal(t, "test-build-123/rootfs.ext4.zst", tf.CompressedPath(RootfsName))
+}
+
+func TestTemplateFiles_CompressedHeaderPath(t *testing.T) {
+	t.Parallel()
+
+	tf := TemplateFiles{BuildID: "test-build-123"}
+
+	assert.Equal(t, "test-build-123/memfile.compressed.header.lz4", tf.CompressedHeaderPath(MemfileName))
+	assert.Equal(t, "test-build-123/rootfs.ext4.compressed.header.lz4", tf.CompressedHeaderPath(RootfsName))
 }

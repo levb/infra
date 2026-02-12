@@ -288,7 +288,7 @@ func (pb *OptimizeBuilder) updateMetadata(ctx context.Context, t metadata.Templa
 	defer span.End()
 
 	templateFiles := storage.TemplateFiles{BuildID: t.Template.BuildID}
-	metadataPath := templateFiles.StorageMetadataPath()
+	metadataPath := templateFiles.Path(storage.MetadataName)
 
 	// Serialize metadata
 	metaBytes, err := json.Marshal(t)

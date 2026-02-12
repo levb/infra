@@ -10,10 +10,6 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
-func storagePath(buildId string, diffType DiffType) string {
-	return fmt.Sprintf("%s/%s", buildId, diffType)
-}
-
 type StorageDiff struct {
 	// chunker is lazily initialized via chunkerOnce on first ReadAt/Slice call.
 	chunker     block.Chunker
@@ -48,7 +44,8 @@ func newStorageDiff(
 	metrics blockmetrics.Metrics,
 	persistence storage.StorageProvider,
 ) (*StorageDiff, error) {
-	objectPath := storagePath(buildId, diffType)
+	files := storage.TemplateFiles{BuildID: buildId}
+	objectPath := files.Path(string(diffType))
 	_, ok := storageObjectType(diffType)
 	if !ok {
 		return nil, UnknownDiffTypeError{diffType}

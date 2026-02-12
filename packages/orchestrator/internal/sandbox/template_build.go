@@ -122,7 +122,7 @@ func (t *TemplateBuild) UploadData(
 	eg.Go(func() error {
 		if rootfsFilePath != nil {
 			_, err := t.persistence.StoreFile(
-				ctx, *rootfsFilePath, t.files.StorageRootfsPath(), storage.NoCompression)
+				ctx, *rootfsFilePath, t.files.Path(storage.RootfsName), storage.NoCompression)
 			if err != nil {
 				return fmt.Errorf("error when uploading rootfs data: %w", err)
 			}
@@ -134,7 +134,7 @@ func (t *TemplateBuild) UploadData(
 	eg.Go(func() error {
 		if memfileFilePath != nil {
 			_, err := t.persistence.StoreFile(
-				ctx, *memfileFilePath, t.files.StorageMemfilePath(), storage.NoCompression)
+				ctx, *memfileFilePath, t.files.Path(storage.MemfileName), storage.NoCompression)
 			if err != nil {
 				return fmt.Errorf("error when uploading memfile data: %w", err)
 			}
@@ -151,7 +151,7 @@ func (t *TemplateBuild) UploadData(
 		eg.Go(func() error {
 			if rootfsFilePath != nil {
 				ft, err := t.persistence.StoreFile(
-					ctx, *rootfsFilePath, t.files.StorageRootfsCompressedPath(storage.DefaultCompressionOptions.CompressionType), storage.DefaultCompressionOptions)
+					ctx, *rootfsFilePath, t.files.CompressedPath(storage.RootfsName), storage.DefaultCompressionOptions)
 				if err != nil {
 					return fmt.Errorf("error when uploading compressed rootfs data: %w", err)
 				}
@@ -164,7 +164,7 @@ func (t *TemplateBuild) UploadData(
 		eg.Go(func() error {
 			if memfileFilePath != nil {
 				ft, err := t.persistence.StoreFile(
-					ctx, *memfileFilePath, t.files.StorageMemfileCompressedPath(storage.DefaultCompressionOptions.CompressionType), storage.DefaultCompressionOptions)
+					ctx, *memfileFilePath, t.files.CompressedPath(storage.MemfileName), storage.DefaultCompressionOptions)
 				if err != nil {
 					return fmt.Errorf("error when uploading compressed memfile data: %w", err)
 				}
@@ -176,7 +176,7 @@ func (t *TemplateBuild) UploadData(
 	}
 
 	eg.Go(func() error {
-		err := storage.StoreBlobFromFile(ctx, t.persistence, snapFilePath, t.files.StorageSnapfilePath())
+		err := storage.StoreBlobFromFile(ctx, t.persistence, snapFilePath, t.files.Path(storage.SnapfileName))
 		if err != nil {
 			return fmt.Errorf("error when uploading snapfile: %w", err)
 		}
@@ -185,7 +185,7 @@ func (t *TemplateBuild) UploadData(
 	})
 
 	eg.Go(func() error {
-		err := storage.StoreBlobFromFile(ctx, t.persistence, metadataFilePath, t.files.StorageMetadataPath())
+		err := storage.StoreBlobFromFile(ctx, t.persistence, metadataFilePath, t.files.Path(storage.MetadataName))
 		if err != nil {
 			return fmt.Errorf("error when uploading metadata: %w", err)
 		}
@@ -201,7 +201,7 @@ func (t *TemplateBuild) UploadData(
 				return fmt.Errorf("error when serializing rootfs header: %w", err)
 			}
 
-			return t.persistence.StoreBlob(ctx, t.files.StorageRootfsHeaderPath(), bytes.NewReader(serialized))
+			return t.persistence.StoreBlob(ctx, t.files.HeaderPath(storage.RootfsName), bytes.NewReader(serialized))
 		})
 	}
 
@@ -212,7 +212,7 @@ func (t *TemplateBuild) UploadData(
 				return fmt.Errorf("error when serializing memfile header: %w", err)
 			}
 
-			return t.persistence.StoreBlob(ctx, t.files.StorageMemfileHeaderPath(), bytes.NewReader(serialized))
+			return t.persistence.StoreBlob(ctx, t.files.HeaderPath(storage.MemfileName), bytes.NewReader(serialized))
 		})
 	}
 
@@ -255,8 +255,13 @@ func (t *TemplateBuild) UploadCompressedHeaders(ctx context.Context, pending *Pe
 			return fmt.Errorf("error when serializing compressed rootfs header: %w", err)
 		}
 
+		compressed, err := storage.CompressLZ4(serialized)
+		if err != nil {
+			return fmt.Errorf("error when LZ4-compressing rootfs header: %w", err)
+		}
+
 		eg.Go(func() error {
-			return t.persistence.StoreBlob(ctx, t.files.StorageRootfsHeaderCompressedPath(storage.DefaultCompressionOptions.CompressionType), bytes.NewReader(serialized))
+			return t.persistence.StoreBlob(ctx, t.files.CompressedHeaderPath(storage.RootfsName), bytes.NewReader(compressed))
 		})
 	}
 
@@ -266,8 +271,13 @@ func (t *TemplateBuild) UploadCompressedHeaders(ctx context.Context, pending *Pe
 			return fmt.Errorf("error when serializing compressed memfile header: %w", err)
 		}
 
+		compressed, err := storage.CompressLZ4(serialized)
+		if err != nil {
+			return fmt.Errorf("error when LZ4-compressing memfile header: %w", err)
+		}
+
 		eg.Go(func() error {
-			return t.persistence.StoreBlob(ctx, t.files.StorageMemfileHeaderCompressedPath(storage.DefaultCompressionOptions.CompressionType), bytes.NewReader(serialized))
+			return t.persistence.StoreBlob(ctx, t.files.CompressedHeaderPath(storage.MemfileName), bytes.NewReader(compressed))
 		})
 	}
 

@@ -122,12 +122,12 @@ func TestUploadData_CompressionEnabled(t *testing.T) { //nolint:paralleltest // 
 	}
 
 	// Uncompressed uploads (nil opts)
-	assert.False(t, pathOpts[files.StorageRootfsPath()], "rootfs uncompressed should have nil opts")
-	assert.False(t, pathOpts[files.StorageMemfilePath()], "memfile uncompressed should have nil opts")
+	assert.False(t, pathOpts[files.Path(storage.RootfsName)], "rootfs uncompressed should have nil opts")
+	assert.False(t, pathOpts[files.Path(storage.MemfileName)], "memfile uncompressed should have nil opts")
 
 	// Compressed uploads (non-nil opts)
-	assert.True(t, pathOpts[files.StorageRootfsCompressedPath(storage.CompressionZstd)], "rootfs compressed should have non-nil opts")
-	assert.True(t, pathOpts[files.StorageMemfileCompressedPath(storage.CompressionZstd)], "memfile compressed should have non-nil opts")
+	assert.True(t, pathOpts[files.CompressedPath(storage.RootfsName)], "rootfs compressed should have non-nil opts")
+	assert.True(t, pathOpts[files.CompressedPath(storage.MemfileName)], "memfile compressed should have non-nil opts")
 
 	// Result should have frame tables from compressed uploads.
 	assert.NotNil(t, result.RootfsFrameTable, "rootfs frame table should be non-nil")
@@ -139,8 +139,8 @@ func TestUploadData_CompressionEnabled(t *testing.T) { //nolint:paralleltest // 
 		blobPaths = append(blobPaths, c.objectPath)
 	}
 
-	assert.Contains(t, blobPaths, files.StorageRootfsHeaderPath(), "uncompressed rootfs header should be uploaded")
-	assert.Contains(t, blobPaths, files.StorageMemfileHeaderPath(), "uncompressed memfile header should be uploaded")
+	assert.Contains(t, blobPaths, files.HeaderPath(storage.RootfsName), "uncompressed rootfs header should be uploaded")
+	assert.Contains(t, blobPaths, files.HeaderPath(storage.MemfileName), "uncompressed memfile header should be uploaded")
 }
 
 func TestUploadData_CompressionDisabled(t *testing.T) { //nolint:paralleltest // mutates storage.EnableGCSCompression global
@@ -203,10 +203,10 @@ func TestUploadData_CompressionDisabled(t *testing.T) { //nolint:paralleltest //
 	}
 
 	// Only uncompressed data paths should be called via StoreFile.
-	assert.Contains(t, filePaths, files.StorageRootfsPath())
-	assert.Contains(t, filePaths, files.StorageMemfilePath())
-	assert.NotContains(t, filePaths, files.StorageRootfsCompressedPath(storage.CompressionZstd))
-	assert.NotContains(t, filePaths, files.StorageMemfileCompressedPath(storage.CompressionZstd))
+	assert.Contains(t, filePaths, files.Path(storage.RootfsName))
+	assert.Contains(t, filePaths, files.Path(storage.MemfileName))
+	assert.NotContains(t, filePaths, files.CompressedPath(storage.RootfsName))
+	assert.NotContains(t, filePaths, files.CompressedPath(storage.MemfileName))
 
 	// No frame tables when compression is disabled.
 	assert.Nil(t, result.RootfsFrameTable)
@@ -218,8 +218,8 @@ func TestUploadData_CompressionDisabled(t *testing.T) { //nolint:paralleltest //
 		blobPaths = append(blobPaths, c.objectPath)
 	}
 
-	assert.Contains(t, blobPaths, files.StorageRootfsHeaderPath(), "uncompressed rootfs header should be uploaded")
-	assert.Contains(t, blobPaths, files.StorageMemfileHeaderPath(), "uncompressed memfile header should be uploaded")
+	assert.Contains(t, blobPaths, files.HeaderPath(storage.RootfsName), "uncompressed rootfs header should be uploaded")
+	assert.Contains(t, blobPaths, files.HeaderPath(storage.MemfileName), "uncompressed memfile header should be uploaded")
 }
 
 func TestUploadCompressedHeaders_CompressionEnabled(t *testing.T) { //nolint:paralleltest // mutates storage.EnableGCSCompression global
@@ -279,9 +279,11 @@ func TestUploadCompressedHeaders_CompressionEnabled(t *testing.T) { //nolint:par
 	}
 
 	// Verify compressed rootfs header HAS frame table in its mapping.
-	compressedRootfsData, ok := blobMap[files.StorageRootfsHeaderCompressedPath(storage.CompressionZstd)]
+	compressedRootfsData, ok := blobMap[files.CompressedHeaderPath(storage.RootfsName)]
 	require.True(t, ok, "compressed rootfs header should be uploaded")
-	compressedRootfsH, err := header.Deserialize(compressedRootfsData)
+	decompressedRootfs, err := storage.DecompressLZ4(compressedRootfsData, storage.MaxCompressedHeaderSize)
+	require.NoError(t, err)
+	compressedRootfsH, err := header.Deserialize(decompressedRootfs)
 	require.NoError(t, err)
 	hasFrameTable := false
 	for _, m := range compressedRootfsH.Mapping {
@@ -294,9 +296,11 @@ func TestUploadCompressedHeaders_CompressionEnabled(t *testing.T) { //nolint:par
 	assert.True(t, hasFrameTable, "compressed rootfs header should have frame table in mapping")
 
 	// Verify compressed memfile header HAS frame table.
-	compressedMemfileData, ok := blobMap[files.StorageMemfileHeaderCompressedPath(storage.CompressionZstd)]
+	compressedMemfileData, ok := blobMap[files.CompressedHeaderPath(storage.MemfileName)]
 	require.True(t, ok, "compressed memfile header should be uploaded")
-	compressedMemfileH, err := header.Deserialize(compressedMemfileData)
+	decompressedMemfile, err := storage.DecompressLZ4(compressedMemfileData, storage.MaxCompressedHeaderSize)
+	require.NoError(t, err)
+	compressedMemfileH, err := header.Deserialize(decompressedMemfile)
 	require.NoError(t, err)
 	hasFrameTable = false
 	for _, m := range compressedMemfileH.Mapping {
@@ -427,10 +431,13 @@ func TestUploadCompressedHeaders_SerializationRoundTrip(t *testing.T) { //nolint
 	require.NoError(t, err)
 
 	// Verify the compressed header round-trips correctly.
-	compressedData, ok := blobMap[files.StorageMemfileHeaderCompressedPath(storage.CompressionZstd)]
+	compressedData, ok := blobMap[files.CompressedHeaderPath(storage.MemfileName)]
 	require.True(t, ok)
 
-	h, err := header.Deserialize(compressedData)
+	decompressed, err := storage.DecompressLZ4(compressedData, storage.MaxCompressedHeaderSize)
+	require.NoError(t, err)
+
+	h, err := header.Deserialize(decompressed)
 	require.NoError(t, err)
 
 	// Find the mapping with our buildId.

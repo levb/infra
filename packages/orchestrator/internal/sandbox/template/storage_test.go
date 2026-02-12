@@ -65,12 +65,22 @@ func makeSerializedHeader(t *testing.T, buildId uuid.UUID, size uint64, withFram
 	return data
 }
 
+// lz4Compress wraps header data in LZ4 block compression for test fixtures.
+func lz4Compress(t *testing.T, data []byte) []byte {
+	t.Helper()
+	compressed, err := storage.CompressLZ4(data)
+	require.NoError(t, err)
+
+	return compressed
+}
+
 func TestNewStorage_UseCompressedAssets_PrefersCompressedHeader(t *testing.T) { //nolint:paralleltest // mutates storage.UseCompressedAssets global
 	saved := storage.UseCompressedAssets
 	t.Cleanup(func() { storage.UseCompressedAssets = saved })
 	storage.UseCompressedAssets = true
 
 	buildId := uuid.New()
+	files := storage.TemplateFiles{BuildID: buildId.String()}
 	dataSize := uint64(storage.MemoryChunkSize)
 
 	defaultHeaderData := makeSerializedHeader(t, buildId, dataSize, false)
@@ -78,11 +88,11 @@ func TestNewStorage_UseCompressedAssets_PrefersCompressedHeader(t *testing.T) { 
 
 	provider := storage.NewMockStorageProvider(t)
 
-	headerPath := buildId.String() + "/" + string(build.Memfile) + storage.HeaderSuffix
-	compressedHeaderPath := headerPath + storage.DefaultCompressionOptions.CompressionType.Suffix()
+	headerPath := files.HeaderPath(string(build.Memfile))
+	compressedHeaderPath := files.CompressedHeaderPath(string(build.Memfile))
 
 	provider.EXPECT().GetBlob(mock.Anything, headerPath).Return(defaultHeaderData, nil)
-	provider.EXPECT().GetBlob(mock.Anything, compressedHeaderPath).Return(compressedHeaderData, nil)
+	provider.EXPECT().GetBlob(mock.Anything, compressedHeaderPath).Return(lz4Compress(t, compressedHeaderData), nil)
 	// Size is called by NewFile -> NewStorage's build.NewFile path
 	provider.EXPECT().Size(mock.Anything, mock.Anything).Return(int64(dataSize), int64(dataSize), nil).Maybe()
 
@@ -112,14 +122,15 @@ func TestNewStorage_UseCompressedAssets_FallsBackToDefault(t *testing.T) { //nol
 	storage.UseCompressedAssets = true
 
 	buildId := uuid.New()
+	files := storage.TemplateFiles{BuildID: buildId.String()}
 	dataSize := uint64(storage.MemoryChunkSize)
 
 	defaultHeaderData := makeSerializedHeader(t, buildId, dataSize, false)
 
 	provider := storage.NewMockStorageProvider(t)
 
-	headerPath := buildId.String() + "/" + string(build.Memfile) + storage.HeaderSuffix
-	compressedHeaderPath := headerPath + storage.DefaultCompressionOptions.CompressionType.Suffix()
+	headerPath := files.HeaderPath(string(build.Memfile))
+	compressedHeaderPath := files.CompressedHeaderPath(string(build.Memfile))
 
 	provider.EXPECT().GetBlob(mock.Anything, headerPath).Return(defaultHeaderData, nil)
 	provider.EXPECT().GetBlob(mock.Anything, compressedHeaderPath).Return(nil, storage.ErrObjectNotExist)
@@ -144,13 +155,14 @@ func TestNewStorage_NoCompressedAssets_OnlyFetchesDefault(t *testing.T) { //noli
 	storage.UseCompressedAssets = false
 
 	buildId := uuid.New()
+	files := storage.TemplateFiles{BuildID: buildId.String()}
 	dataSize := uint64(storage.MemoryChunkSize)
 
 	defaultHeaderData := makeSerializedHeader(t, buildId, dataSize, false)
 
 	provider := storage.NewMockStorageProvider(t)
 
-	headerPath := buildId.String() + "/" + string(build.Memfile) + storage.HeaderSuffix
+	headerPath := files.HeaderPath(string(build.Memfile))
 
 	provider.EXPECT().GetBlob(mock.Anything, headerPath).Return(defaultHeaderData, nil)
 	// The compressed header path should NOT be called - mock assertions will catch this.

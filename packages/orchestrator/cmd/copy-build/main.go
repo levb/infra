@@ -126,9 +126,9 @@ func getReferencedData(h *header.Header, objectType storage.ObjectType) []string
 
 		switch objectType {
 		case storage.MemfileHeaderObjectType:
-			dataReferences = append(dataReferences, template.StorageMemfilePath())
+			dataReferences = append(dataReferences, template.Path(storage.MemfileName))
 		case storage.RootFSHeaderObjectType:
-			dataReferences = append(dataReferences, template.StorageRootfsPath())
+			dataReferences = append(dataReferences, template.Path(storage.RootfsName))
 		}
 	}
 
@@ -195,7 +195,7 @@ func main() {
 	var filesToCopy []string
 
 	// Extract all files referenced by the build memfile header
-	buildMemfileHeaderPath := template.StorageMemfileHeaderPath()
+	buildMemfileHeaderPath := template.HeaderPath(storage.MemfileName)
 
 	var memfileHeader *header.Header
 	if strings.HasPrefix(*from, "gs://") {
@@ -222,7 +222,7 @@ func main() {
 	filesToCopy = append(filesToCopy, dataReferences...)
 
 	// Extract all files referenced by the build rootfs header
-	buildRootfsHeaderPath := template.StorageRootfsHeaderPath()
+	buildRootfsHeaderPath := template.HeaderPath(storage.RootfsName)
 
 	var rootfsHeader *header.Header
 	if strings.HasPrefix(*from, "gs://") {
@@ -248,10 +248,10 @@ func main() {
 	filesToCopy = append(filesToCopy, dataReferences...)
 
 	// Add the snapfile to the list of files to copy
-	snapfilePath := template.StorageSnapfilePath()
+	snapfilePath := template.Path(storage.SnapfileName)
 	filesToCopy = append(filesToCopy, snapfilePath)
 
-	metadataPath := template.StorageMetadataPath()
+	metadataPath := template.Path(storage.MetadataName)
 	filesToCopy = append(filesToCopy, metadataPath)
 
 	// sort files to copy

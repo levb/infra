@@ -51,11 +51,11 @@ func main() {
 	var diffHeaderFile string
 
 	if *memfile {
-		baseHeaderFile = baseTemplate.StorageMemfileHeaderPath()
-		diffHeaderFile = diffTemplate.StorageMemfileHeaderPath()
+		baseHeaderFile = baseTemplate.HeaderPath(storage.MemfileName)
+		diffHeaderFile = diffTemplate.HeaderPath(storage.MemfileName)
 	} else {
-		baseHeaderFile = baseTemplate.StorageRootfsHeaderPath()
-		diffHeaderFile = diffTemplate.StorageRootfsHeaderPath()
+		baseHeaderFile = baseTemplate.HeaderPath(storage.RootfsName)
+		diffHeaderFile = diffTemplate.HeaderPath(storage.RootfsName)
 	}
 
 	ctx := context.Background()

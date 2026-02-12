@@ -61,11 +61,12 @@ func NewStorage(
 			return nil, build.UnknownDiffTypeError{DiffType: fileType}
 		}
 
-		headerObjectPath := buildId + "/" + string(fileType) + storage.HeaderSuffix
+		files := storage.TemplateFiles{BuildID: buildId}
+		headerObjectPath := files.HeaderPath(string(fileType))
 
 		if storage.UseCompressedAssets {
 			// Fetch both default and compressed headers in parallel.
-			compressedHeaderPath := headerObjectPath + storage.DefaultCompressionOptions.CompressionType.Suffix()
+			compressedHeaderPath := files.CompressedHeaderPath(string(fileType))
 			var defaultData, compressedData []byte
 			var defaultErr, compressedErr error
 
@@ -84,8 +85,11 @@ func NewStorage(
 
 			// Prefer compressed header if available.
 			if compressedErr == nil {
-				if diffHeader, err := header.Deserialize(compressedData); err == nil {
-					h = diffHeader
+				decompressed, lz4Err := storage.DecompressLZ4(compressedData, storage.MaxCompressedHeaderSize)
+				if lz4Err == nil {
+					if diffHeader, err := header.Deserialize(decompressed); err == nil {
+						h = diffHeader
+					}
 				}
 			}
 			// Fall back to default header.
