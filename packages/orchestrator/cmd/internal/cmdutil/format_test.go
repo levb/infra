@@ -183,7 +183,7 @@ func TestMainArtifacts_IncludesCompressedFields(t *testing.T) {
 	for _, a := range artifacts {
 		assert.NotEmpty(t, a.CompressedFile, "CompressedFile should be set for %s", a.Name)
 		assert.NotEmpty(t, a.CompressedHeaderFile, "CompressedHeaderFile should be set for %s", a.Name)
-		assert.True(t, strings.HasSuffix(a.CompressedFile, ".zst"), "CompressedFile should end with .zst for %s", a.Name)
+		assert.True(t, strings.HasSuffix(a.CompressedFile, storage.DefaultCompressionOptions.CompressionType.Suffix()), "CompressedFile should end with %s for %s", storage.DefaultCompressionOptions.CompressionType.Suffix(), a.Name)
 		assert.True(t, strings.HasSuffix(a.CompressedHeaderFile, ".compressed.header.lz4"), "CompressedHeaderFile should end with .compressed.header.lz4 for %s", a.Name)
 	}
 }

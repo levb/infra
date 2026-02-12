@@ -128,7 +128,7 @@ func TestGetCompressedDataReferences_Memfile(t *testing.T) {
 
 	for _, ref := range refs {
 		assert.Contains(t, ref, storage.MemfileName)
-		assert.Contains(t, ref, ".zst")
+		assert.Contains(t, ref, storage.DefaultCompressionOptions.CompressionType.Suffix())
 	}
 }
 
@@ -145,7 +145,7 @@ func TestGetCompressedDataReferences_Rootfs(t *testing.T) {
 
 	for _, ref := range refs {
 		assert.Contains(t, ref, storage.RootfsName)
-		assert.Contains(t, ref, ".zst")
+		assert.Contains(t, ref, storage.DefaultCompressionOptions.CompressionType.Suffix())
 	}
 }
 
@@ -178,7 +178,7 @@ func TestGetCompressedDataReferences_ExcludesNilUUID(t *testing.T) {
 
 	assert.Len(t, refs, 1)
 	assert.Contains(t, refs[0], buildID.String())
-	assert.Contains(t, refs[0], ".zst")
+	assert.Contains(t, refs[0], storage.DefaultCompressionOptions.CompressionType.Suffix())
 }
 
 func TestNewHeaderFromPath_Valid(t *testing.T) {

@@ -56,9 +56,9 @@ func TestTemplateFiles_CompressedPath(t *testing.T) {
 
 	tf := TemplateFiles{BuildID: "test-build-123"}
 
-	// CompressedPath uses DefaultCompressionOptions (currently zstd).
-	assert.Equal(t, "test-build-123/memfile.zst", tf.CompressedPath(MemfileName))
-	assert.Equal(t, "test-build-123/rootfs.ext4.zst", tf.CompressedPath(RootfsName))
+	// CompressedPath uses DefaultCompressionOptions (currently lz4).
+	assert.Equal(t, "test-build-123/memfile.lz4", tf.CompressedPath(MemfileName))
+	assert.Equal(t, "test-build-123/rootfs.ext4.lz4", tf.CompressedPath(RootfsName))
 }
 
 func TestTemplateFiles_CompressedHeaderPath(t *testing.T) {
