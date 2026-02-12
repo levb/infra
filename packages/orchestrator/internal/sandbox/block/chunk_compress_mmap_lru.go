@@ -1,11 +1,16 @@
 package block
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"strconv"
+	"sync/atomic"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
+	lz4 "github.com/pierrec/lz4/v4"
 	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/singleflight"
 
@@ -39,6 +44,17 @@ type CompressMMapLRUChunker struct {
 	virtSize int64 // uncompressed size - used to cap requests
 	rawSize  int64 // compressed file size - used for mmap sizing
 	metrics  metrics.Metrics
+
+	// Stats counters
+	slices            atomic.Int64
+	sliceBytes        atomic.Int64
+	fetches           atomic.Int64
+	fetchBytes        atomic.Int64
+	decompressions    atomic.Int64
+	decompInputBytes  atomic.Int64
+	decompOutputBytes atomic.Int64
+	decompDurationNs  atomic.Int64
+	compressionType   atomic.Value // stores storage.CompressionType
 }
 
 var _ Chunker = (*CompressMMapLRUChunker)(nil)
@@ -98,6 +114,12 @@ func (c *CompressMMapLRUChunker) Slice(ctx context.Context, off, length int64, f
 }
 
 func (c *CompressMMapLRUChunker) sliceWithStats(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, bool, error) {
+	c.slices.Add(1)
+	c.sliceBytes.Add(length)
+	if ft != nil {
+		c.compressionType.CompareAndSwap(nil, ft.CompressionType)
+	}
+
 	timer := c.metrics.SlicesTimerFactory.Begin()
 
 	// Clamp length to available data
@@ -195,21 +217,40 @@ func (c *CompressMMapLRUChunker) fetchDecompressAndCache(ctx context.Context, fr
 		return nil, err
 	}
 
-	// Decompress
-	if ft.CompressionType != storage.CompressionZstd {
+	// Decompress with timing
+	decompStart := time.Now()
+
+	var data []byte
+	switch ft.CompressionType {
+	case storage.CompressionZstd:
+		dec, err := zstd.NewReader(nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create zstd reader: %w", err)
+		}
+		defer dec.Close()
+
+		data, err = dec.DecodeAll(compressedData, make([]byte, 0, frameSize.U))
+		if err != nil {
+			return nil, fmt.Errorf("failed to decompress frame at %#x: %w", frameStarts.U, err)
+		}
+
+	case storage.CompressionLZ4:
+		data = make([]byte, frameSize.U)
+		n, err := io.ReadFull(lz4.NewReader(bytes.NewReader(compressedData)), data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decompress frame at %#x: %w", frameStarts.U, err)
+		}
+		data = data[:n]
+
+	default:
 		return nil, fmt.Errorf("unsupported compression type: %d", ft.CompressionType)
 	}
 
-	dec, err := zstd.NewReader(nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create zstd reader: %w", err)
-	}
-	defer dec.Close()
-
-	data, err := dec.DecodeAll(compressedData, make([]byte, 0, frameSize.U))
-	if err != nil {
-		return nil, fmt.Errorf("failed to decompress frame at %#x: %w", frameStarts.U, err)
-	}
+	decompDur := time.Since(decompStart)
+	c.decompressions.Add(1)
+	c.decompInputBytes.Add(int64(len(compressedData)))
+	c.decompOutputBytes.Add(int64(len(data)))
+	c.decompDurationNs.Add(decompDur.Nanoseconds())
 
 	// Store in LRU
 	c.frameLRU.put(frameStarts.U, int64(frameSize.U), data)
@@ -230,6 +271,9 @@ func (c *CompressMMapLRUChunker) ensureCompressedInMmap(ctx context.Context, fra
 
 			return fmt.Errorf("failed to fetch compressed frame at %#x: %w", frameStarts.C, err)
 		}
+
+		c.fetches.Add(1)
+		c.fetchBytes.Add(int64(frameSize.C))
 
 		fetchTimer.Success(ctx, int64(frameSize.C))
 
@@ -253,4 +297,32 @@ func (c *CompressMMapLRUChunker) Close() error {
 // FileSize returns the on-disk size of the compressed mmap cache file.
 func (c *CompressMMapLRUChunker) FileSize() (int64, error) {
 	return c.compressedCache.FileSize()
+}
+
+// Stats returns per-chunker statistics.
+func (c *CompressMMapLRUChunker) Stats() ChunkerStats {
+	ct := "unknown"
+	if v := c.compressionType.Load(); v != nil {
+		ct = v.(storage.CompressionType).String()
+	}
+
+	var rss int64
+	if c.compressedCache != nil {
+		rss, _ = c.compressedCache.ResidentBytes()
+	}
+
+	return ChunkerStats{
+		ObjectPath:        c.objectPath,
+		ChunkerType:       "CompressMMapLRU",
+		CompressionType:   ct,
+		Slices:            c.slices.Load(),
+		SliceBytes:        c.sliceBytes.Load(),
+		Fetches:           c.fetches.Load(),
+		FetchBytes:        c.fetchBytes.Load(),
+		Decompressions:    c.decompressions.Load(),
+		DecompInputBytes:  c.decompInputBytes.Load(),
+		DecompOutputBytes: c.decompOutputBytes.Load(),
+		DecompDurationNs:  c.decompDurationNs.Load(),
+		MmapRSSBytes:      rss,
+	}
 }

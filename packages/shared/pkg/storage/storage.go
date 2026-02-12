@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
+	"strconv"
 
 	"github.com/klauspost/compress/zstd"
+	lz4 "github.com/pierrec/lz4/v4"
 	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/errgroup"
 
@@ -26,6 +29,7 @@ const (
 	defaultChunkSizeU             = MemoryChunkSize
 	defaultTargetFrameSizeC       = 4 * megabyte      // target compressed frame size
 	defaultZstdCompressionLevel   = zstd.SpeedDefault // default compression level for zstd encoder
+	defaultLZ4CompressionLevel    = 0                 // default compression level for lz4 encoder (fast)
 	defaultCompressionConcurrency = 0                 // use default compression concurrency settings
 	defaultUploadPartSize         = 50 * megabyte
 )
@@ -61,6 +65,41 @@ const (
 )
 
 type CompressionType byte
+
+// InitCompressionFromEnv reads COMPRESSION_TYPE and COMPRESSION_LEVEL env vars
+// to configure the global compression settings. Call early in main().
+func InitCompressionFromEnv() {
+	ct := os.Getenv("COMPRESSION_TYPE")
+	switch ct {
+	case "none":
+		EnableGCSCompression = false
+	case "zstd":
+		EnableGCSCompression = true
+		DefaultCompressionOptions.CompressionType = CompressionZstd
+		DefaultCompressionOptions.Level = int(zstd.SpeedDefault)
+	case "lz4":
+		EnableGCSCompression = true
+		DefaultCompressionOptions.CompressionType = CompressionLZ4
+		DefaultCompressionOptions.Level = defaultLZ4CompressionLevel
+	case "":
+		// keep defaults
+	default:
+		log.Printf("WARNING: unknown COMPRESSION_TYPE %q, keeping defaults", ct)
+	}
+
+	if lvl := os.Getenv("COMPRESSION_LEVEL"); lvl != "" {
+		if n, err := strconv.Atoi(lvl); err == nil {
+			DefaultCompressionOptions.Level = n
+		} else {
+			log.Printf("WARNING: invalid COMPRESSION_LEVEL %q: %v", lvl, err)
+		}
+	}
+
+	log.Printf("COMPRESSION_CONFIG compression_type=%s level=%d enabled=%t",
+		DefaultCompressionOptions.CompressionType,
+		DefaultCompressionOptions.Level,
+		EnableGCSCompression)
+}
 
 type FrameOffset struct {
 	U int64
@@ -107,10 +146,10 @@ type FramedUploadOptions struct {
 }
 
 var DefaultCompressionOptions = &FramedUploadOptions{
-	CompressionType:        CompressionZstd,
+	CompressionType:        CompressionLZ4,
 	ChunkSize:              defaultChunkSizeU,
 	TargetFrameSize:        defaultTargetFrameSizeC,
-	Level:                  int(defaultZstdCompressionLevel),
+	Level:                  defaultLZ4CompressionLevel,
 	CompressionConcurrency: defaultCompressionConcurrency,
 	TargetPartSize:         defaultUploadPartSize,
 }
@@ -359,6 +398,9 @@ func (s *Storage) GetFrame(ctx context.Context, objectPath string, offset int64,
 			}
 			defer dec.Close()
 			from = dec
+
+		case CompressionLZ4:
+			from = lz4.NewReader(respBody)
 
 		default:
 			return Range{}, fmt.Errorf("unsupported compression type: %s", frameTable.CompressionType)

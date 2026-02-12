@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
@@ -35,6 +36,13 @@ type DecompressMMapChunker struct {
 	rawSize  int64 // C space size (compressed on storage)
 
 	fetchGroup singleflight.Group
+
+	// Stats counters
+	slices          atomic.Int64
+	sliceBytes      atomic.Int64
+	fetches         atomic.Int64
+	fetchBytes      atomic.Int64
+	compressionType atomic.Value // stores storage.CompressionType
 }
 
 var _ Chunker = (*DecompressMMapChunker)(nil)
@@ -72,6 +80,12 @@ func (c *DecompressMMapChunker) Slice(ctx context.Context, off, length int64, ft
 }
 
 func (c *DecompressMMapChunker) sliceWithStats(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, bool, error) {
+	c.slices.Add(1)
+	c.sliceBytes.Add(length)
+	if ft != nil {
+		c.compressionType.CompareAndSwap(nil, ft.CompressionType)
+	}
+
 	// Validate bounds
 	if off < 0 || length < 0 {
 		return nil, false, fmt.Errorf("invalid slice params: off=%d length=%d", off, length)
@@ -187,6 +201,10 @@ func (c *DecompressMMapChunker) fetchDecompressToCache(ctx context.Context, off,
 				}
 
 				c.cache.setIsCached(fetchOff, int64(frameSize))
+
+				c.fetches.Add(1)
+				c.fetchBytes.Add(int64(len(b)))
+
 				fetchSW.Success(ctx, int64(len(b)))
 
 				return nil, nil
@@ -247,6 +265,10 @@ func (c *DecompressMMapChunker) fetchUncompressedToCache(ctx context.Context, of
 				}
 
 				c.cache.setIsCached(fetchOff, int64(len(b)))
+
+				c.fetches.Add(1)
+				c.fetchBytes.Add(int64(len(b)))
+
 				fetchSW.Success(ctx, int64(len(b)))
 
 				return nil, nil
@@ -269,4 +291,28 @@ func (c *DecompressMMapChunker) Close() error {
 
 func (c *DecompressMMapChunker) FileSize() (int64, error) {
 	return c.cache.FileSize()
+}
+
+// Stats returns per-chunker statistics.
+func (c *DecompressMMapChunker) Stats() ChunkerStats {
+	ct := "none"
+	if v := c.compressionType.Load(); v != nil {
+		ct = v.(storage.CompressionType).String()
+	}
+
+	var rss int64
+	if c.cache != nil {
+		rss, _ = c.cache.ResidentBytes()
+	}
+
+	return ChunkerStats{
+		ObjectPath:      c.objectPath,
+		ChunkerType:     "DecompressMMap",
+		CompressionType: ct,
+		Slices:          c.slices.Load(),
+		SliceBytes:      c.sliceBytes.Load(),
+		Fetches:         c.fetches.Load(),
+		FetchBytes:      c.fetchBytes.Load(),
+		MmapRSSBytes:    rss,
+	}
 }

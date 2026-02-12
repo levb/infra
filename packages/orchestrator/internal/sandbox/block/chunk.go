@@ -6,6 +6,30 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
+// ChunkerStats holds per-chunker statistics for benchmarking compression modes.
+type ChunkerStats struct {
+	ObjectPath      string // e.g., "abc123-def/memfile"
+	ChunkerType     string // "UncompressedMMap", "CompressMMapLRU", etc.
+	CompressionType string // "none", "lz4", "zstd"
+
+	// Slice stats
+	Slices     int64 // total Slice() calls
+	SliceBytes int64 // total bytes requested via Slice()
+
+	// Fetch stats (remote storage)
+	Fetches    int64 // remote storage fetches
+	FetchBytes int64 // bytes fetched from remote
+
+	// Decompression stats (compressed chunkers only)
+	Decompressions    int64 // frames decompressed
+	DecompInputBytes  int64 // compressed bytes fed to decompressor
+	DecompOutputBytes int64 // uncompressed bytes produced
+	DecompDurationNs  int64 // total decompression wall-clock time (ns)
+
+	// Mmap RSS (chunkers with mmap caches)
+	MmapRSSBytes int64 // resident set size of mmap at stats time
+}
+
 // Chunker is an interface for reading block data from either local cache or remote storage.
 //
 // Implementations (all store some UNCOMPRESSED data for return, differ in caching strategy):
@@ -42,6 +66,8 @@ type Chunker interface {
 	Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error)
 	Close() error
 	FileSize() (int64, error)
+	// Stats returns per-chunker statistics for benchmarking.
+	Stats() ChunkerStats
 }
 
 // Verify that chunker types implement Chunker.

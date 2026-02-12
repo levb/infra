@@ -138,3 +138,7 @@ func (b *localDiff) CacheKey() DiffStoreKey {
 func (b *localDiff) BlockSize() int64 {
 	return b.cache.BlockSize()
 }
+
+func (b *localDiff) Stats() block.ChunkerStats {
+	return block.ChunkerStats{ChunkerType: "LocalDiff", CompressionType: "none"}
+}

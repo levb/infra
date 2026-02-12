@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/bits-and-blooms/bitset"
 	"github.com/edsrzf/mmap-go"
@@ -293,6 +294,43 @@ func (c *MMapCache) dirtySortedKeys() []int64 {
 	slices.Sort(keys)
 
 	return keys
+}
+
+// ResidentBytes returns the amount of physical memory (RSS) backing the mmap
+// using the mincore syscall.
+func (c *MMapCache) ResidentBytes() (int64, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.mmap == nil || c.isClosed() {
+		return 0, nil
+	}
+
+	pageSize := os.Getpagesize()
+	mmapLen := len(*c.mmap)
+	if mmapLen == 0 {
+		return 0, nil
+	}
+
+	numPages := (mmapLen + pageSize - 1) / pageSize
+	vec := make([]byte, numPages)
+
+	_, _, errno := unix.Syscall(unix.SYS_MINCORE,
+		uintptr(unsafe.Pointer(&(*c.mmap)[0])),
+		uintptr(mmapLen),
+		uintptr(unsafe.Pointer(&vec[0])))
+	if errno != 0 {
+		return 0, fmt.Errorf("mincore failed: %w", errno)
+	}
+
+	resident := 0
+	for _, v := range vec {
+		if v&1 != 0 {
+			resident++
+		}
+	}
+
+	return int64(resident) * int64(pageSize), nil
 }
 
 // FileSize returns the size of the cache on disk.

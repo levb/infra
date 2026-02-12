@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 	"github.com/launchdarkly/go-sdk-common/v3/ldcontext"
+	lz4 "github.com/pierrec/lz4/v4"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
@@ -458,6 +460,14 @@ func decompressStream(_ context.Context, compressionType CompressionType, from i
 
 		return count, err // return `err` in case it's io.EOF
 
+	case CompressionLZ4:
+		count, err := io.ReadFull(lz4.NewReader(from), buff)
+		if ignoreEOF(err) != nil {
+			return 0, fmt.Errorf("failed to read from chunk: %w", err)
+		}
+
+		return count, err
+
 	default:
 		return 0, fmt.Errorf("unsupported compression type: %d", compressionType)
 	}
@@ -480,6 +490,14 @@ func decompressBytes(_ context.Context, compressionType CompressionType, from []
 		}
 
 		return len(decompressed), nil
+
+	case CompressionLZ4:
+		count, err := io.ReadFull(lz4.NewReader(bytes.NewReader(from)), buff)
+		if ignoreEOF(err) != nil {
+			return 0, fmt.Errorf("failed to decompress bytes: %w", err)
+		}
+
+		return count, nil
 
 	default:
 		return 0, fmt.Errorf("unsupported compression type: %d", compressionType)

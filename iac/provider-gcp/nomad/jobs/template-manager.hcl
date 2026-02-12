@@ -113,6 +113,8 @@ job "template-manager" {
         DOCKERHUB_REMOTE_REPOSITORY_URL  = "${dockerhub_remote_repository_url}"
         GRPC_PORT                     = "${port}"
         GIN_MODE                      = "release"
+        COMPRESSION_TYPE              = "${compression_type}"
+        COMPRESSION_LEVEL             = "${compression_level}"
 %{ if !update_stanza }
         FORCE_STOP                    = "true"
 %{ endif }

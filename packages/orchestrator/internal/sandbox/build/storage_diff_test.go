@@ -3,6 +3,7 @@ package build
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
+	lz4 "github.com/pierrec/lz4/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -28,6 +30,32 @@ func compressTestBytes(t *testing.T, data []byte) []byte {
 	defer enc.Close()
 
 	return enc.EncodeAll(data, nil)
+}
+
+// decompressTestFrame decompresses data based on compression type.
+func decompressTestFrame(ct storage.CompressionType, data []byte) ([]byte, error) {
+	switch ct {
+	case storage.CompressionZstd:
+		dec, err := zstd.NewReader(nil)
+		if err != nil {
+			return nil, err
+		}
+		defer dec.Close()
+
+		return dec.DecodeAll(data, nil)
+
+	case storage.CompressionLZ4:
+		var buf bytes.Buffer
+		_, err := buf.ReadFrom(lz4.NewReader(bytes.NewReader(data)))
+		if err != nil {
+			return nil, err
+		}
+
+		return buf.Bytes(), nil
+
+	default:
+		return nil, fmt.Errorf("unsupported compression type: %d", ct)
+	}
 }
 
 func testBlockMetrics(t *testing.T) blockmetrics.Metrics {
@@ -94,16 +122,8 @@ func setupMockProvider(t *testing.T, buildId string, diffType DiffType, frames m
 		}
 
 		// Only decompress if the data is actually compressed (check frame table)
-		isCompressed := ft != nil && ft.CompressionType == storage.CompressionZstd
-		if decompress && isCompressed {
-			dec, err := zstd.NewReader(nil)
-			if err != nil {
-				return storage.Range{}, err
-			}
-			defer dec.Close()
-
-			// Use DecodeAll to decompress all data at once
-			decompressed, err := dec.DecodeAll(data, nil)
+		if decompress && storage.IsCompressed(ft) {
+			decompressed, err := decompressTestFrame(ft.CompressionType, data)
 			if err != nil {
 				return storage.Range{}, err
 			}
