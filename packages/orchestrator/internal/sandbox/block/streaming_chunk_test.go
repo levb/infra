@@ -575,6 +575,7 @@ func TestStreamingChunker_ConcurrentSameChunk_SharedSession(t *testing.T) {
 		}
 		sliceA = make([]byte, len(s))
 		copy(sliceA, s)
+
 		return nil
 	})
 	eg.Go(func() error {
@@ -584,6 +585,7 @@ func TestStreamingChunker_ConcurrentSameChunk_SharedSession(t *testing.T) {
 		}
 		sliceB = make([]byte, len(s))
 		copy(sliceB, s)
+
 		return nil
 	})
 
