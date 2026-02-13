@@ -538,6 +538,67 @@ func TestStreamingChunker_PanicRecovery(t *testing.T) {
 	require.Equal(t, data[:testBlockSize], slice)
 }
 
+func TestStreamingChunker_ConcurrentSameChunk_SharedSession(t *testing.T) {
+	t.Parallel()
+
+	data := makeTestData(t, storage.MemoryChunkSize)
+	openCount := atomic.Int64{}
+
+	upstream := &countingUpstream{
+		inner: &slowUpstream{
+			data:      data,
+			blockSize: testBlockSize,
+			delay:     50 * time.Microsecond,
+		},
+		readCount: &openCount,
+	}
+
+	chunker, err := NewStreamingChunker(
+		int64(len(data)), testBlockSize,
+		upstream, t.TempDir()+"/cache",
+		newTestMetrics(t),
+	)
+	require.NoError(t, err)
+	defer chunker.Close()
+
+	// Two different ranges inside the same 4MB chunk.
+	offA := int64(0)
+	offB := int64(storage.MemoryChunkSize) - testBlockSize // last block
+
+	var eg errgroup.Group
+	var sliceA, sliceB []byte
+
+	eg.Go(func() error {
+		s, err := chunker.Slice(t.Context(), offA, testBlockSize)
+		if err != nil {
+			return err
+		}
+		sliceA = make([]byte, len(s))
+		copy(sliceA, s)
+		return nil
+	})
+	eg.Go(func() error {
+		s, err := chunker.Slice(t.Context(), offB, testBlockSize)
+		if err != nil {
+			return err
+		}
+		sliceB = make([]byte, len(s))
+		copy(sliceB, s)
+		return nil
+	})
+
+	require.NoError(t, eg.Wait())
+
+	// Both callers got the right data.
+	assert.Equal(t, data[offA:offA+testBlockSize], sliceA)
+	assert.Equal(t, data[offB:offB+testBlockSize], sliceB)
+
+	// Only one OpenRangeReader call should have been made, meaning both
+	// requests shared the same fetch session for the chunk.
+	assert.Equal(t, int64(1), openCount.Load(),
+		"expected exactly 1 OpenRangeReader call (shared session), got %d", openCount.Load())
+}
+
 // --- Benchmarks ---
 //
 // Uses a bandwidth-limited upstream with real time.Sleep to simulate GCS and
