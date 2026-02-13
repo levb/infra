@@ -32,6 +32,12 @@ var (
 	ErrBufferTooLarge  = errors.New("buffer is too large")
 )
 
+const (
+	nfsCacheOperationAttr       = "operation"
+	nfsCacheOperationAttrReadAt = "ReadAt"
+	nfsCacheOperationAttrSize   = "Size"
+)
+
 var (
 	cacheSlabReadTimerFactory = utils.Must(telemetry.NewTimerFactory(meter,
 		"orchestrator.storage.slab.nfs.read",
@@ -194,7 +200,7 @@ func (c Cache) getUncompressedChunk(ctx context.Context, path string, offset int
 	// try to read from cache first
 	chunkPath := c.makeChunkFilename(path, offset)
 
-	readTimer := cacheSlabReadTimerFactory.Begin()
+	readTimer := cacheSlabReadTimerFactory.Begin(attribute.String(nfsCacheOperationAttr, nfsCacheOperationAttrReadAt))
 	count, err := c.readAtFromCache(ctx, chunkPath, buf)
 	if ignoreEOF(err) == nil {
 		recordCacheRead(ctx, true, int64(count), cacheTypeSeekable, cacheOpReadAt)
@@ -245,13 +251,17 @@ func (c Cache) Size(ctx context.Context, objectPath string) (virtSize, rawSize i
 		span.End()
 	}()
 
+	readTimer := cacheSlabReadTimerFactory.Begin(attribute.String(nfsCacheOperationAttr, nfsCacheOperationAttrSize))
+
 	// Try local cache first
 	virtSize, rawSize, err := c.readLocalSizes(ctx, objectPath)
 	if err == nil {
-		recordCacheRead(ctx, true, 16, cacheTypeSeekable, cacheOpSize)
+		recordCacheRead(ctx, true, 0, cacheTypeSeekable, cacheOpSize)
+		readTimer.Success(ctx, 0)
 
 		return virtSize, rawSize, nil
 	}
+	readTimer.Failure(ctx, 0)
 
 	recordCacheReadError(ctx, cacheTypeSeekable, cacheOpSize, err)
 
@@ -272,7 +282,7 @@ func (c Cache) Size(ctx context.Context, objectPath string) (virtSize, rawSize i
 		}
 	})
 
-	recordCacheRead(ctx, false, 16, cacheTypeSeekable, cacheOpSize)
+	recordCacheRead(ctx, false, 0, cacheTypeSeekable, cacheOpSize)
 
 	return virtSize, rawSize, nil
 }

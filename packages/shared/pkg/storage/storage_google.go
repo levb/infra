@@ -32,8 +32,14 @@ const (
 	googleMaxAttempts              = 10
 	gcloudDefaultUploadConcurrency = 16
 
-	gcsOperationAttr      = "operation"
-	gcsOperationAttrStore = "Store"
+	gcsOperationAttr                           = "operation"
+	gcsOperationAttrStore                      = "Store"
+	gcsOperationAttrReadAt                     = "ReadAt"
+	gcsOperationAttrWrite                      = "Write"
+	gcsOperationAttrWriteFromFileSystem        = "WriteFromFileSystem"
+	gcsOperationAttrWriteFromFileSystemOneShot = "WriteFromFileSystemOneShot"
+	gcsOperationAttrWriteTo                    = "WriteTo"
+	gcsOperationAttrSize                       = "Size"
 )
 
 var googleWriteTimerFactory = utils.Must(telemetry.NewTimerFactory(meter,
