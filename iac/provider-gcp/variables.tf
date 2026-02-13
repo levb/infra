@@ -587,4 +587,3 @@ variable "loki_boot_disk_type" {
   type        = string
   default     = "pd-ssd"
 }
-
