@@ -225,6 +225,7 @@ func (c *CompressMMapLRUChunker) getOrFetchFrame(ctx context.Context, frameStart
 			zap.Int32("frameSizeU", frameSize.U),
 			zap.Int32("frameSizeC", frameSize.C),
 			zap.Error(err))
+
 		return nil, false, err
 	}
 
@@ -244,6 +245,7 @@ func (c *CompressMMapLRUChunker) fetchDecompressAndCache(ctx context.Context, fr
 			zap.Int64("frameStartC", frameStarts.C),
 			zap.Duration("fetchDuration", time.Since(fetchStart)),
 			zap.Error(err))
+
 		return nil, err
 	}
 

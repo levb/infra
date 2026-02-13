@@ -131,11 +131,13 @@ func (fc *MMapFrameCache) fetch(off, length int64, fetchFn func(buf []byte) erro
 
 	if fc.closed.Load() {
 		log.Printf("[MMapFrameCache] fetch: cache closed for %s, off=%d", fc.filePath, off)
+
 		return NewErrCacheClosed(fc.filePath)
 	}
 
 	if fc.mmap == nil {
 		log.Printf("[MMapFrameCache] fetch: mmap nil for %s, off=%d", fc.filePath, off)
+
 		return nil
 	}
 
@@ -145,6 +147,7 @@ func (fc *MMapFrameCache) fetch(off, length int64, fetchFn func(buf []byte) erro
 	fetchStart := time.Now()
 	if err := fetchFn(buf); err != nil {
 		log.Printf("[MMapFrameCache] fetch failed for %s off=%d len=%d after %v: %v", fc.filePath, off, length, time.Since(fetchStart), err)
+
 		return err
 	}
 

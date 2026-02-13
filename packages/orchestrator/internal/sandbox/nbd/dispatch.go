@@ -260,6 +260,7 @@ func (d *Dispatch) cmdRead(ctx context.Context, cmdHandle uint64, cmdFrom uint64
 				zap.Uint64("offset", from),
 				zap.Uint32("length", length),
 				zap.Error(ctx.Err()))
+
 			return d.writeResponse(1, handle, []byte{})
 		case err := <-errchan:
 			if err != nil {
@@ -268,6 +269,7 @@ func (d *Dispatch) cmdRead(ctx context.Context, cmdHandle uint64, cmdFrom uint64
 					zap.Uint64("offset", from),
 					zap.Uint32("length", length),
 					zap.Error(err))
+
 				return d.writeResponse(1, handle, []byte{})
 			}
 		}
