@@ -76,8 +76,6 @@ job "orchestrator-${latest_orchestrator_job_id}" {
         GRPC_PORT                    = "${port}"
         PROXY_PORT                   = "${proxy_port}"
         GIN_MODE                     = "release"
-        COMPRESSION_TYPE             = "${compression_type}"
-        COMPRESSION_LEVEL            = "${compression_level}"
 
 %{ if launch_darkly_api_key != "" }
         LAUNCH_DARKLY_API_KEY         = "${launch_darkly_api_key}"

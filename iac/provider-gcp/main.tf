@@ -245,9 +245,6 @@ module "nomad" {
   filestore_cache_cleanup_max_concurrent_delete = var.filestore_cache_cleanup_max_concurrent_delete
   filestore_cache_cleanup_max_retries           = var.filestore_cache_cleanup_max_retries
 
-  # Compression
-  compression_type  = var.compression_type
-  compression_level = var.compression_level
 }
 
 module "redis" {

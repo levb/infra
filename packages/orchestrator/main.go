@@ -69,8 +69,6 @@ const version = "0.1.0"
 var commitSHA string
 
 func main() {
-	storage.InitCompressionFromEnv()
-
 	config, err := cfg.Parse()
 	if err != nil {
 		log.Fatalf("failed to parse config: %v", err)

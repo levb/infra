@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"os"
-	"strconv"
 
 	"github.com/klauspost/compress/zstd"
 	lz4 "github.com/pierrec/lz4/v4"
@@ -56,7 +54,7 @@ var (
 
 	// UseCompressedAssets controls whether to read from compressed (.zst) assets at runtime.
 	// Independent of EnableGCSCompression which controls upload behavior.
-	UseCompressedAssets = false
+	UseCompressedAssets = true
 
 	CompressedChunkerType   = CompressMMapLRUChunker
 	UncompressedChunkerType = UncompressedMMapChunker
@@ -69,41 +67,6 @@ const (
 )
 
 type CompressionType byte
-
-// InitCompressionFromEnv reads COMPRESSION_TYPE and COMPRESSION_LEVEL env vars
-// to configure the global compression settings. Call early in main().
-func InitCompressionFromEnv() {
-	ct := os.Getenv("COMPRESSION_TYPE")
-	switch ct {
-	case "none":
-		EnableGCSCompression = false
-	case "zstd":
-		EnableGCSCompression = true
-		DefaultCompressionOptions.CompressionType = CompressionZstd
-		DefaultCompressionOptions.Level = int(zstd.SpeedDefault)
-	case "lz4":
-		EnableGCSCompression = true
-		DefaultCompressionOptions.CompressionType = CompressionLZ4
-		DefaultCompressionOptions.Level = defaultLZ4CompressionLevel
-	case "":
-		// keep defaults
-	default:
-		log.Printf("WARNING: unknown COMPRESSION_TYPE %q, keeping defaults", ct)
-	}
-
-	if lvl := os.Getenv("COMPRESSION_LEVEL"); lvl != "" {
-		if n, err := strconv.Atoi(lvl); err == nil {
-			DefaultCompressionOptions.Level = n
-		} else {
-			log.Printf("WARNING: invalid COMPRESSION_LEVEL %q: %v", lvl, err)
-		}
-	}
-
-	log.Printf("COMPRESSION_CONFIG compression_type=%s level=%d enabled=%t",
-		DefaultCompressionOptions.CompressionType,
-		DefaultCompressionOptions.Level,
-		EnableGCSCompression)
-}
 
 type FrameOffset struct {
 	U int64
