@@ -3,12 +3,14 @@ package block
 import (
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/edsrzf/mmap-go"
@@ -128,18 +130,27 @@ func (fc *MMapFrameCache) fetch(off, length int64, fetchFn func(buf []byte) erro
 	defer fc.mu.RUnlock()
 
 	if fc.closed.Load() {
+		log.Printf("[MMapFrameCache] fetch: cache closed for %s, off=%d", fc.filePath, off)
 		return NewErrCacheClosed(fc.filePath)
 	}
 
 	if fc.mmap == nil {
+		log.Printf("[MMapFrameCache] fetch: mmap nil for %s, off=%d", fc.filePath, off)
 		return nil
 	}
 
 	end := min(off+length, fc.size)
 	buf := (*fc.mmap)[off:end]
 
+	fetchStart := time.Now()
 	if err := fetchFn(buf); err != nil {
+		log.Printf("[MMapFrameCache] fetch failed for %s off=%d len=%d after %v: %v", fc.filePath, off, length, time.Since(fetchStart), err)
 		return err
+	}
+
+	fetchDur := time.Since(fetchStart)
+	if fetchDur > 1*time.Second {
+		log.Printf("[MMapFrameCache] slow fetch for %s off=%d len=%d took %v", fc.filePath, off, length, fetchDur)
 	}
 
 	fc.frames.Store(off, struct{}{})
@@ -149,7 +160,25 @@ func (fc *MMapFrameCache) fetch(off, length int64, fetchFn func(buf []byte) erro
 
 // Close unmaps the file and removes the backing file.
 func (fc *MMapFrameCache) Close() (e error) {
-	fc.mu.Lock()
+	log.Printf("[MMapFrameCache] Close() called for %s, acquiring write lock...", fc.filePath)
+	lockStart := time.Now()
+
+	// Try lock with deadlock detection
+	locked := make(chan struct{})
+	go func() {
+		fc.mu.Lock()
+		close(locked)
+	}()
+
+	select {
+	case <-locked:
+		// got the lock
+	case <-time.After(10 * time.Second):
+		log.Printf("[MMapFrameCache] DEADLOCK WARNING: Close() blocked for 10s waiting for write lock on %s", fc.filePath)
+		<-locked // still wait for it
+	}
+
+	log.Printf("[MMapFrameCache] Close() acquired write lock for %s in %v", fc.filePath, time.Since(lockStart))
 	defer fc.mu.Unlock()
 
 	if fc.mmap == nil {

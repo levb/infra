@@ -255,9 +255,19 @@ func (d *Dispatch) cmdRead(ctx context.Context, cmdHandle uint64, cmdFrom uint64
 		// Wait until either the ReadAt completed, or our context is cancelled...
 		select {
 		case <-ctx.Done():
+			logger.L().Warn(ctx, "nbd read cancelled by context",
+				zap.Uint64("handle", handle),
+				zap.Uint64("offset", from),
+				zap.Uint32("length", length),
+				zap.Error(ctx.Err()))
 			return d.writeResponse(1, handle, []byte{})
 		case err := <-errchan:
 			if err != nil {
+				logger.L().Error(ctx, "nbd ReadAt failed",
+					zap.Uint64("handle", handle),
+					zap.Uint64("offset", from),
+					zap.Uint32("length", length),
+					zap.Error(err))
 				return d.writeResponse(1, handle, []byte{})
 			}
 		}

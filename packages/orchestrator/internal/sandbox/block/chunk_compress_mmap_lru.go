@@ -12,9 +12,11 @@ import (
 	"github.com/klauspost/compress/zstd"
 	lz4 "github.com/pierrec/lz4/v4"
 	"go.opentelemetry.io/otel/attribute"
+	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
+	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
@@ -136,6 +138,11 @@ func (c *CompressMMapLRUChunker) sliceWithStats(ctx context.Context, off, length
 			attribute.String(pullType, pullTypeLocal),
 			attribute.String(failureReason, "nil_frame_table"))
 
+		logger.L().Error(ctx, "CompressMMapLRU: nil frame table",
+			zap.String("object", c.objectPath),
+			zap.Int64("offset", off),
+			zap.Int64("length", length))
+
 		return nil, false, fmt.Errorf("CompressMMapLRUChunker requires FrameTable for compressed data at offset %d", off)
 	}
 
@@ -178,6 +185,15 @@ func (c *CompressMMapLRUChunker) sliceWithStats(ctx context.Context, off, length
 		attribute.String(pullType, pullTypeLocal),
 		attribute.String(failureReason, "cross_frame_span"))
 
+	logger.L().Error(ctx, "CompressMMapLRU: cross-frame read",
+		zap.String("object", c.objectPath),
+		zap.Int64("offset", off),
+		zap.Int64("length", length),
+		zap.Int64("startInFrame", startInFrame),
+		zap.Int64("endInFrame", endInFrame),
+		zap.Int32("frameSize", frameSize.U),
+		zap.Int64("frameStartsU", frameStarts.U))
+
 	return nil, false, fmt.Errorf("read spans frame boundary - off=%#x length=%d startInFrame=%d endInFrame=%d frameSize=%d frameStartsU=%#x",
 		off, length, startInFrame, endInFrame, frameSize.U, frameStarts.U)
 }
@@ -202,6 +218,13 @@ func (c *CompressMMapLRUChunker) getOrFetchFrame(ctx context.Context, frameStart
 		return c.fetchDecompressAndCache(ctx, frameStarts, frameSize, ft)
 	})
 	if err != nil {
+		logger.L().Error(ctx, "CompressMMapLRU: getOrFetchFrame failed",
+			zap.String("object", c.objectPath),
+			zap.Int64("frameStartU", frameStarts.U),
+			zap.Int64("frameStartC", frameStarts.C),
+			zap.Int32("frameSizeU", frameSize.U),
+			zap.Int32("frameSizeC", frameSize.C),
+			zap.Error(err))
 		return nil, false, err
 	}
 
@@ -212,8 +235,15 @@ func (c *CompressMMapLRUChunker) getOrFetchFrame(ctx context.Context, frameStart
 // ft is the frame table subset for the specific mapping being read.
 func (c *CompressMMapLRUChunker) fetchDecompressAndCache(ctx context.Context, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) ([]byte, error) {
 	// Level 2: Ensure compressed frame is in mmap cache
+	fetchStart := time.Now()
 	compressedData, _, err := c.ensureCompressedInMmap(ctx, frameStarts, frameSize, ft)
 	if err != nil {
+		logger.L().Error(ctx, "CompressMMapLRU: ensureCompressedInMmap failed",
+			zap.String("object", c.objectPath),
+			zap.Int64("frameStartU", frameStarts.U),
+			zap.Int64("frameStartC", frameStarts.C),
+			zap.Duration("fetchDuration", time.Since(fetchStart)),
+			zap.Error(err))
 		return nil, err
 	}
 
