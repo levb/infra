@@ -32,6 +32,7 @@ type v3SerializableBuildMap struct {
 	BuildId            uuid.UUID
 	BuildStorageOffset uint64
 }
+
 type v4SerializableBuildMap struct {
 	Offset                   uint64
 	Length                   uint64
