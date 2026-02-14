@@ -36,14 +36,12 @@ func (BytesNotAvailableError) Error() string {
 //   - The returned slice is valid until Close() is called or (for LRU-based chunkers) the
 //     underlying frame is evicted. UFFD handlers should copy to the faulting page immediately.
 type Chunker interface {
-	// Slice returns a view into the data at [off, off+length).
-	//
-	// Contract:
-	//   - For compressed data (ft != nil): cross-frame requests are handled via slow path
-	//     (assembling from multiple frames with tracing)
-	//   - The returned slice references internal storage and MUST NOT be modified
-	//   - For UFFD: use the slice immediately to copy into the faulting page
-	Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error)
+	// Chunk fetches a single block-aligned chunk at [off, off+length) and returns
+	// a view into the data. Callers MUST request block-aligned ranges that fall
+	// within a single storage chunk (MemoryChunkSize for uncompressed, one frame
+	// for compressed). The returned slice references internal storage and MUST NOT
+	// be modified.
+	Chunk(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error)
 	Close() error
 	FileSize() (int64, error)
 }
