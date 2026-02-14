@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
@@ -17,67 +17,56 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
 
-type Chunker struct {
-	base    storage.SeekableReader
+// UncompressedMMapChunker fetches uncompressed data from storage and stores it
+// in a memory-mapped cache file (Cache). Returns slices directly from the mmap.
+// For compressed source files, use DecompressMMapChunker instead.
+type UncompressedMMapChunker struct {
+	storage    storage.FrameGetter
+	objectPath string
+
 	cache   *Cache
 	metrics metrics.Metrics
 
-	size int64
+	size int64 // uncompressed size - for uncompressed data, virtSize == rawSize
 
-	// TODO: Optimize this so we don't need to keep the fetchers in memory.
 	fetchers *utils.WaitMap
+
+	// Stats counters
+	slices     atomic.Int64
+	sliceBytes atomic.Int64
+	fetches    atomic.Int64
+	fetchBytes atomic.Int64
 }
 
-func NewChunker(
+// NewUncompressedMMapChunker creates a mmap-based chunker for uncompressed data.
+func NewUncompressedMMapChunker(
 	size, blockSize int64,
-	base storage.SeekableReader,
+	s storage.FrameGetter,
+	objectPath string,
 	cachePath string,
 	metrics metrics.Metrics,
-) (*Chunker, error) {
+) (*UncompressedMMapChunker, error) {
 	cache, err := NewCache(size, blockSize, cachePath, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file cache: %w", err)
 	}
 
-	chunker := &Chunker{
-		size:     size,
-		base:     base,
-		cache:    cache,
-		fetchers: utils.NewWaitMap(),
-		metrics:  metrics,
+	chunker := &UncompressedMMapChunker{
+		size:       size,
+		storage:    s,
+		objectPath: objectPath,
+		cache:      cache,
+		fetchers:   utils.NewWaitMap(),
+		metrics:    metrics,
 	}
 
 	return chunker, nil
 }
 
-func (c *Chunker) ReadAt(ctx context.Context, b []byte, off int64) (int, error) {
-	slice, err := c.Slice(ctx, off, int64(len(b)))
-	if err != nil {
-		return 0, fmt.Errorf("failed to slice cache at %d-%d: %w", off, off+int64(len(b)), err)
-	}
+func (c *UncompressedMMapChunker) Slice(ctx context.Context, off, length int64, _ *storage.FrameTable) ([]byte, error) {
+	c.slices.Add(1)
+	c.sliceBytes.Add(length)
 
-	return copy(b, slice), nil
-}
-
-func (c *Chunker) WriteTo(ctx context.Context, w io.Writer) (int64, error) {
-	for i := int64(0); i < c.size; i += storage.MemoryChunkSize {
-		chunk := make([]byte, storage.MemoryChunkSize)
-
-		n, err := c.ReadAt(ctx, chunk, i)
-		if err != nil {
-			return 0, fmt.Errorf("failed to slice cache at %d-%d: %w", i, i+storage.MemoryChunkSize, err)
-		}
-
-		_, err = w.Write(chunk[:n])
-		if err != nil {
-			return 0, fmt.Errorf("failed to write chunk %d to writer: %w", i, err)
-		}
-	}
-
-	return c.size, nil
-}
-
-func (c *Chunker) Slice(ctx context.Context, off, length int64) ([]byte, error) {
 	timer := c.metrics.SlicesTimerFactory.Begin()
 
 	b, err := c.cache.Slice(off, length)
@@ -121,7 +110,7 @@ func (c *Chunker) Slice(ctx context.Context, off, length int64) ([]byte, error) 
 }
 
 // fetchToCache ensures that the data at the given offset and length is available in the cache.
-func (c *Chunker) fetchToCache(ctx context.Context, off, length int64) error {
+func (c *UncompressedMMapChunker) fetchToCache(ctx context.Context, off, length int64) error {
 	var eg errgroup.Group
 
 	chunks := header.BlocksOffsets(length, storage.MemoryChunkSize)
@@ -130,7 +119,6 @@ func (c *Chunker) fetchToCache(ctx context.Context, off, length int64) error {
 	startingChunkOffset := header.BlockOffset(startingChunk, storage.MemoryChunkSize)
 
 	for _, chunkOff := range chunks {
-		// Ensure the closure captures the correct block offset.
 		fetchOff := startingChunkOffset + chunkOff
 
 		eg.Go(func() (err error) {
@@ -148,36 +136,21 @@ func (c *Chunker) fetchToCache(ctx context.Context, off, length int64) error {
 				default:
 				}
 
-				// The size of the buffer is adjusted if the last chunk is not a multiple of the block size.
 				b, releaseCacheCloseLock, err := c.cache.addressBytes(fetchOff, storage.MemoryChunkSize)
 				if err != nil {
 					return err
 				}
-
 				defer releaseCacheCloseLock()
 
-				fetchSW := c.metrics.RemoteReadsTimerFactory.Begin()
-
-				readBytes, err := c.base.ReadAt(ctx, b, fetchOff)
+				_, err = c.storage.GetFrame(ctx, c.objectPath, fetchOff, nil, false, b)
 				if err != nil {
-					fetchSW.Failure(ctx, int64(readBytes),
-						attribute.String(failureReason, failureTypeRemoteRead),
-					)
-
-					return fmt.Errorf("failed to read chunk from base %d: %w", fetchOff, err)
+					return fmt.Errorf("failed to read from storage at %d: %w", fetchOff, err)
 				}
 
-				if readBytes != len(b) {
-					fetchSW.Failure(ctx, int64(readBytes),
-						attribute.String(failureReason, failureTypeRemoteRead),
-					)
+				c.cache.setIsCached(fetchOff, int64(len(b)))
 
-					return fmt.Errorf("failed to read chunk from base %d: expected %d bytes, got %d bytes", fetchOff, len(b), readBytes)
-				}
-
-				c.cache.setIsCached(fetchOff, int64(readBytes))
-
-				fetchSW.Success(ctx, int64(readBytes))
+				c.fetches.Add(1)
+				c.fetchBytes.Add(int64(len(b)))
 
 				return nil
 			})
@@ -194,11 +167,11 @@ func (c *Chunker) fetchToCache(ctx context.Context, off, length int64) error {
 	return nil
 }
 
-func (c *Chunker) Close() error {
+func (c *UncompressedMMapChunker) Close() error {
 	return c.cache.Close()
 }
 
-func (c *Chunker) FileSize() (int64, error) {
+func (c *UncompressedMMapChunker) FileSize() (int64, error) {
 	return c.cache.FileSize()
 }
 

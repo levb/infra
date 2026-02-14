@@ -51,3 +51,28 @@ func (t TemplateFiles) StorageSnapfilePath() string {
 func (t TemplateFiles) StorageMetadataPath() string {
 	return fmt.Sprintf("%s/%s", t.StorageDir(), MetadataName)
 }
+
+// Path returns the storage path for a given file name within this build.
+func (t TemplateFiles) Path(fileName string) string {
+	return fmt.Sprintf("%s/%s", t.StorageDir(), fileName)
+}
+
+// HeaderPath returns the header storage path for a given file name within this build.
+func (t TemplateFiles) HeaderPath(fileName string) string {
+	return fmt.Sprintf("%s/%s%s", t.StorageDir(), fileName, HeaderSuffix)
+}
+
+const CompressedHeaderSuffix = ".compressed.header.lz4"
+
+// CompressedPath returns the compressed data path for a given file name.
+func (t TemplateFiles) CompressedPath(fileName string) string {
+	return fmt.Sprintf("%s/%s%s", t.StorageDir(), fileName, DefaultCompressionSuffix)
+}
+
+// CompressedHeaderPath returns the compressed header path for a given file name.
+func (t TemplateFiles) CompressedHeaderPath(fileName string) string {
+	return fmt.Sprintf("%s/%s%s", t.StorageDir(), fileName, CompressedHeaderSuffix)
+}
+
+// DefaultCompressionSuffix is the file extension for compressed assets.
+var DefaultCompressionSuffix = CompressionLZ4.Suffix()

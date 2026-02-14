@@ -436,3 +436,35 @@ func parseServiceAccountBase64(serviceAccount string) (*gcpServiceToken, error) 
 
 	return &sa, nil
 }
+
+func (s *gcpStorage) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte) (Range, error) {
+	return getFrame(ctx, s.rangeRead, s.GetDetails(), objectPath, offsetU, frameTable, decompress, buf)
+}
+
+func (s *gcpStorage) rangeRead(ctx context.Context, objectPath string, offset int64, length int) (io.ReadCloser, error) {
+	ctx, cancel := context.WithTimeout(ctx, googleReadTimeout)
+	// cancel will be called by the caller when the reader is closed
+
+	handle := s.bucket.Object(objectPath)
+	reader, err := handle.NewRangeReader(ctx, offset, int64(length))
+	if err != nil {
+		cancel()
+
+		return nil, fmt.Errorf("failed to create GCS range reader for %q at offset %d length %d: %w", objectPath, offset, length, err)
+	}
+
+	return &cancelOnCloseReader{ReadCloser: reader, cancel: cancel}, nil
+}
+
+type cancelOnCloseReader struct {
+	io.ReadCloser
+
+	cancel context.CancelFunc
+}
+
+func (r *cancelOnCloseReader) Close() error {
+	err := r.ReadCloser.Close()
+	r.cancel()
+
+	return err
+}

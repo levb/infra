@@ -178,3 +178,34 @@ func (o *fsObject) getHandle(checkExistence bool) (*os.File, error) {
 
 	return handle, nil
 }
+
+func (s *fsStorage) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte) (Range, error) {
+	return getFrame(ctx, s.rangeRead, s.GetDetails(), objectPath, offsetU, frameTable, decompress, buf)
+}
+
+func (s *fsStorage) rangeRead(_ context.Context, objectPath string, offset int64, length int) (io.ReadCloser, error) {
+	fullPath := filepath.Join(s.basePath, objectPath)
+
+	f, err := os.Open(fullPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file %q: %w", fullPath, err)
+	}
+
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		f.Close()
+
+		return nil, fmt.Errorf("failed to seek in %q to offset %d: %w", fullPath, offset, err)
+	}
+
+	return &limitedFileReader{file: f, Reader: io.LimitReader(f, int64(length))}, nil
+}
+
+type limitedFileReader struct {
+	io.Reader
+
+	file *os.File
+}
+
+func (r *limitedFileReader) Close() error {
+	return r.file.Close()
+}

@@ -8,6 +8,8 @@ import (
 	"io"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+	lz4 "github.com/pierrec/lz4/v4"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -39,6 +41,111 @@ const (
 	MemoryChunkSize = 4 * 1024 * 1024 // 4 MB
 )
 
+// Compression types and frame-based access for compressed assets.
+
+type CompressionType byte
+
+const (
+	CompressionNone = CompressionType(iota)
+	CompressionZstd
+	CompressionLZ4
+)
+
+func (ct CompressionType) Suffix() string {
+	switch ct {
+	case CompressionZstd:
+		return ".zst"
+	case CompressionLZ4:
+		return ".lz4"
+	default:
+		return ""
+	}
+}
+
+func (ct CompressionType) String() string {
+	switch ct {
+	case CompressionZstd:
+		return "zstd"
+	case CompressionLZ4:
+		return "lz4"
+	default:
+		return "none"
+	}
+}
+
+type FrameOffset struct {
+	U int64
+	C int64
+}
+
+func (o *FrameOffset) String() string {
+	return fmt.Sprintf("U:%#x/C:%#x", o.U, o.C)
+}
+
+func (o *FrameOffset) Add(f FrameSize) {
+	o.U += int64(f.U)
+	o.C += int64(f.C)
+}
+
+type FrameSize struct {
+	U int32
+	C int32
+}
+
+func (s FrameSize) String() string {
+	return fmt.Sprintf("U:%#x/C:%#x", s.U, s.C)
+}
+
+type Range struct {
+	Start  int64
+	Length int
+}
+
+func (r Range) String() string {
+	return fmt.Sprintf("%#x/%#x", r.Start, r.Length)
+}
+
+type FrameTable struct {
+	CompressionType CompressionType
+	StartAt         FrameOffset
+	Frames          []FrameSize
+}
+
+// CompressionTypeSuffix returns the object-path suffix for this frame table's
+// compression type. Returns "" when ft is nil.
+func (ft *FrameTable) CompressionTypeSuffix() string {
+	if ft == nil {
+		return ""
+	}
+
+	return ft.CompressionType.Suffix()
+}
+
+type ChunkerType byte
+
+const (
+	UncompressedMMapChunker ChunkerType = iota
+	DecompressMMapChunker
+	CompressMMapLRUChunker
+)
+
+// Global flags for compression behavior.
+var (
+	// UseCompressedAssets controls whether to read from compressed assets at runtime.
+	UseCompressedAssets = true
+
+	CompressedChunkerType   = CompressMMapLRUChunker
+	UncompressedChunkerType = UncompressedMMapChunker
+)
+
+// FrameGetter reads a single compressed or uncompressed frame from storage.
+type FrameGetter interface {
+	GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte) (Range, error)
+}
+
+// rangeReadFunc is a callback for reading a byte range from storage.
+type rangeReadFunc func(ctx context.Context, objectPath string, offset int64, length int) (io.ReadCloser, error)
+
 type SeekableObjectType int
 
 const (
@@ -65,6 +172,9 @@ type StorageProvider interface {
 	OpenBlob(ctx context.Context, path string, objectType ObjectType) (Blob, error)
 	OpenSeekable(ctx context.Context, path string, seekableObjectType SeekableObjectType) (Seekable, error)
 	GetDetails() string
+	// GetFrame reads a single frame from storage into buf.
+	// When frameTable is nil (uncompressed data), reads directly without frame translation.
+	GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte) (Range, error)
 }
 
 type Blob interface {
@@ -151,4 +261,78 @@ func GetBlob(ctx context.Context, b Blob) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+// getFrame is the shared implementation for reading a single frame from storage.
+// Each backend (GCP, AWS, FS) calls this with their own rangeRead callback.
+func getFrame(ctx context.Context, rangeRead rangeReadFunc, storageDetails string, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte) (Range, error) {
+	// Handle uncompressed data (nil frameTable) - read directly without frame translation
+	if !IsCompressed(frameTable) {
+		return getFrameUncompressed(ctx, rangeRead, objectPath, offsetU, buf)
+	}
+
+	// Get the frame info: translate U offset -> C offset for fetching
+	frameStart, frameSize, err := frameTable.FrameFor(offsetU)
+	if err != nil {
+		return Range{}, fmt.Errorf("get frame for offset %#x, object %s: %w", offsetU, objectPath, err)
+	}
+
+	// Validate buffer size
+	expectedSize := int(frameSize.C)
+	if decompress {
+		expectedSize = int(frameSize.U)
+	}
+	if len(buf) < expectedSize {
+		return Range{}, fmt.Errorf("buffer too small: got %d bytes, need %d bytes for frame", len(buf), expectedSize)
+	}
+
+	// Fetch the compressed data from storage
+	respBody, err := rangeRead(ctx, objectPath, frameStart.C, int(frameSize.C))
+	if err != nil {
+		return Range{}, fmt.Errorf("getting frame at %#x from %s in %s: %w", frameStart.C, objectPath, storageDetails, err)
+	}
+	defer respBody.Close()
+
+	var from io.Reader = respBody
+	readSize := int(frameSize.C)
+
+	if decompress {
+		readSize = int(frameSize.U)
+
+		switch frameTable.CompressionType {
+		case CompressionZstd:
+			dec, err := zstd.NewReader(respBody)
+			if err != nil {
+				return Range{}, fmt.Errorf("failed to create zstd decoder: %w", err)
+			}
+			defer dec.Close()
+			from = dec
+
+		case CompressionLZ4:
+			from = lz4.NewReader(respBody)
+
+		default:
+			return Range{}, fmt.Errorf("unsupported compression type: %s", frameTable.CompressionType)
+		}
+	}
+
+	n, err := io.ReadFull(from, buf[:readSize])
+
+	return Range{Start: frameStart.C, Length: n}, err
+}
+
+// getFrameUncompressed reads uncompressed data directly from storage.
+func getFrameUncompressed(ctx context.Context, rangeRead rangeReadFunc, objectPath string, offset int64, buf []byte) (Range, error) {
+	respBody, err := rangeRead(ctx, objectPath, offset, len(buf))
+	if err != nil {
+		return Range{}, fmt.Errorf("getting uncompressed data at %#x from %s: %w", offset, objectPath, err)
+	}
+	defer respBody.Close()
+
+	n, err := io.ReadFull(respBody, buf)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return Range{}, fmt.Errorf("reading uncompressed data from %s: %w", objectPath, err)
+	}
+
+	return Range{Start: offset, Length: n}, nil
 }

@@ -287,3 +287,38 @@ func ignoreNotExists(err error) error {
 
 	return err
 }
+
+func (s *awsStorage) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte) (Range, error) {
+	return getFrame(ctx, s.rangeRead, s.GetDetails(), objectPath, offsetU, frameTable, decompress, buf)
+}
+
+func (s *awsStorage) rangeRead(ctx context.Context, objectPath string, offset int64, length int) (io.ReadCloser, error) {
+	ctx, cancel := context.WithTimeout(ctx, awsReadTimeout)
+
+	rangeStr := fmt.Sprintf("bytes=%d-%d", offset, offset+int64(length)-1)
+	output, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucketName),
+		Key:    aws.String(objectPath),
+		Range:  aws.String(rangeStr),
+	})
+	if err != nil {
+		cancel()
+
+		return nil, fmt.Errorf("failed to get object range %q: %w", objectPath, err)
+	}
+
+	return &cancelOnCloseReaderAWS{ReadCloser: output.Body, cancel: cancel}, nil
+}
+
+type cancelOnCloseReaderAWS struct {
+	io.ReadCloser
+
+	cancel context.CancelFunc
+}
+
+func (r *cancelOnCloseReaderAWS) Close() error {
+	err := r.ReadCloser.Close()
+	r.cancel()
+
+	return err
+}
