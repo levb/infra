@@ -131,8 +131,8 @@ func Deserialize(ctx context.Context, in storage.Blob) (*Header, error) {
 
 func DeserializeBytes(data []byte) (*Header, error) {
 	var metadata Metadata
-	in := bytes.NewReader(data)
-	err := binary.Read(in, binary.LittleEndian, &metadata)
+	reader := bytes.NewReader(data)
+	err := binary.Read(reader, binary.LittleEndian, &metadata)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read metadata: %w", err)
 	}
@@ -146,7 +146,7 @@ MAPPINGS:
 		switch metadata.Version {
 		case 0, 1, 2, 3:
 			var v3 v3SerializableBuildMap
-			err = binary.Read(in, binary.LittleEndian, &v3)
+			err = binary.Read(reader, binary.LittleEndian, &v3)
 			if errors.Is(err, io.EOF) {
 				break MAPPINGS
 			}
@@ -158,7 +158,7 @@ MAPPINGS:
 
 		case 4:
 			var v4 v4SerializableBuildMap
-			err = binary.Read(in, binary.LittleEndian, &v4)
+			err = binary.Read(reader, binary.LittleEndian, &v4)
 			if errors.Is(err, io.EOF) {
 				break MAPPINGS
 			}
@@ -174,7 +174,7 @@ MAPPINGS:
 				numFrames := v4.CompressionTypeNumFrames & 0xFFFFFF
 
 				var startAt storage.FrameOffset
-				err = binary.Read(in, binary.LittleEndian, &startAt)
+				err = binary.Read(reader, binary.LittleEndian, &startAt)
 				if err != nil {
 					return nil, fmt.Errorf("failed to read compression frames starting offset: %w", err)
 				}
@@ -182,7 +182,7 @@ MAPPINGS:
 
 				for range numFrames {
 					var frame storage.FrameSize
-					err = binary.Read(in, binary.LittleEndian, &frame)
+					err = binary.Read(reader, binary.LittleEndian, &frame)
 					if err != nil {
 						return nil, fmt.Errorf("failed to read the expected compression frame: %w", err)
 					}

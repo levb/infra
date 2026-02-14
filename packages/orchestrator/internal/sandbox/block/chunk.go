@@ -20,7 +20,7 @@ import (
 // in a memory-mapped cache file (Cache). Returns slices directly from the mmap.
 // For compressed source files, use DecompressMMapChunker instead.
 type UncompressedMMapChunker struct {
-	storage    storage.FrameGetter
+	base       storage.FrameGetter
 	objectPath string
 
 	cache   *Cache
@@ -46,7 +46,7 @@ func NewUncompressedMMapChunker(
 
 	chunker := &UncompressedMMapChunker{
 		size:       size,
-		storage:    s,
+		base:       s,
 		objectPath: objectPath,
 		cache:      cache,
 		fetchers:   utils.NewWaitMap(),
@@ -132,7 +132,7 @@ func (c *UncompressedMMapChunker) fetchToCache(ctx context.Context, off, length 
 				}
 				defer releaseCacheCloseLock()
 
-				_, err = c.storage.GetFrame(ctx, c.objectPath, fetchOff, nil, false, b)
+				_, err = c.base.GetFrame(ctx, c.objectPath, fetchOff, nil, false, b)
 				if err != nil {
 					return fmt.Errorf("failed to read from storage at %d: %w", fetchOff, err)
 				}

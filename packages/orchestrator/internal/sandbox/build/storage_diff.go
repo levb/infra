@@ -16,14 +16,14 @@ type StorageDiff struct {
 	chunkerOnce sync.Once
 	chunkerErr  error
 
-	cachePath string
-	cacheKey  DiffStoreKey
-
-	blockSize         int64
-	metrics           blockmetrics.Metrics
-	objectPath        string
+	cachePath         string
+	cacheKey          DiffStoreKey
+	storagePath       string
 	storageObjectType storage.SeekableObjectType
-	persistence       storage.StorageProvider
+
+	blockSize   int64
+	metrics     blockmetrics.Metrics
+	persistence storage.StorageProvider
 }
 
 var _ Diff = (*StorageDiff)(nil)
@@ -36,6 +36,10 @@ func (e UnknownDiffTypeError) Error() string {
 	return fmt.Sprintf("unknown diff type: %s", e.DiffType)
 }
 
+func storagePath(buildId string, diffType DiffType) string {
+	return storage.TemplateFiles{BuildID: buildId}.Path(string(diffType))
+}
+
 func newStorageDiff(
 	basePath string,
 	buildId string,
@@ -44,8 +48,7 @@ func newStorageDiff(
 	metrics blockmetrics.Metrics,
 	persistence storage.StorageProvider,
 ) (*StorageDiff, error) {
-	files := storage.TemplateFiles{BuildID: buildId}
-	objectPath := files.Path(string(diffType))
+	storagePath := storagePath(buildId, diffType)
 	storageObjectType, ok := storageObjectType(diffType)
 	if !ok {
 		return nil, UnknownDiffTypeError{diffType}
@@ -55,7 +58,7 @@ func newStorageDiff(
 	cacheKey := GetDiffStoreKey(buildId, diffType)
 
 	return &StorageDiff{
-		objectPath:        objectPath,
+		storagePath:        storagePath,
 		storageObjectType: storageObjectType,
 		cachePath:         cachePath,
 		blockSize:         blockSize,
@@ -92,9 +95,9 @@ func (b *StorageDiff) getChunker(ctx context.Context, ft *storage.FrameTable) (b
 
 // createChunker creates the appropriate chunker based on the frame table.
 func (b *StorageDiff) createChunker(ctx context.Context, ft *storage.FrameTable) (block.Chunker, error) {
-	actualPath := b.objectPath
+	actualPath := b.storagePath
 	if storage.IsCompressed(ft) {
-		actualPath = b.objectPath + ft.CompressionTypeSuffix()
+		actualPath = b.storagePath + ft.CompressionTypeSuffix()
 	}
 
 	// Get actual file size from storage
@@ -109,13 +112,13 @@ func (b *StorageDiff) createChunker(ctx context.Context, ft *storage.FrameTable)
 
 	if storage.IsCompressed(ft) {
 		// For compressed data, also get the uncompressed size
-		uObj, err := b.persistence.OpenSeekable(ctx, b.objectPath, b.storageObjectType)
+		uObj, err := b.persistence.OpenSeekable(ctx, b.storagePath, b.storageObjectType)
 		if err != nil {
-			return nil, fmt.Errorf("failed to open uncompressed object %s: %w", b.objectPath, err)
+			return nil, fmt.Errorf("failed to open uncompressed object %s: %w", b.storagePath, err)
 		}
 		uSize, err := uObj.Size(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get uncompressed size of %s: %w", b.objectPath, err)
+			return nil, fmt.Errorf("failed to get uncompressed size of %s: %w", b.storagePath, err)
 		}
 
 		const estimatedFrameU = 16 * 1024 * 1024
