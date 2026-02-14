@@ -1,6 +1,117 @@
 package storage
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
+
+// Compression types and frame-based access for compressed assets.
+
+type CompressionType byte
+
+const (
+	CompressionNone = CompressionType(iota)
+	CompressionZstd
+	CompressionLZ4
+)
+
+func (ct CompressionType) Suffix() string {
+	switch ct {
+	case CompressionZstd:
+		return ".zst"
+	case CompressionLZ4:
+		return ".lz4"
+	default:
+		return ""
+	}
+}
+
+func (ct CompressionType) String() string {
+	switch ct {
+	case CompressionZstd:
+		return "zstd"
+	case CompressionLZ4:
+		return "lz4"
+	default:
+		return "none"
+	}
+}
+
+type FrameOffset struct {
+	U int64
+	C int64
+}
+
+func (o *FrameOffset) String() string {
+	return fmt.Sprintf("U:%#x/C:%#x", o.U, o.C)
+}
+
+func (o *FrameOffset) Add(f FrameSize) {
+	o.U += int64(f.U)
+	o.C += int64(f.C)
+}
+
+type FrameSize struct {
+	U int32
+	C int32
+}
+
+func (s FrameSize) String() string {
+	return fmt.Sprintf("U:%#x/C:%#x", s.U, s.C)
+}
+
+type Range struct {
+	Start  int64
+	Length int
+}
+
+func (r Range) String() string {
+	return fmt.Sprintf("%#x/%#x", r.Start, r.Length)
+}
+
+type FrameTable struct {
+	CompressionType CompressionType
+	StartAt         FrameOffset
+	Frames          []FrameSize
+}
+
+// CompressionTypeSuffix returns the object-path suffix for this frame table's
+// compression type. Returns "" when ft is nil.
+func (ft *FrameTable) CompressionTypeSuffix() string {
+	if ft == nil {
+		return ""
+	}
+
+	return ft.CompressionType.Suffix()
+}
+
+type ChunkerType byte
+
+const (
+	UncompressedMMapChunker ChunkerType = iota
+	DecompressMMapChunker
+	CompressMMapLRUChunker
+)
+
+// Global flags for compression behavior.
+var (
+	// UseCompressedAssets controls whether to read from compressed assets at runtime.
+	UseCompressedAssets = true
+
+	CompressedChunkerType   = CompressMMapLRUChunker
+	UncompressedChunkerType = UncompressedMMapChunker
+)
+
+// FrameGetter reads a single compressed or uncompressed frame from storage.
+type FrameGetter interface {
+	GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte) (Range, error)
+}
+
+// IsCompressed returns true if the frame table represents compressed data.
+// Safe to call with nil - returns false.
+func IsCompressed(ft *FrameTable) bool {
+	return ft != nil && ft.CompressionType != CompressionNone
+}
 
 // Range iterates over frames that overlap with the given range and calls fn for each frame.
 func (ft *FrameTable) Range(start, length int64, fn func(offset FrameOffset, frame FrameSize) error) error {
@@ -132,10 +243,4 @@ func (ft *FrameTable) GetFetchRange(rangeU Range) (Range, error) {
 	}
 
 	return fetchRange, nil
-}
-
-// IsCompressed returns true if the frame table represents compressed data.
-// Safe to call with nil - returns false.
-func IsCompressed(ft *FrameTable) bool {
-	return ft != nil && ft.CompressionType != CompressionNone
 }
