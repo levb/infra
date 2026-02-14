@@ -9,6 +9,7 @@ import (
 	"io"
 
 	"github.com/google/uuid"
+	lz4 "github.com/pierrec/lz4/v4"
 
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
@@ -139,67 +140,89 @@ func DeserializeBytes(data []byte) (*Header, error) {
 
 	mappings := make([]*BuildMap, 0)
 
-MAPPINGS:
 	for {
-		var m BuildMap
+		var v3 v3SerializableBuildMap
+		err = binary.Read(reader, binary.LittleEndian, &v3)
+		if errors.Is(err, io.EOF) {
+			break
+		}
 
-		switch metadata.Version {
-		case 0, 1, 2, 3:
-			var v3 v3SerializableBuildMap
-			err = binary.Read(reader, binary.LittleEndian, &v3)
-			if errors.Is(err, io.EOF) {
-				break MAPPINGS
+		mappings = append(mappings, &BuildMap{
+			Offset:             v3.Offset,
+			Length:             v3.Length,
+			BuildId:            v3.BuildId,
+			BuildStorageOffset: v3.BuildStorageOffset,
+		})
+	}
+
+	return newValidatedHeader(&metadata, mappings)
+}
+
+// DeserializeV4 decompresses LZ4 data and deserializes a v4 header with frame tables.
+func DeserializeV4(data []byte) (*Header, error) {
+	decompressed, err := io.ReadAll(lz4.NewReader(bytes.NewReader(data)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress v4 header: %w", err)
+	}
+
+	var metadata Metadata
+	reader := bytes.NewReader(decompressed)
+	err = binary.Read(reader, binary.LittleEndian, &metadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read metadata: %w", err)
+	}
+
+	mappings := make([]*BuildMap, 0)
+
+	for {
+		var v4 v4SerializableBuildMap
+		err = binary.Read(reader, binary.LittleEndian, &v4)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		m := BuildMap{
+			Offset:             v4.Offset,
+			Length:             v4.Length,
+			BuildId:            v4.BuildId,
+			BuildStorageOffset: v4.BuildStorageOffset,
+		}
+
+		if v4.CompressionTypeNumFrames != 0 {
+			m.FrameTable = &storage.FrameTable{
+				CompressionType: storage.CompressionType((v4.CompressionTypeNumFrames >> 24) & 0xFF),
 			}
+			numFrames := v4.CompressionTypeNumFrames & 0xFFFFFF
 
-			m.Offset = v3.Offset
-			m.Length = v3.Length
-			m.BuildId = v3.BuildId
-			m.BuildStorageOffset = v3.BuildStorageOffset
-
-		case 4:
-			var v4 v4SerializableBuildMap
-			err = binary.Read(reader, binary.LittleEndian, &v4)
-			if errors.Is(err, io.EOF) {
-				break MAPPINGS
+			var startAt storage.FrameOffset
+			err = binary.Read(reader, binary.LittleEndian, &startAt)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read compression frames starting offset: %w", err)
 			}
+			m.FrameTable.StartAt = startAt
 
-			m.Offset = v4.Offset
-			m.Length = v4.Length
-			m.BuildId = v4.BuildId
-			m.BuildStorageOffset = v4.BuildStorageOffset
-			if v4.CompressionTypeNumFrames != 0 {
-				m.FrameTable = &storage.FrameTable{
-					CompressionType: storage.CompressionType((v4.CompressionTypeNumFrames >> 24) & 0xFF),
-				}
-				numFrames := v4.CompressionTypeNumFrames & 0xFFFFFF
-
-				var startAt storage.FrameOffset
-				err = binary.Read(reader, binary.LittleEndian, &startAt)
+			for range numFrames {
+				var frame storage.FrameSize
+				err = binary.Read(reader, binary.LittleEndian, &frame)
 				if err != nil {
-					return nil, fmt.Errorf("failed to read compression frames starting offset: %w", err)
+					return nil, fmt.Errorf("failed to read the expected compression frame: %w", err)
 				}
-				m.FrameTable.StartAt = startAt
-
-				for range numFrames {
-					var frame storage.FrameSize
-					err = binary.Read(reader, binary.LittleEndian, &frame)
-					if err != nil {
-						return nil, fmt.Errorf("failed to read the expected compression frame: %w", err)
-					}
-					m.FrameTable.Frames = append(m.FrameTable.Frames, frame)
-				}
+				m.FrameTable.Frames = append(m.FrameTable.Frames, frame)
 			}
 		}
 
 		mappings = append(mappings, &m)
 	}
 
-	header, err := NewHeader(&metadata, mappings)
+	return newValidatedHeader(&metadata, mappings)
+}
+
+func newValidatedHeader(metadata *Metadata, mappings []*BuildMap) (*Header, error) {
+	header, err := NewHeader(metadata, mappings)
 	if err != nil {
 		return nil, err
 	}
 
-	// Validate header integrity after deserialization
 	if err := ValidateHeader(header); err != nil {
 		return nil, fmt.Errorf("header validation failed: %w", err)
 	}

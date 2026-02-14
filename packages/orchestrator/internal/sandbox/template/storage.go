@@ -60,9 +60,9 @@ func loadHeader(ctx context.Context, persistence storage.StorageProvider, path s
 	return header.Deserialize(ctx, blob)
 }
 
-// loadCompressedHeader loads a compressed header, decompresses, and deserializes it.
-// Returns (nil, nil) if not found or decompression/deserialization fails.
-func loadCompressedHeader(ctx context.Context, persistence storage.StorageProvider, path string, objType storage.ObjectType) (*header.Header, error) {
+// loadV4Header loads a v4 header (LZ4 compressed), decompresses, and deserializes it.
+// Returns (nil, nil) if not found.
+func loadV4Header(ctx context.Context, persistence storage.StorageProvider, path string, objType storage.ObjectType) (*header.Header, error) {
 	data, err := storage.LoadBlob(ctx, persistence, path, objType)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
@@ -72,12 +72,7 @@ func loadCompressedHeader(ctx context.Context, persistence storage.StorageProvid
 		return nil, err
 	}
 
-	decompressed, err := storage.DecompressLZ4(data, storage.MaxCompressedHeaderSize)
-	if err != nil {
-		return nil, nil
-	}
-
-	return header.DeserializeBytes(decompressed)
+	return header.DeserializeV4(data)
 }
 
 // loadV3Header loads a header from the standard (uncompressed) path.
@@ -93,7 +88,7 @@ func loadV3Header(ctx context.Context, persistence storage.StorageProvider, buil
 func loadV4orV3Header(ctx context.Context, persistence storage.StorageProvider, buildId string, fileType build.DiffType, objType storage.ObjectType) (*header.Header, error) {
 	files := storage.TemplateFiles{BuildID: buildId}
 	defaultPath := files.HeaderPath(string(fileType))
-	compressedPath := files.CompressedHeaderPath(string(fileType))
+	v4Path := files.V4HeaderPath(string(fileType))
 
 	var defaultHeader, compressedHeader *header.Header
 	var defaultErr, compressedErr error
@@ -105,7 +100,7 @@ func loadV4orV3Header(ctx context.Context, persistence storage.StorageProvider, 
 		return nil
 	})
 	eg.Go(func() error {
-		compressedHeader, compressedErr = loadCompressedHeader(egCtx, persistence, compressedPath, objType)
+		compressedHeader, compressedErr = loadV4Header(egCtx, persistence, v4Path, objType)
 
 		return nil
 	})
