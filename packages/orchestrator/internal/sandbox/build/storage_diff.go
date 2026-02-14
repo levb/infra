@@ -58,7 +58,7 @@ func newStorageDiff(
 	cacheKey := GetDiffStoreKey(buildId, diffType)
 
 	return &StorageDiff{
-		storagePath:        storagePath,
+		storagePath:       storagePath,
 		storageObjectType: storageObjectType,
 		cachePath:         cachePath,
 		blockSize:         blockSize,

@@ -46,19 +46,6 @@ func objectType(diffType build.DiffType) (storage.SeekableObjectType, bool) {
 	}
 }
 
-// loadBlob loads a blob from storage. Returns (nil, nil) if the object does not exist.
-func loadBlob(ctx context.Context, persistence storage.StorageProvider, path string, objType storage.ObjectType) ([]byte, error) {
-	data, err := storage.LoadBlob(ctx, persistence, path, objType)
-	if err != nil {
-		if errors.Is(err, storage.ErrObjectNotExist) {
-			return nil, nil
-		}
-
-		return nil, err
-	}
-
-	return data, nil
-}
 
 func NewStorage(
 	ctx context.Context,
@@ -86,19 +73,19 @@ func NewStorage(
 
 			eg, egCtx := errgroup.WithContext(ctx)
 			eg.Go(func() error {
-				defaultData, defaultErr = loadBlob(egCtx, persistence, headerObjectPath, headerObjectType)
+				defaultData, defaultErr = storage.LoadBlob(egCtx, persistence, headerObjectPath, headerObjectType)
 
 				return nil // don't fail the group; we handle errors below
 			})
 			eg.Go(func() error {
-				compressedData, compressedErr = loadBlob(egCtx, persistence, compressedHeaderPath, headerObjectType)
+				compressedData, compressedErr = storage.LoadBlob(egCtx, persistence, compressedHeaderPath, headerObjectType)
 
 				return nil
 			})
 			_ = eg.Wait()
 
 			// Prefer compressed header if available.
-			if compressedErr == nil && compressedData != nil {
+			if compressedErr == nil {
 				decompressed, lz4Err := storage.DecompressLZ4(compressedData, storage.MaxCompressedHeaderSize)
 				if lz4Err == nil {
 					if diffHeader, err := header.DeserializeBytes(decompressed); err == nil {
@@ -107,7 +94,7 @@ func NewStorage(
 				}
 			}
 			// Fall back to default header.
-			if h == nil && defaultErr == nil && defaultData != nil {
+			if h == nil && defaultErr == nil {
 				diffHeader, err := header.DeserializeBytes(defaultData)
 				if err != nil {
 					return nil, fmt.Errorf("failed to deserialize header: %w", err)
