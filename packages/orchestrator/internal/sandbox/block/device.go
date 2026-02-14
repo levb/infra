@@ -18,7 +18,7 @@ func (BytesNotAvailableError) Error() string {
 // Callers must request ranges within a single chunk boundary.
 // The returned slice is valid until Close() (or LRU eviction for CompressMMapLRUChunker).
 type Chunker interface {
-	Chunk(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error)
+	Chunk(ctx context.Context, off, blockSize int64, ft *storage.FrameTable) ([]byte, error)
 	Close() error
 	FileSize() (int64, error)
 }
