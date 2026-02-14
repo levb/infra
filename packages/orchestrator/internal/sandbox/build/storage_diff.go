@@ -161,7 +161,7 @@ func (b *StorageDiff) ReadAt(ctx context.Context, p []byte, off int64, ft *stora
 		return 0, err
 	}
 
-	slice, err := chunker.Chunk(ctx, off, int64(len(p)), ft)
+	slice, err := chunker.Slice(ctx, off, int64(len(p)), ft)
 	if err != nil {
 		return 0, err
 	}
@@ -177,7 +177,7 @@ func (b *StorageDiff) Slice(ctx context.Context, off, length int64, ft *storage.
 		return nil, err
 	}
 
-	return chunker.Chunk(ctx, off, length, ft)
+	return chunker.Slice(ctx, off, length, ft)
 }
 
 func (b *StorageDiff) CachePath() (string, error) {

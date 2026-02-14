@@ -71,7 +71,7 @@ func NewCompressMMapLRUChunker(
 	}, nil
 }
 
-func (c *CompressMMapLRUChunker) Chunk(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
+func (c *CompressMMapLRUChunker) Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
 	timer := c.metrics.SlicesTimerFactory.Begin()
 
 	if off+length > c.virtSize {

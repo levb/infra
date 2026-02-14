@@ -61,7 +61,7 @@ func NewDecompressMMapChunker(
 }
 
 // Slice reads data at U offset. Bounds check uses virtSize (U space).
-func (c *DecompressMMapChunker) Chunk(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
+func (c *DecompressMMapChunker) Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
 	if off < 0 || length < 0 {
 		return nil, fmt.Errorf("invalid slice params: off=%d length=%d", off, length)
 	}

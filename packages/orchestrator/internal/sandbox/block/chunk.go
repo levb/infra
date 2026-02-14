@@ -56,7 +56,7 @@ func NewUncompressedMMapChunker(
 	return chunker, nil
 }
 
-func (c *UncompressedMMapChunker) Chunk(ctx context.Context, off, length int64, _ *storage.FrameTable) ([]byte, error) {
+func (c *UncompressedMMapChunker) Slice(ctx context.Context, off, length int64, _ *storage.FrameTable) ([]byte, error) {
 	timer := c.metrics.SlicesTimerFactory.Begin()
 
 	b, err := c.cache.Slice(off, length)
