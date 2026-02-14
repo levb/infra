@@ -58,7 +58,7 @@ func NewTemplateMetadata(buildId uuid.UUID, blockSize, size uint64) *Metadata {
 
 func (m *Metadata) NextGeneration(buildID uuid.UUID) *Metadata {
 	return &Metadata{
-		Version:     metadataVersion,
+		Version:     m.Version,
 		Generation:  m.Generation + 1,
 		BlockSize:   m.BlockSize,
 		Size:        m.Size,
