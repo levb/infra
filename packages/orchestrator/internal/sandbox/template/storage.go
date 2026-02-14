@@ -80,17 +80,17 @@ func loadCompressedHeader(ctx context.Context, persistence storage.StorageProvid
 	return header.DeserializeBytes(decompressed)
 }
 
-// loadHeaderDefault loads a header from the standard (uncompressed) path.
-func loadHeaderDefault(ctx context.Context, persistence storage.StorageProvider, buildId string, fileType build.DiffType, objType storage.ObjectType) (*header.Header, error) {
+// loadV3Header loads a header from the standard (uncompressed) path.
+func loadV3Header(ctx context.Context, persistence storage.StorageProvider, buildId string, fileType build.DiffType, objType storage.ObjectType) (*header.Header, error) {
 	files := storage.TemplateFiles{BuildID: buildId}
 	path := files.HeaderPath(string(fileType))
 
 	return loadHeader(ctx, persistence, path, objType)
 }
 
-// loadHeaderWithCompressed fetches both compressed and default headers in parallel,
+// loadV4orV3Header fetches both compressed and default headers in parallel,
 // preferring the compressed one if available.
-func loadHeaderWithCompressed(ctx context.Context, persistence storage.StorageProvider, buildId string, fileType build.DiffType, objType storage.ObjectType) (*header.Header, error) {
+func loadV4orV3Header(ctx context.Context, persistence storage.StorageProvider, buildId string, fileType build.DiffType, objType storage.ObjectType) (*header.Header, error) {
 	files := storage.TemplateFiles{BuildID: buildId}
 	defaultPath := files.HeaderPath(string(fileType))
 	compressedPath := files.CompressedHeaderPath(string(fileType))
@@ -141,9 +141,9 @@ func NewStorage(
 
 		var err error
 		if storage.UseCompressedAssets {
-			h, err = loadHeaderWithCompressed(ctx, persistence, buildId, fileType, headerObjectType)
+			h, err = loadV4orV3Header(ctx, persistence, buildId, fileType, headerObjectType)
 		} else {
-			h, err = loadHeaderDefault(ctx, persistence, buildId, fileType, headerObjectType)
+			h, err = loadV3Header(ctx, persistence, buildId, fileType, headerObjectType)
 		}
 		if err != nil {
 			return nil, err
