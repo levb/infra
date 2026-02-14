@@ -80,6 +80,50 @@ func loadCompressedHeader(ctx context.Context, persistence storage.StorageProvid
 	return header.DeserializeBytes(decompressed)
 }
 
+// loadHeaderDefault loads a header from the standard (uncompressed) path.
+func loadHeaderDefault(ctx context.Context, persistence storage.StorageProvider, buildId string, fileType build.DiffType, objType storage.ObjectType) (*header.Header, error) {
+	files := storage.TemplateFiles{BuildID: buildId}
+	path := files.HeaderPath(string(fileType))
+
+	return loadHeader(ctx, persistence, path, objType)
+}
+
+// loadHeaderWithCompressed fetches both compressed and default headers in parallel,
+// preferring the compressed one if available.
+func loadHeaderWithCompressed(ctx context.Context, persistence storage.StorageProvider, buildId string, fileType build.DiffType, objType storage.ObjectType) (*header.Header, error) {
+	files := storage.TemplateFiles{BuildID: buildId}
+	defaultPath := files.HeaderPath(string(fileType))
+	compressedPath := files.CompressedHeaderPath(string(fileType))
+
+	var defaultHeader, compressedHeader *header.Header
+	var defaultErr, compressedErr error
+
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.Go(func() error {
+		defaultHeader, defaultErr = loadHeader(egCtx, persistence, defaultPath, objType)
+
+		return nil
+	})
+	eg.Go(func() error {
+		compressedHeader, compressedErr = loadCompressedHeader(egCtx, persistence, compressedPath, objType)
+
+		return nil
+	})
+	_ = eg.Wait()
+
+	if compressedErr == nil && compressedHeader != nil {
+		return compressedHeader, nil
+	}
+	if defaultErr == nil && defaultHeader != nil {
+		return defaultHeader, nil
+	}
+	if defaultErr != nil {
+		return nil, defaultErr
+	}
+
+	return nil, nil
+}
+
 func NewStorage(
 	ctx context.Context,
 	store *build.DiffStore,
@@ -95,40 +139,14 @@ func NewStorage(
 			return nil, build.UnknownDiffTypeError{DiffType: fileType}
 		}
 
-		files := storage.TemplateFiles{BuildID: buildId}
-		headerObjectPath := files.HeaderPath(string(fileType))
-
+		var err error
 		if storage.UseCompressedAssets {
-			compressedHeaderPath := files.CompressedHeaderPath(string(fileType))
-			var defaultHeader, compressedHeader *header.Header
-			var defaultErr, compressedErr error
-
-			eg, egCtx := errgroup.WithContext(ctx)
-			eg.Go(func() error {
-				defaultHeader, defaultErr = loadHeader(egCtx, persistence, headerObjectPath, headerObjectType)
-
-				return nil
-			})
-			eg.Go(func() error {
-				compressedHeader, compressedErr = loadCompressedHeader(egCtx, persistence, compressedHeaderPath, headerObjectType)
-
-				return nil
-			})
-			_ = eg.Wait()
-
-			if compressedErr == nil && compressedHeader != nil {
-				h = compressedHeader
-			} else if defaultErr == nil && defaultHeader != nil {
-				h = defaultHeader
-			} else if defaultErr != nil {
-				return nil, defaultErr
-			}
+			h, err = loadHeaderWithCompressed(ctx, persistence, buildId, fileType, headerObjectType)
 		} else {
-			var err error
-			h, err = loadHeader(ctx, persistence, headerObjectPath, headerObjectType)
-			if err != nil {
-				return nil, err
-			}
+			h, err = loadHeaderDefault(ctx, persistence, buildId, fileType, headerObjectType)
+		}
+		if err != nil {
+			return nil, err
 		}
 	}
 
