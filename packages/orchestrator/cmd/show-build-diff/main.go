@@ -51,11 +51,11 @@ func main() {
 	var diffHeaderFile string
 
 	if *memfile {
-		baseHeaderFile = baseTemplate.StorageMemfileHeaderPath()
-		diffHeaderFile = diffTemplate.StorageMemfileHeaderPath()
+		baseHeaderFile = baseTemplate.HeaderPath("memfile")
+		diffHeaderFile = diffTemplate.HeaderPath("memfile")
 	} else {
-		baseHeaderFile = baseTemplate.StorageRootfsHeaderPath()
-		diffHeaderFile = diffTemplate.StorageRootfsHeaderPath()
+		baseHeaderFile = baseTemplate.HeaderPath("rootfs.ext4")
+		diffHeaderFile = diffTemplate.HeaderPath("rootfs.ext4")
 	}
 
 	ctx := context.Background()
@@ -71,12 +71,12 @@ func main() {
 		log.Fatalf("failed to read diff header: %s", err)
 	}
 
-	baseHeader, err := header.DeserializeBytes(baseData)
+	baseHeader, err := header.Deserialize(baseData)
 	if err != nil {
 		log.Fatalf("failed to deserialize base header: %s", err)
 	}
 
-	diffHeader, err := header.DeserializeBytes(diffData)
+	diffHeader, err := header.Deserialize(diffData)
 	if err != nil {
 		log.Fatalf("failed to deserialize diff header: %s", err)
 	}

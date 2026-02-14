@@ -311,9 +311,7 @@ func (lb *LayerExecutor) PauseAndUpload(
 		}
 
 		err = lb.index.SaveLayerMeta(ctx, hash, cache.LayerMetadata{
-			Template: cache.Template{
-				BuildID: meta.Template.BuildID,
-			},
+			Template: cache.Template{BuildID: meta.Template.BuildID},
 		})
 		if err != nil {
 			return fmt.Errorf("error saving UUID to hash mapping: %w", err)

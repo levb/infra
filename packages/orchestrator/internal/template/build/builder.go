@@ -192,7 +192,7 @@ func (b *Builder) Build(ctx context.Context, template storage.TemplateFiles, cfg
 		}
 
 		// Remove build files if build fails
-		removeErr := b.templateStorage.DeleteObjectsWithPrefix(ctx, template.BuildID)
+		removeErr := b.templateStorage.DeleteWithPrefix(ctx, template.BuildID)
 		if removeErr != nil {
 			e = errors.Join(e, fmt.Errorf("error removing build files: %w", removeErr))
 		}
@@ -254,6 +254,8 @@ func runBuild(
 	} else {
 		span.SetAttributes(attribute.Bool("use_cache", false))
 	}
+
+	templateStorage = storage.WrapProviderInstrumentation(templateStorage)
 
 	index := cache.NewHashIndex(bc.CacheScope, builder.buildStorage, templateStorage)
 
@@ -404,12 +406,12 @@ func getRootfsSize(
 	s storage.StorageProvider,
 	metadata storage.TemplateFiles,
 ) (uint64, error) {
-	obj, err := s.OpenBlob(ctx, metadata.StorageRootfsHeaderPath(), storage.RootFSHeaderObjectType)
+	data, err := s.GetBlob(ctx, metadata.HeaderPath(storage.RootfsName))
 	if err != nil {
-		return 0, fmt.Errorf("error opening rootfs header object: %w", err)
+		return 0, fmt.Errorf("error reading rootfs header from storage: %w", err)
 	}
 
-	h, err := header.Deserialize(ctx, obj)
+	h, err := header.Deserialize(data)
 	if err != nil {
 		return 0, fmt.Errorf("error deserializing rootfs header: %w", err)
 	}

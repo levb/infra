@@ -75,18 +75,18 @@ func NewDestinationFromPath(prefix, file string) (*Destination, error) {
 	}, nil
 }
 
-func NewHeaderFromObject(ctx context.Context, bucketName string, headerPath string, objectType storage.ObjectType) (*header.Header, error) {
+func NewHeaderFromObject(ctx context.Context, bucketName string, headerPath string, _ storage.ObjectType) (*header.Header, error) {
 	b, err := storage.NewGCP(ctx, bucketName, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCS bucket storage provider: %w", err)
 	}
 
-	obj, err := b.OpenBlob(ctx, headerPath, objectType)
+	data, err := b.GetBlob(ctx, headerPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open object: %w", err)
+		return nil, fmt.Errorf("failed to get blob: %w", err)
 	}
 
-	h, err := header.Deserialize(ctx, obj)
+	h, err := header.Deserialize(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to deserialize header: %w", err)
 	}
@@ -94,31 +94,14 @@ func NewHeaderFromObject(ctx context.Context, bucketName string, headerPath stri
 	return h, nil
 }
 
-type osFileBlob struct {
-	f *os.File
-}
-
-func (o *osFileBlob) WriteTo(_ context.Context, w io.Writer) (int64, error) {
-	return io.Copy(w, o.f)
-}
-
-func (o *osFileBlob) Exists(_ context.Context) (bool, error) {
-	return true, nil
-}
-
-func (o *osFileBlob) Put(_ context.Context, _ []byte) error {
-	return fmt.Errorf("not implemented")
-}
-
-func NewHeaderFromPath(ctx context.Context, from, headerPath string) (*header.Header, error) {
+func NewHeaderFromPath(_ context.Context, from, headerPath string) (*header.Header, error) {
 	// Local storage uses templates subdirectory
-	f, err := os.Open(path.Join(from, "templates", headerPath))
+	data, err := os.ReadFile(path.Join(from, "templates", headerPath))
 	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
+		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
-	defer f.Close()
 
-	h, err := header.Deserialize(ctx, &osFileBlob{f: f})
+	h, err := header.Deserialize(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to deserialize header: %w", err)
 	}
@@ -144,9 +127,9 @@ func getReferencedData(h *header.Header, objectType storage.ObjectType) []string
 
 		switch objectType {
 		case storage.MemfileHeaderObjectType:
-			dataReferences = append(dataReferences, template.StorageMemfilePath())
+			dataReferences = append(dataReferences, template.Path(storage.MemfileName))
 		case storage.RootFSHeaderObjectType:
-			dataReferences = append(dataReferences, template.StorageRootfsPath())
+			dataReferences = append(dataReferences, template.Path(storage.RootfsName))
 		}
 	}
 
@@ -213,7 +196,7 @@ func main() {
 	var filesToCopy []string
 
 	// Extract all files referenced by the build memfile header
-	buildMemfileHeaderPath := template.StorageMemfileHeaderPath()
+	buildMemfileHeaderPath := template.HeaderPath(storage.MemfileName)
 
 	var memfileHeader *header.Header
 	if strings.HasPrefix(*from, "gs://") {
@@ -240,7 +223,7 @@ func main() {
 	filesToCopy = append(filesToCopy, dataReferences...)
 
 	// Extract all files referenced by the build rootfs header
-	buildRootfsHeaderPath := template.StorageRootfsHeaderPath()
+	buildRootfsHeaderPath := template.HeaderPath(storage.RootfsName)
 
 	var rootfsHeader *header.Header
 	if strings.HasPrefix(*from, "gs://") {
@@ -266,10 +249,10 @@ func main() {
 	filesToCopy = append(filesToCopy, dataReferences...)
 
 	// Add the snapfile to the list of files to copy
-	snapfilePath := template.StorageSnapfilePath()
+	snapfilePath := template.Path(storage.SnapfileName)
 	filesToCopy = append(filesToCopy, snapfilePath)
 
-	metadataPath := template.StorageMetadataPath()
+	metadataPath := template.Path(storage.MetadataName)
 	filesToCopy = append(filesToCopy, metadataPath)
 
 	// sort files to copy

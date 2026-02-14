@@ -1,6 +1,7 @@
 package optimize
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -287,13 +288,7 @@ func (pb *OptimizeBuilder) updateMetadata(ctx context.Context, t metadata.Templa
 	defer span.End()
 
 	templateFiles := storage.TemplateFiles{BuildID: t.Template.BuildID}
-	metadataPath := templateFiles.StorageMetadataPath()
-
-	// Open the object for writing
-	object, err := pb.templateStorage.OpenBlob(ctx, metadataPath, storage.MetadataObjectType)
-	if err != nil {
-		return fmt.Errorf("failed to open metadata object: %w", err)
-	}
+	metadataPath := templateFiles.Path(storage.MetadataName)
 
 	// Serialize metadata
 	metaBytes, err := json.Marshal(t)
@@ -302,9 +297,9 @@ func (pb *OptimizeBuilder) updateMetadata(ctx context.Context, t metadata.Templa
 	}
 
 	// Write to storage
-	err = object.Put(ctx, metaBytes)
+	err = pb.templateStorage.StoreBlob(ctx, metadataPath, bytes.NewReader(metaBytes))
 	if err != nil {
-		return fmt.Errorf("failed to write metadata: %w", err)
+		return fmt.Errorf("failed to open metadata object: %w", err)
 	}
 
 	// Invalidate local cache to force refetch with updated metadata

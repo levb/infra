@@ -91,9 +91,8 @@ func (t *storageTemplate) Fetch(ctx context.Context, buildStore *build.DiffStore
 		snapfile, snapfileErr := newStorageFile(
 			ctx,
 			t.persistence,
-			t.files.StorageSnapfilePath(),
+			t.files.Path(storage.SnapfileName),
 			t.files.CacheSnapfilePath(),
-			storage.SnapfileObjectType,
 		)
 		if snapfileErr != nil {
 			errMsg := fmt.Errorf("failed to fetch snapfile: %w", snapfileErr)
@@ -124,9 +123,8 @@ func (t *storageTemplate) Fetch(ctx context.Context, buildStore *build.DiffStore
 		meta, err := newStorageFile(
 			ctx,
 			t.persistence,
-			t.files.StorageMetadataPath(),
+			t.files.Path(storage.MetadataName),
 			t.files.CacheMetadataPath(),
-			storage.MetadataObjectType,
 		)
 		if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
 			sourceErr := fmt.Errorf("failed to fetch metafile: %w", err)
@@ -210,7 +208,7 @@ func (t *storageTemplate) Fetch(ctx context.Context, buildStore *build.DiffStore
 			t.metrics,
 		)
 		if rootfsErr != nil {
-			errMsg := fmt.Errorf("failed to create rootfs storage: %w", rootfsErr)
+			errMsg := fmt.Errorf("failed to create rootfs storage for build %s: %w", t.files.BuildID, rootfsErr)
 
 			if err := t.rootfs.SetError(errMsg); err != nil {
 				return fmt.Errorf("failed to set rootfs error: %w", errors.Join(errMsg, err))
