@@ -214,7 +214,8 @@ func (p *AWS) RawSize(ctx context.Context, path string) (int64, error) {
 	resp, err := p.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &p.bucketName, Key: &path})
 	if err != nil {
 		var nsk *types.NoSuchKey
-		if errors.As(err, &nsk) {
+		var nfd *types.NotFound
+		if errors.As(err, &nsk) || errors.As(err, &nfd) {
 			return 0, ErrObjectNotExist
 		}
 

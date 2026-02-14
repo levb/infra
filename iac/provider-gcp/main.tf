@@ -265,10 +265,15 @@ module "remote_repository" {
 
   count = var.remote_repository_enabled ? 1 : 0
 
+  depends_on = [module.init]
+
   prefix = var.prefix
 
   gcp_project_id = var.gcp_project_id
   gcp_region     = var.gcp_region
 
   google_service_account_email = module.init.service_account_email
+
+  dockerhub_username_secret_name = module.init.dockerhub_username_secret_name
+  dockerhub_password_secret_name = module.init.dockerhub_password_secret_name
 }
