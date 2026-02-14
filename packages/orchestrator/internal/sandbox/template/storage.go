@@ -46,6 +46,39 @@ func objectType(diffType build.DiffType) (storage.SeekableObjectType, bool) {
 	}
 }
 
+// loadHeader loads and deserializes a header blob. Returns (nil, nil) if not found.
+func loadHeader(ctx context.Context, persistence storage.StorageProvider, path string, objType storage.ObjectType) (*header.Header, error) {
+	blob, err := persistence.OpenBlob(ctx, path, objType)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	return header.Deserialize(ctx, blob)
+}
+
+// loadCompressedHeader loads a compressed header, decompresses, and deserializes it.
+// Returns (nil, nil) if not found or decompression/deserialization fails.
+func loadCompressedHeader(ctx context.Context, persistence storage.StorageProvider, path string, objType storage.ObjectType) (*header.Header, error) {
+	data, err := storage.LoadBlob(ctx, persistence, path, objType)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	decompressed, err := storage.DecompressLZ4(data, storage.MaxCompressedHeaderSize)
+	if err != nil {
+		return nil, nil
+	}
+
+	return header.DeserializeBytes(decompressed)
+}
 
 func NewStorage(
 	ctx context.Context,
@@ -66,62 +99,35 @@ func NewStorage(
 		headerObjectPath := files.HeaderPath(string(fileType))
 
 		if storage.UseCompressedAssets {
-			// Fetch both default and compressed headers in parallel.
 			compressedHeaderPath := files.CompressedHeaderPath(string(fileType))
-			var defaultData, compressedData []byte
+			var defaultHeader, compressedHeader *header.Header
 			var defaultErr, compressedErr error
 
 			eg, egCtx := errgroup.WithContext(ctx)
 			eg.Go(func() error {
-				defaultData, defaultErr = storage.LoadBlob(egCtx, persistence, headerObjectPath, headerObjectType)
+				defaultHeader, defaultErr = loadHeader(egCtx, persistence, headerObjectPath, headerObjectType)
 
-				return nil // don't fail the group; we handle errors below
+				return nil
 			})
 			eg.Go(func() error {
-				compressedData, compressedErr = storage.LoadBlob(egCtx, persistence, compressedHeaderPath, headerObjectType)
+				compressedHeader, compressedErr = loadCompressedHeader(egCtx, persistence, compressedHeaderPath, headerObjectType)
 
 				return nil
 			})
 			_ = eg.Wait()
 
-			// Prefer compressed header if available.
-			if compressedErr == nil {
-				decompressed, lz4Err := storage.DecompressLZ4(compressedData, storage.MaxCompressedHeaderSize)
-				if lz4Err == nil {
-					if diffHeader, err := header.DeserializeBytes(decompressed); err == nil {
-						h = diffHeader
-					}
-				}
-			}
-			// Fall back to default header.
-			if h == nil && defaultErr == nil {
-				diffHeader, err := header.DeserializeBytes(defaultData)
-				if err != nil {
-					return nil, fmt.Errorf("failed to deserialize header: %w", err)
-				}
-				h = diffHeader
-			}
-			// If both failed with non-nil errors, propagate.
-			if h == nil && defaultErr != nil {
+			if compressedErr == nil && compressedHeader != nil {
+				h = compressedHeader
+			} else if defaultErr == nil && defaultHeader != nil {
+				h = defaultHeader
+			} else if defaultErr != nil {
 				return nil, defaultErr
 			}
 		} else {
-			headerObject, err := persistence.OpenBlob(ctx, headerObjectPath, headerObjectType)
-			if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
+			var err error
+			h, err = loadHeader(ctx, persistence, headerObjectPath, headerObjectType)
+			if err != nil {
 				return nil, err
-			}
-
-			if err == nil {
-				headerData, err := storage.GetBlob(ctx, headerObject)
-				if err != nil {
-					return nil, fmt.Errorf("failed to read header blob: %w", err)
-				}
-
-				diffHeader, err := header.DeserializeBytes(headerData)
-				if err != nil {
-					return nil, fmt.Errorf("failed to deserialize header: %w", err)
-				}
-				h = diffHeader
 			}
 		}
 	}
