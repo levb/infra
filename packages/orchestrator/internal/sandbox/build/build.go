@@ -115,10 +115,10 @@ func (b *File) Slice(ctx context.Context, off, _ int64) ([]byte, error) {
 	return build.Slice(ctx, int64(mappedBuild.Offset), int64(b.header.Metadata.BlockSize), mappedBuild.FrameTable)
 }
 
-func (b *File) getBuild(ctx context.Context, buildId uuid.UUID) (Diff, error) {
+func (b *File) getBuild(ctx context.Context, buildID uuid.UUID) (Diff, error) {
 	storageDiff, err := newStorageDiff(
 		b.store.cachePath,
-		buildId.String(),
+		buildID.String(),
 		b.fileType,
 		int64(b.header.Metadata.BlockSize),
 		b.metrics,
