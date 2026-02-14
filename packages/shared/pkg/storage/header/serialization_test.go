@@ -58,13 +58,7 @@ func TestSerializeDeserialize_V3_RoundTrip(t *testing.T) {
 	got, err := DeserializeBytes(data)
 	require.NoError(t, err)
 
-	require.Equal(t, metadata.Version, got.Metadata.Version)
-	require.Equal(t, metadata.BlockSize, got.Metadata.BlockSize)
-	require.Equal(t, metadata.Size, got.Metadata.Size)
-	require.Equal(t, metadata.Generation, got.Metadata.Generation)
-	require.Equal(t, metadata.BuildId, got.Metadata.BuildId)
-	require.Equal(t, metadata.BaseBuildId, got.Metadata.BaseBuildId)
-
+	require.Equal(t, metadata, got.Metadata)
 	require.Len(t, got.Mapping, 2)
 	assert.Equal(t, uint64(0), got.Mapping[0].Offset)
 	assert.Equal(t, uint64(4096), got.Mapping[0].Length)
@@ -197,37 +191,4 @@ func TestSerializeDeserialize_V4_WithFrameTable(t *testing.T) {
 	assert.Equal(t, uint64(4096), m1.Length)
 	assert.Equal(t, baseID, m1.BuildId)
 	assert.Nil(t, m1.FrameTable)
-}
-
-func TestSerializeDeserialize_V4_NoCompression(t *testing.T) {
-	t.Parallel()
-
-	buildID := uuid.New()
-	metadata := &Metadata{
-		Version:     4,
-		BlockSize:   4096,
-		Size:        4096,
-		Generation:  0,
-		BuildId:     buildID,
-		BaseBuildId: buildID,
-	}
-
-	mappings := []*BuildMap{
-		{
-			Offset:             0,
-			Length:             4096,
-			BuildId:            buildID,
-			BuildStorageOffset: 0,
-			// No FrameTable
-		},
-	}
-
-	data, err := Serialize(metadata, mappings)
-	require.NoError(t, err)
-
-	got, err := DeserializeV4(compressLZ4(t, data))
-	require.NoError(t, err)
-
-	require.Len(t, got.Mapping, 1)
-	assert.Nil(t, got.Mapping[0].FrameTable)
 }
