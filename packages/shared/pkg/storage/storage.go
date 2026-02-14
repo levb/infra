@@ -263,6 +263,16 @@ func GetBlob(ctx context.Context, b Blob) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// LoadBlob opens a blob by path and reads its contents.
+func LoadBlob(ctx context.Context, s StorageProvider, path string, objType ObjectType) ([]byte, error) {
+	blob, err := s.OpenBlob(ctx, path, objType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open blob %s: %w", path, err)
+	}
+
+	return GetBlob(ctx, blob)
+}
+
 // getFrame is the shared implementation for reading a single frame from storage.
 // Each backend (GCP, AWS, FS) calls this with their own rangeRead callback.
 func getFrame(ctx context.Context, rangeRead rangeReadFunc, storageDetails string, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte) (Range, error) {

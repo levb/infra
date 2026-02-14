@@ -46,19 +46,9 @@ func objectType(diffType build.DiffType) (storage.SeekableObjectType, bool) {
 	}
 }
 
-// loadBlob loads a blob from storage. Returns (data, error).
-// On ErrObjectNotExist, returns (nil, nil).
+// loadBlob loads a blob from storage. Returns (nil, nil) if the object does not exist.
 func loadBlob(ctx context.Context, persistence storage.StorageProvider, path string, objType storage.ObjectType) ([]byte, error) {
-	blob, err := persistence.OpenBlob(ctx, path, objType)
-	if err != nil {
-		if errors.Is(err, storage.ErrObjectNotExist) {
-			return nil, nil
-		}
-
-		return nil, err
-	}
-
-	data, err := storage.GetBlob(ctx, blob)
+	data, err := storage.LoadBlob(ctx, persistence, path, objType)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, nil
