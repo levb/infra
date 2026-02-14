@@ -14,7 +14,7 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
-const metadataVersion = 4
+const metadataVersion = 3
 
 type Metadata struct {
 	Version    uint64
