@@ -142,22 +142,13 @@ func (ft *FrameTable) Range(start, length int64, fn func(offset FrameOffset, fra
 	return nil
 }
 
-func (ft *FrameTable) TotalUncompressedSize() int64 {
-	var total int64
+func (ft *FrameTable) Size() (U, C int64) {
 	for _, frame := range ft.Frames {
-		total += int64(frame.U)
+		U += int64(frame.U)
+		C += int64(frame.C)
 	}
 
-	return total
-}
-
-func (ft *FrameTable) TotalCompressedSize() int64 {
-	var total int64
-	for _, frame := range ft.Frames {
-		total += int64(frame.C)
-	}
-
-	return total
+	return U, C
 }
 
 // Subset returns a new FrameTable that represents the minimal set of frames
