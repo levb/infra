@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
@@ -34,13 +33,6 @@ type DecompressMMapChunker struct {
 	rawSize  int64 // C space size (compressed on storage)
 
 	fetchGroup singleflight.Group
-
-	// Stats counters
-	slices          atomic.Int64
-	sliceBytes      atomic.Int64
-	fetches         atomic.Int64
-	fetchBytes      atomic.Int64
-	compressionType atomic.Value // stores storage.CompressionType
 }
 
 // NewDecompressMMapChunker creates a chunker for compressed data.
@@ -70,12 +62,6 @@ func NewDecompressMMapChunker(
 
 // Slice reads data at U offset. Bounds check uses virtSize (U space).
 func (c *DecompressMMapChunker) Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
-	c.slices.Add(1)
-	c.sliceBytes.Add(length)
-	if ft != nil {
-		c.compressionType.CompareAndSwap(nil, ft.CompressionType)
-	}
-
 	if off < 0 || length < 0 {
 		return nil, fmt.Errorf("invalid slice params: off=%d length=%d", off, length)
 	}
@@ -183,9 +169,6 @@ func (c *DecompressMMapChunker) fetchDecompressToCache(ctx context.Context, off,
 
 				c.cache.setIsCached(fetchOff, int64(frameSize))
 
-				c.fetches.Add(1)
-				c.fetchBytes.Add(int64(len(b)))
-
 				return nil, nil
 			})
 
@@ -239,9 +222,6 @@ func (c *DecompressMMapChunker) fetchUncompressedToCache(ctx context.Context, of
 				}
 
 				c.cache.setIsCached(fetchOff, int64(len(b)))
-
-				c.fetches.Add(1)
-				c.fetchBytes.Add(int64(len(b)))
 
 				return nil, nil
 			})

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-	"sync/atomic"
-	"time"
 
 	"github.com/klauspost/compress/zstd"
 	lz4 "github.com/pierrec/lz4/v4"
@@ -37,17 +35,6 @@ type CompressMMapLRUChunker struct {
 	virtSize int64 // uncompressed size
 	rawSize  int64 // compressed file size
 	metrics  metrics.Metrics
-
-	// Stats counters
-	slices            atomic.Int64
-	sliceBytes        atomic.Int64
-	fetches           atomic.Int64
-	fetchBytes        atomic.Int64
-	decompressions    atomic.Int64
-	decompInputBytes  atomic.Int64
-	decompOutputBytes atomic.Int64
-	decompDurationNs  atomic.Int64
-	compressionType   atomic.Value // stores storage.CompressionType
 }
 
 // NewCompressMMapLRUChunker creates a new two-level cache chunker.
@@ -85,12 +72,6 @@ func NewCompressMMapLRUChunker(
 }
 
 func (c *CompressMMapLRUChunker) Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
-	c.slices.Add(1)
-	c.sliceBytes.Add(length)
-	if ft != nil {
-		c.compressionType.CompareAndSwap(nil, ft.CompressionType)
-	}
-
 	timer := c.metrics.SlicesTimerFactory.Begin()
 
 	if off+length > c.virtSize {
@@ -183,8 +164,6 @@ func (c *CompressMMapLRUChunker) fetchDecompressAndCache(ctx context.Context, fr
 		return nil, err
 	}
 
-	decompStart := time.Now()
-
 	var data []byte
 	switch ft.CompressionType {
 	case storage.CompressionZstd:
@@ -211,12 +190,6 @@ func (c *CompressMMapLRUChunker) fetchDecompressAndCache(ctx context.Context, fr
 		return nil, fmt.Errorf("unsupported compression type: %d", ft.CompressionType)
 	}
 
-	decompDur := time.Since(decompStart)
-	c.decompressions.Add(1)
-	c.decompInputBytes.Add(int64(len(compressedData)))
-	c.decompOutputBytes.Add(int64(len(data)))
-	c.decompDurationNs.Add(decompDur.Nanoseconds())
-
 	c.frameLRU.put(frameStarts.U, int64(frameSize.U), data)
 
 	return data, nil
@@ -228,9 +201,6 @@ func (c *CompressMMapLRUChunker) ensureCompressedInMmap(ctx context.Context, fra
 		if err != nil {
 			return fmt.Errorf("failed to fetch compressed frame at %#x: %w", frameStarts.C, err)
 		}
-
-		c.fetches.Add(1)
-		c.fetchBytes.Add(int64(frameSize.C))
 
 		return nil
 	})

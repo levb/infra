@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
@@ -30,12 +29,6 @@ type UncompressedMMapChunker struct {
 	size int64 // uncompressed size - for uncompressed data, virtSize == rawSize
 
 	fetchers *utils.WaitMap
-
-	// Stats counters
-	slices     atomic.Int64
-	sliceBytes atomic.Int64
-	fetches    atomic.Int64
-	fetchBytes atomic.Int64
 }
 
 // NewUncompressedMMapChunker creates a mmap-based chunker for uncompressed data.
@@ -64,9 +57,6 @@ func NewUncompressedMMapChunker(
 }
 
 func (c *UncompressedMMapChunker) Slice(ctx context.Context, off, length int64, _ *storage.FrameTable) ([]byte, error) {
-	c.slices.Add(1)
-	c.sliceBytes.Add(length)
-
 	timer := c.metrics.SlicesTimerFactory.Begin()
 
 	b, err := c.cache.Slice(off, length)
@@ -148,9 +138,6 @@ func (c *UncompressedMMapChunker) fetchToCache(ctx context.Context, off, length 
 				}
 
 				c.cache.setIsCached(fetchOff, int64(len(b)))
-
-				c.fetches.Add(1)
-				c.fetchBytes.Add(int64(len(b)))
 
 				return nil
 			})
