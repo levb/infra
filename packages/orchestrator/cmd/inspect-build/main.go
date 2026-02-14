@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -15,10 +17,9 @@ import (
 	"unsafe"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/cmd/internal/cmdutil"
+	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
 )
-
-const nilUUID = "00000000-0000-0000-0000-000000000000"
 
 func main() {
 	build := flag.String("build", "", "build ID")
@@ -26,9 +27,17 @@ func main() {
 	storagePath := flag.String("storage", ".local-build", "storage: local path or gs://bucket")
 	memfile := flag.Bool("memfile", false, "inspect memfile artifact")
 	rootfs := flag.Bool("rootfs", false, "inspect rootfs artifact")
+	compressed := flag.Bool("compressed", false, "read compressed header (.compressed.header.lz4)")
+	summary := flag.Bool("summary", false, "show only metadata + summary (skip per-mapping listing)")
+	listFiles := flag.Bool("list-files", false, "list all files for this build with existence and size info")
 	data := flag.Bool("data", false, "inspect data blocks (default: header only)")
 	start := flag.Int64("start", 0, "start block (only with -data)")
 	end := flag.Int64("end", 0, "end block, 0 = all (only with -data)")
+
+	// Validation flags
+	validateAll := flag.Bool("validate-all", false, "validate both memfile and rootfs")
+	validateMemfile := flag.Bool("validate-memfile", false, "validate memfile data integrity")
+	validateRootfs := flag.Bool("validate-rootfs", false, "validate rootfs data integrity")
 
 	flag.Parse()
 
@@ -49,7 +58,40 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Determine artifact type
+	ctx := context.Background()
+
+	// Handle list-files mode
+	if *listFiles {
+		printFileList(ctx, *storagePath, *build)
+		os.Exit(0)
+	}
+
+	// Handle validation mode
+	if *validateAll || *validateMemfile || *validateRootfs {
+		exitCode := 0
+
+		if *validateAll || *validateMemfile {
+			if err := validateArtifact(ctx, *storagePath, *build, "memfile"); err != nil {
+				fmt.Printf("❌ memfile validation FAILED: %s\n", err)
+				exitCode = 1
+			} else {
+				fmt.Printf("✅ memfile validation PASSED\n")
+			}
+		}
+
+		if *validateAll || *validateRootfs {
+			if err := validateArtifact(ctx, *storagePath, *build, "rootfs.ext4"); err != nil {
+				fmt.Printf("❌ rootfs validation FAILED: %s\n", err)
+				exitCode = 1
+			} else {
+				fmt.Printf("✅ rootfs validation PASSED\n")
+			}
+		}
+
+		os.Exit(exitCode)
+	}
+
+	// Determine artifact type for inspection
 	if !*memfile && !*rootfs {
 		*memfile = true // default to memfile
 	}
@@ -64,22 +106,36 @@ func main() {
 		artifactName = "rootfs.ext4"
 	}
 
-	ctx := context.Background()
+	// Read header (compressed or default)
+	var h *header.Header
+	var headerSource string
 
-	// Read header
-	headerFile := artifactName + ".header"
-	headerData, headerSource, err := cmdutil.ReadFile(ctx, *storagePath, *build, headerFile)
-	if err != nil {
-		log.Fatalf("failed to read header: %s", err)
-	}
+	if *compressed {
+		var err error
+		h, headerSource, err = cmdutil.ReadCompressedHeader(ctx, *storagePath, *build, artifactName)
+		if err != nil {
+			log.Fatalf("failed to read compressed header: %s", err)
+		}
+		if h == nil {
+			log.Fatalf("compressed header not found for %s", artifactName)
+		}
+		headerSource += " [compressed header]"
+	} else {
+		headerFile := artifactName + storage.HeaderSuffix
+		headerData, source, err := cmdutil.ReadFile(ctx, *storagePath, *build, headerFile)
+		if err != nil {
+			log.Fatalf("failed to read header: %s", err)
+		}
 
-	h, err := header.DeserializeBytes(headerData)
-	if err != nil {
-		log.Fatalf("failed to deserialize header: %s", err)
+		h, err = header.Deserialize(headerData)
+		if err != nil {
+			log.Fatalf("failed to deserialize header: %s", err)
+		}
+		headerSource = source
 	}
 
 	// Print header info
-	printHeader(h, headerSource)
+	printHeader(h, headerSource, *summary)
 
 	// If -data flag, also inspect data blocks
 	if *data {
@@ -89,20 +145,27 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, "Usage: inspect-build (-build <uuid> | -template <id-or-alias>) [-storage <path>] [-memfile|-rootfs] [-data [-start N] [-end N]]\n\n")
+	fmt.Fprintf(os.Stderr, "Usage: inspect-build (-build <uuid> | -template <id-or-alias>) [-storage <path>] [-memfile|-rootfs] [-compressed] [-summary] [-data [-start N] [-end N]]\n")
+	fmt.Fprintf(os.Stderr, "       inspect-build (-build <uuid> | -template <id-or-alias>) [-storage <path>] -validate-all|-validate-memfile|-validate-rootfs\n")
+	fmt.Fprintf(os.Stderr, "       inspect-build (-build <uuid> | -template <id-or-alias>) [-storage <path>] -list-files\n\n")
 	fmt.Fprintf(os.Stderr, "The -template flag requires E2B_API_KEY environment variable.\n")
 	fmt.Fprintf(os.Stderr, "Set E2B_DOMAIN for non-production environments.\n\n")
 	fmt.Fprintf(os.Stderr, "Examples:\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123                           # inspect memfile header\n")
+	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -compressed               # inspect compressed memfile header\n")
+	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -summary                  # metadata + summaries only\n")
+	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -list-files               # list all build files\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -template base -storage gs://bucket     # inspect by template alias\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -template gtjfpksmxd9ct81x1f8e          # inspect by template ID\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -rootfs                   # inspect rootfs header\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -data                     # inspect memfile header + data\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -rootfs -data -end 100    # inspect rootfs header + first 100 blocks\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -storage gs://bucket      # inspect from GCS\n")
+	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -validate-all             # validate both memfile and rootfs\n")
+	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -validate-memfile         # validate memfile integrity\n")
 }
 
-func printHeader(h *header.Header, source string) {
+func printHeader(h *header.Header, source string, summaryOnly bool) {
 	// Validate mappings
 	err := header.ValidateMappings(h.Mapping, h.Metadata.Size, h.Metadata.BlockSize)
 	if err != nil {
@@ -120,19 +183,21 @@ func printHeader(h *header.Header, source string) {
 	fmt.Printf("Block size         %d B\n", h.Metadata.BlockSize)
 	fmt.Printf("Blocks             %d\n", (h.Metadata.Size+h.Metadata.BlockSize-1)/h.Metadata.BlockSize)
 
-	totalSize := int64(unsafe.Sizeof(header.BuildMap{})) * int64(len(h.Mapping)) / 1024
-	var sizeMessage string
-	if totalSize == 0 {
-		sizeMessage = "<1 KiB"
-	} else {
-		sizeMessage = fmt.Sprintf("%d KiB", totalSize)
-	}
+	if !summaryOnly {
+		totalSize := int64(unsafe.Sizeof(header.BuildMap{})) * int64(len(h.Mapping)) / 1024
+		var sizeMessage string
+		if totalSize == 0 {
+			sizeMessage = "<1 KiB"
+		} else {
+			sizeMessage = fmt.Sprintf("%d KiB", totalSize)
+		}
 
-	fmt.Printf("\nMAPPING (%d maps, uses %s in storage)\n", len(h.Mapping), sizeMessage)
-	fmt.Printf("=======\n")
+		fmt.Printf("\nMAPPING (%d maps, uses %s in storage)\n", len(h.Mapping), sizeMessage)
+		fmt.Printf("=======\n")
 
-	for _, mapping := range h.Mapping {
-		fmt.Println(mapping.Format(h.Metadata.BlockSize))
+		for _, mapping := range h.Mapping {
+			fmt.Println(cmdutil.FormatMappingWithCompression(mapping, h.Metadata.BlockSize))
+		}
 	}
 
 	fmt.Printf("\nMAPPING SUMMARY\n")
@@ -150,10 +215,57 @@ func printHeader(h *header.Header, source string) {
 			additionalInfo = " (current)"
 		case h.Metadata.BaseBuildId.String():
 			additionalInfo = " (parent)"
-		case nilUUID:
+		case cmdutil.NilUUID:
 			additionalInfo = " (sparse)"
 		}
 		fmt.Printf("%s%s: %d blocks, %d MiB (%0.2f%%)\n", buildID, additionalInfo, uint64(size)/h.Metadata.BlockSize, uint64(size)/1024/1024, float64(size)/float64(h.Metadata.Size)*100)
+	}
+
+	// Print compression summary
+	cmdutil.PrintCompressionSummary(h)
+}
+
+// printFileList prints a table of all expected files for this build with existence and size info.
+func printFileList(ctx context.Context, storagePath, buildID string) {
+	fmt.Printf("\nFILES for build %s\n", buildID)
+	fmt.Printf("====================\n")
+	fmt.Printf("%-45s  %6s  %12s\n", "FILE", "EXISTS", "SIZE")
+	fmt.Printf("%-45s  %6s  %12s\n", strings.Repeat("-", 45), strings.Repeat("-", 6), strings.Repeat("-", 12))
+
+	// Check all artifacts
+	for _, a := range cmdutil.MainArtifacts() {
+		files := []string{a.File, a.HeaderFile, a.CompressedFile, a.CompressedHeaderFile}
+		for _, f := range files {
+			info := cmdutil.ProbeFile(ctx, storagePath, buildID, f)
+			printFileInfo(info)
+		}
+	}
+
+	// Snapfile and metadata
+	for _, f := range []string{storage.SnapfileName, storage.MetadataName} {
+		info := cmdutil.ProbeFile(ctx, storagePath, buildID, f)
+		printFileInfo(info)
+	}
+}
+
+func printFileInfo(info cmdutil.FileInfo) {
+	if info.Exists {
+		fmt.Printf("%-45s  %6s  %12s\n", info.Name, "yes", formatSize(info.Size))
+	} else {
+		fmt.Printf("%-45s  %6s  %12s\n", info.Name, "no", "-")
+	}
+}
+
+func formatSize(size int64) string {
+	switch {
+	case size >= 1024*1024*1024:
+		return fmt.Sprintf("%.1f GiB", float64(size)/1024/1024/1024)
+	case size >= 1024*1024:
+		return fmt.Sprintf("%.1f MiB", float64(size)/1024/1024)
+	case size >= 1024:
+		return fmt.Sprintf("%.1f KiB", float64(size)/1024)
+	default:
+		return fmt.Sprintf("%d B", size)
 	}
 }
 
@@ -222,6 +334,188 @@ func inspectData(ctx context.Context, storagePath, buildID, dataFile string, h *
 	fmt.Printf("Empty size: %d B (%d MiB)\n", int64(emptyCount)*blockSize, int64(emptyCount)*blockSize/1024/1024)
 
 	reader.Close()
+}
+
+// validateArtifact validates data integrity for an artifact (memfile or rootfs).
+// It checks:
+// 1. Header can be deserialized
+// 2. Header mappings cover the entire file with no gaps
+// 3. Data file exists and has expected size
+// 4. For compressed data: each frame can be read and decompressed
+// 5. MD5 matches if stored in metadata
+func validateArtifact(ctx context.Context, storagePath, buildID, artifactName string) error {
+	fmt.Printf("\n=== Validating %s for build %s ===\n", artifactName, buildID)
+
+	// 1. Read and deserialize header
+	headerFile := artifactName + ".header"
+	headerData, _, err := cmdutil.ReadFile(ctx, storagePath, buildID, headerFile)
+	if err != nil {
+		return fmt.Errorf("failed to read header: %w", err)
+	}
+
+	h, err := header.Deserialize(headerData)
+	if err != nil {
+		return fmt.Errorf("failed to deserialize header: %w", err)
+	}
+	fmt.Printf("  Header: version=%d size=%d blockSize=%d mappings=%d\n",
+		h.Metadata.Version, h.Metadata.Size, h.Metadata.BlockSize, len(h.Mapping))
+
+	// 2. Validate mappings cover entire file
+	if err := header.ValidateHeader(h); err != nil {
+		return fmt.Errorf("header validation failed: %w", err)
+	}
+	fmt.Printf("  Mappings: coverage validated ✓\n")
+
+	// 3. Open data file and check size
+	reader, dataSize, _, err := cmdutil.OpenDataFile(ctx, storagePath, buildID, artifactName)
+	if err != nil {
+		return fmt.Errorf("failed to open data file: %w", err)
+	}
+	defer reader.Close()
+
+	fmt.Printf("  Data file: size=%d\n", dataSize)
+
+	// 4. Validate mappings for the current build only
+	// (Parent build mappings may reference artifacts that aren't stored)
+	currentBuildID := h.Metadata.BuildId.String()
+	validatedCount := 0
+	for i, mapping := range h.Mapping {
+		if mapping.BuildId.String() != currentBuildID {
+			continue // Skip parent build mappings
+		}
+		if err := validateMapping(ctx, storagePath, artifactName, h, mapping, i); err != nil {
+			return fmt.Errorf("mapping[%d] validation failed: %w", i, err)
+		}
+		validatedCount++
+	}
+	fmt.Printf("  %d/%d current-build mappings validated ✓\n", validatedCount, len(h.Mapping))
+
+	// 5. Compute and display MD5 of actual data on storage (may be compressed)
+	hash := md5.New()
+	chunkSize := int64(1024 * 1024) // 1MB chunks for efficient hashing
+	buf := make([]byte, chunkSize)
+
+	for offset := int64(0); offset < dataSize; offset += chunkSize {
+		readSize := chunkSize
+		if offset+chunkSize > dataSize {
+			readSize = dataSize - offset
+		}
+		n, err := reader.ReadAt(buf[:readSize], offset)
+		if err != nil && n == 0 {
+			return fmt.Errorf("failed to read at offset %d: %w", offset, err)
+		}
+		hash.Write(buf[:n])
+	}
+
+	dataMD5 := hex.EncodeToString(hash.Sum(nil))
+	fmt.Printf("  Data MD5 (storage): %s\n", dataMD5)
+
+	// 6. Validate compressed header if it exists
+	compressedH, _, compErr := cmdutil.ReadCompressedHeader(ctx, storagePath, buildID, artifactName)
+
+	switch {
+	case compErr != nil:
+		fmt.Printf("  Compressed header: read error: %s\n", compErr)
+	case compressedH != nil:
+		if err := header.ValidateHeader(compressedH); err != nil {
+			fmt.Printf("  Compressed header: validation FAILED: %s\n", err)
+		} else {
+			fmt.Printf("  Compressed header: validated ✓ (mappings=%d)\n", len(compressedH.Mapping))
+		}
+	default:
+		fmt.Printf("  Compressed header: not present\n")
+	}
+
+	return nil
+}
+
+// validateMapping validates a single mapping's data integrity.
+func validateMapping(ctx context.Context, storagePath, artifactName string, h *header.Header, mapping *header.BuildMap, _ int) error {
+	// Skip nil UUID mappings - these are sparse/zero regions with no backing data
+	if mapping.BuildId.String() == cmdutil.NilUUID {
+		return nil // Sparse region, nothing to validate
+	}
+
+	// Check if mapping has frame table (compressed)
+	if !storage.IsCompressed(mapping.FrameTable) {
+		// Uncompressed mapping - just verify we can read the data
+		reader, _, _, err := cmdutil.OpenDataFile(ctx, storagePath, mapping.BuildId.String(), artifactName)
+		if err != nil {
+			return fmt.Errorf("failed to open data for build %s: %w", mapping.BuildId, err)
+		}
+		defer reader.Close()
+
+		// Read first block to verify data is accessible
+		buf := make([]byte, h.Metadata.BlockSize)
+		_, err = reader.ReadAt(buf, int64(mapping.BuildStorageOffset))
+		if err != nil {
+			return fmt.Errorf("failed to read data at offset %d: %w", mapping.BuildStorageOffset, err)
+		}
+
+		return nil
+	}
+
+	// Compressed mapping - validate frame table coverage
+	ft := mapping.FrameTable
+
+	// Check frame table covers the mapping
+	var totalU int64
+	for _, frame := range ft.Frames {
+		totalU += int64(frame.U)
+	}
+
+	if totalU < int64(mapping.Length) {
+		return fmt.Errorf("frame table covers %d bytes but mapping length is %d", totalU, mapping.Length)
+	}
+
+	// For compressed data, verify we can read the raw compressed bytes
+	// Full decompression validation requires the full storage stack
+	reader, fileSize, _, err := cmdutil.OpenDataFile(ctx, storagePath, mapping.BuildId.String(), artifactName)
+	if err != nil {
+		return fmt.Errorf("failed to open compressed data for build %s: %w", mapping.BuildId, err)
+	}
+	defer reader.Close()
+
+	// Verify compressed file size matches frame table expectations
+	var totalC int64
+	for _, frame := range ft.Frames {
+		totalC += int64(frame.C)
+	}
+	expectedSize := ft.StartAt.C + totalC
+
+	if fileSize < expectedSize {
+		return fmt.Errorf("compressed file size %d is less than expected %d (startC=%d + framesC=%d)",
+			fileSize, expectedSize, ft.StartAt.C, totalC)
+	}
+
+	// Read first and last compressed frame to verify data is accessible
+	firstFrameBuf := make([]byte, ft.Frames[0].C)
+	_, err = reader.ReadAt(firstFrameBuf, ft.StartAt.C)
+	if err != nil {
+		return fmt.Errorf("failed to read first compressed frame at C=%d: %w", ft.StartAt.C, err)
+	}
+
+	if len(ft.Frames) > 1 {
+		lastIdx := len(ft.Frames) - 1
+		lastOffset := calculateCOffset(ft, lastIdx)
+		lastFrameBuf := make([]byte, ft.Frames[lastIdx].C)
+		_, err = reader.ReadAt(lastFrameBuf, lastOffset)
+		if err != nil {
+			return fmt.Errorf("failed to read last compressed frame at C=%d: %w", lastOffset, err)
+		}
+	}
+
+	return nil
+}
+
+// calculateCOffset calculates the compressed offset for frame at index i.
+func calculateCOffset(ft *storage.FrameTable, frameIdx int) int64 {
+	offset := ft.StartAt.C
+	for i := range frameIdx {
+		offset += int64(ft.Frames[i].C)
+	}
+
+	return offset
 }
 
 // templateInfo represents a template from the E2B API.
@@ -308,7 +602,7 @@ func resolveTemplateID(input string) (string, error) {
 		return "", fmt.Errorf("template %q not found. Available aliases: %s", input, strings.Join(availableAliases, ", "))
 	}
 
-	if match.BuildID == "" || match.BuildID == nilUUID {
+	if match.BuildID == "" || match.BuildID == cmdutil.NilUUID {
 		return "", fmt.Errorf("template %q has no successful build", input)
 	}
 

@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block"
+	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
 type LocalDiffFile struct {
@@ -77,14 +78,14 @@ func (f *LocalDiffFile) CloseToDiff(
 
 type localDiff struct {
 	cacheKey DiffStoreKey
-	cache    *block.Cache
+	cache    *block.MMapCache
 }
 
 var _ Diff = (*localDiff)(nil)
 
 func NewLocalDiffFromCache(
 	cacheKey DiffStoreKey,
-	cache *block.Cache,
+	cache *block.MMapCache,
 ) (Diff, error) {
 	return &localDiff{
 		cache:    cache,
@@ -114,11 +115,11 @@ func (b *localDiff) Close() error {
 	return b.cache.Close()
 }
 
-func (b *localDiff) ReadAt(_ context.Context, p []byte, off int64) (int, error) {
+func (b *localDiff) ReadAt(_ context.Context, p []byte, off int64, _ *storage.FrameTable) (int, error) {
 	return b.cache.ReadAt(p, off)
 }
 
-func (b *localDiff) Slice(_ context.Context, off, length int64) ([]byte, error) {
+func (b *localDiff) Slice(_ context.Context, off, length int64, _ *storage.FrameTable) ([]byte, error) {
 	return b.cache.Slice(off, length)
 }
 
@@ -134,10 +135,10 @@ func (b *localDiff) CacheKey() DiffStoreKey {
 	return b.cacheKey
 }
 
-func (b *localDiff) Init(context.Context) error {
-	return nil
-}
-
 func (b *localDiff) BlockSize() int64 {
 	return b.cache.BlockSize()
+}
+
+func (b *localDiff) Stats() block.ChunkerStats {
+	return block.ChunkerStats{ChunkerType: "LocalDiff", CompressionType: "none"}
 }

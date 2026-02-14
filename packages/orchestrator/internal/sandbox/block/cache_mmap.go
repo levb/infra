@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/bits-and-blooms/bitset"
 	"github.com/edsrzf/mmap-go"
@@ -43,7 +44,7 @@ func NewErrCacheClosed(filePath string) *CacheClosedError {
 	}
 }
 
-type Cache struct {
+type MMapCache struct {
 	filePath  string
 	size      int64
 	blockSize int64
@@ -55,7 +56,7 @@ type Cache struct {
 }
 
 // When we are passing filePath that is a file that has content we want to server want to use dirtyFile = true.
-func NewCache(size, blockSize int64, filePath string, dirtyFile bool) (*Cache, error) {
+func NewCache(size, blockSize int64, filePath string, dirtyFile bool) (*MMapCache, error) {
 	f, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("error opening file: %w", err)
@@ -64,7 +65,7 @@ func NewCache(size, blockSize int64, filePath string, dirtyFile bool) (*Cache, e
 	defer f.Close()
 
 	if size == 0 {
-		return &Cache{
+		return &MMapCache{
 			filePath:  filePath,
 			size:      size,
 			blockSize: blockSize,
@@ -87,7 +88,7 @@ func NewCache(size, blockSize int64, filePath string, dirtyFile bool) (*Cache, e
 		return nil, fmt.Errorf("error mapping file: %w", err)
 	}
 
-	return &Cache{
+	return &MMapCache{
 		mmap:      &mm,
 		filePath:  filePath,
 		size:      size,
@@ -96,11 +97,11 @@ func NewCache(size, blockSize int64, filePath string, dirtyFile bool) (*Cache, e
 	}, nil
 }
 
-func (c *Cache) isClosed() bool {
+func (c *MMapCache) isClosed() bool {
 	return c.closed.Load()
 }
 
-func (c *Cache) Sync() error {
+func (c *MMapCache) Sync() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -120,7 +121,7 @@ func (c *Cache) Sync() error {
 	return nil
 }
 
-func (c *Cache) ExportToDiff(ctx context.Context, out io.Writer) (*header.DiffMetadata, error) {
+func (c *MMapCache) ExportToDiff(ctx context.Context, out io.Writer) (*header.DiffMetadata, error) {
 	ctx, childSpan := tracer.Start(ctx, "export-to-diff")
 	defer childSpan.End()
 
@@ -158,7 +159,7 @@ func (c *Cache) ExportToDiff(ctx context.Context, out io.Writer) (*header.DiffMe
 	return builder.Build(), nil
 }
 
-func (c *Cache) ReadAt(b []byte, off int64) (int, error) {
+func (c *MMapCache) ReadAt(b []byte, off int64) (int, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -178,7 +179,7 @@ func (c *Cache) ReadAt(b []byte, off int64) (int, error) {
 	return copy(b, slice), nil
 }
 
-func (c *Cache) WriteAt(b []byte, off int64) (int, error) {
+func (c *MMapCache) WriteAt(b []byte, off int64) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -193,7 +194,7 @@ func (c *Cache) WriteAt(b []byte, off int64) (int, error) {
 	return c.WriteAtWithoutLock(b, off)
 }
 
-func (c *Cache) Close() (e error) {
+func (c *MMapCache) Close() (e error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -217,7 +218,7 @@ func (c *Cache) Close() (e error) {
 	return e
 }
 
-func (c *Cache) Size() (int64, error) {
+func (c *MMapCache) Size() (int64, error) {
 	if c.isClosed() {
 		return 0, NewErrCacheClosed(c.filePath)
 	}
@@ -227,7 +228,7 @@ func (c *Cache) Size() (int64, error) {
 
 // Slice returns a slice of the mmap.
 // When using Slice you must ensure thread safety, ideally by only writing to the same block once and the exposing the slice.
-func (c *Cache) Slice(off, length int64) ([]byte, error) {
+func (c *MMapCache) Slice(off, length int64) ([]byte, error) {
 	if c.isClosed() {
 		return nil, NewErrCacheClosed(c.filePath)
 	}
@@ -245,7 +246,7 @@ func (c *Cache) Slice(off, length int64) ([]byte, error) {
 	return nil, BytesNotAvailableError{}
 }
 
-func (c *Cache) isCached(off, length int64) bool {
+func (c *MMapCache) isCached(off, length int64) bool {
 	for _, blockOff := range header.BlocksOffsets(length, c.blockSize) {
 		_, dirty := c.dirty.Load(off + blockOff)
 		if !dirty {
@@ -256,14 +257,14 @@ func (c *Cache) isCached(off, length int64) bool {
 	return true
 }
 
-func (c *Cache) setIsCached(off, length int64) {
+func (c *MMapCache) setIsCached(off, length int64) {
 	for _, blockOff := range header.BlocksOffsets(length, c.blockSize) {
 		c.dirty.Store(off+blockOff, struct{}{})
 	}
 }
 
 // When using WriteAtWithoutLock you must ensure thread safety, ideally by only writing to the same block once and the exposing the slice.
-func (c *Cache) WriteAtWithoutLock(b []byte, off int64) (int, error) {
+func (c *MMapCache) WriteAtWithoutLock(b []byte, off int64) (int, error) {
 	if c.isClosed() {
 		return 0, NewErrCacheClosed(c.filePath)
 	}
@@ -283,7 +284,7 @@ func (c *Cache) WriteAtWithoutLock(b []byte, off int64) (int, error) {
 
 // dirtySortedKeys returns a sorted list of dirty keys.
 // Key represents a block offset.
-func (c *Cache) dirtySortedKeys() []int64 {
+func (c *MMapCache) dirtySortedKeys() []int64 {
 	var keys []int64
 	c.dirty.Range(func(key, _ any) bool {
 		keys = append(keys, key.(int64))
@@ -295,9 +296,46 @@ func (c *Cache) dirtySortedKeys() []int64 {
 	return keys
 }
 
+// ResidentBytes returns the amount of physical memory (RSS) backing the mmap
+// using the mincore syscall.
+func (c *MMapCache) ResidentBytes() (int64, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.mmap == nil || c.isClosed() {
+		return 0, nil
+	}
+
+	pageSize := os.Getpagesize()
+	mmapLen := len(*c.mmap)
+	if mmapLen == 0 {
+		return 0, nil
+	}
+
+	numPages := (mmapLen + pageSize - 1) / pageSize
+	vec := make([]byte, numPages)
+
+	_, _, errno := unix.Syscall(unix.SYS_MINCORE,
+		uintptr(unsafe.Pointer(&(*c.mmap)[0])),
+		uintptr(mmapLen),
+		uintptr(unsafe.Pointer(&vec[0])))
+	if errno != 0 {
+		return 0, fmt.Errorf("mincore failed: %w", errno)
+	}
+
+	resident := 0
+	for _, v := range vec {
+		if v&1 != 0 {
+			resident++
+		}
+	}
+
+	return int64(resident) * int64(pageSize), nil
+}
+
 // FileSize returns the size of the cache on disk.
 // The size might differ from the dirty size, as it may not be fully on disk.
-func (c *Cache) FileSize() (int64, error) {
+func (c *MMapCache) FileSize() (int64, error) {
 	var stat syscall.Stat_t
 	err := syscall.Stat(c.filePath, &stat)
 	if err != nil {
@@ -313,7 +351,7 @@ func (c *Cache) FileSize() (int64, error) {
 	return stat.Blocks * fsStat.Bsize, nil
 }
 
-func (c *Cache) address(off int64) (*byte, error) {
+func (c *MMapCache) address(off int64) (*byte, error) {
 	if c.mmap == nil {
 		return nil, nil
 	}
@@ -326,7 +364,7 @@ func (c *Cache) address(off int64) (*byte, error) {
 }
 
 // addressBytes returns a slice of the mmap and a function to release the read lock which blocks the cache from being closed.
-func (c *Cache) addressBytes(off, length int64) ([]byte, func(), error) {
+func (c *MMapCache) addressBytes(off, length int64) ([]byte, func(), error) {
 	c.mu.RLock()
 
 	if c.mmap == nil {
@@ -356,11 +394,11 @@ func (c *Cache) addressBytes(off, length int64) ([]byte, func(), error) {
 	return (*c.mmap)[off:end], releaseCacheCloseLock, nil
 }
 
-func (c *Cache) BlockSize() int64 {
+func (c *MMapCache) BlockSize() int64 {
 	return c.blockSize
 }
 
-func (c *Cache) Path() string {
+func (c *MMapCache) Path() string {
 	return c.filePath
 }
 
@@ -370,7 +408,7 @@ func NewCacheFromProcessMemory(
 	filePath string,
 	pid int,
 	ranges []Range,
-) (*Cache, error) {
+) (*MMapCache, error) {
 	size := GetSize(ranges)
 
 	cache, err := NewCache(size, blockSize, filePath, false)
@@ -390,7 +428,7 @@ func NewCacheFromProcessMemory(
 	return cache, nil
 }
 
-func (c *Cache) copyProcessMemory(
+func (c *MMapCache) copyProcessMemory(
 	ctx context.Context,
 	pid int,
 	rs []Range,

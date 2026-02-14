@@ -363,10 +363,8 @@ func printArtifactSizes(ctx context.Context, persistence storage.StorageProvider
 		printLocalFileSizes(basePath, buildID)
 	} else {
 		// For remote storage, get sizes from storage provider
-		if memfile, err := persistence.OpenSeekable(ctx, files.StorageMemfilePath(), storage.MemfileObjectType); err == nil {
-			if size, err := memfile.Size(ctx); err == nil {
-				fmt.Printf("   Memfile: %d MB\n", size>>20)
-			}
+		if size, _, err := persistence.Size(ctx, files.Path(storage.MemfileName)); err == nil {
+			fmt.Printf("   Memfile: %d MB\n", size>>20)
 		}
 	}
 }
@@ -385,13 +383,19 @@ func printLocalFileSizes(basePath, buildID string) {
 		totalSize, blockSize := cmdutil.GetHeaderInfo(headerPath)
 		if totalSize == 0 {
 			fmt.Printf("   %s: %d MB (this layer)\n", a.Name, actual>>20)
-
-			continue
+		} else {
+			pct := float64(actual) / float64(totalSize) * 100
+			fmt.Printf("   %s: %d MB diff / %d MB total (%.1f%%), block size: %d KB\n",
+				a.Name, actual>>20, totalSize>>20, pct, blockSize>>10)
 		}
 
-		pct := float64(actual) / float64(totalSize) * 100
-		fmt.Printf("   %s: %d MB diff / %d MB total (%.1f%%), block size: %d KB\n",
-			a.Name, actual>>20, totalSize>>20, pct, blockSize>>10)
+		// Show compressed data size if it exists
+		if a.CompressedFile != "" {
+			compPath := filepath.Join(dir, a.CompressedFile)
+			if compActual, compErr := cmdutil.GetActualFileSize(compPath); compErr == nil {
+				fmt.Printf("   %s (compressed): %d MB\n", a.Name, compActual>>20)
+			}
+		}
 	}
 
 	for _, a := range cmdutil.SmallArtifacts() {

@@ -24,14 +24,21 @@ const (
 	Rootfs  DiffType = storage.RootfsName
 )
 
+// Diff represents a build's file (memfile or rootfs) that can be read.
+// Implementations must support lazy initialization using the frame table
+// provided to ReadAt/Slice on first access.
 type Diff interface {
 	io.Closer
-	storage.SeekableReader
-	block.Slicer
 	CacheKey() DiffStoreKey
 	CachePath() (string, error)
 	FileSize() (int64, error)
-	Init(ctx context.Context) error
+	BlockSize() int64
+	// ReadAt reads data at offset. The frame table is used for lazy chunker init.
+	ReadAt(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error)
+	// Slice returns a view into the data. The frame table is used for lazy chunker init.
+	Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error)
+	// Stats returns per-chunker statistics for benchmarking.
+	Stats() block.ChunkerStats
 }
 
 type NoDiff struct{}
@@ -42,7 +49,7 @@ func (n *NoDiff) CachePath() (string, error) {
 	return "", NoDiffError{}
 }
 
-func (n *NoDiff) Slice(_ context.Context, _, _ int64) ([]byte, error) {
+func (n *NoDiff) Slice(_ context.Context, _, _ int64, _ *storage.FrameTable) ([]byte, error) {
 	return nil, NoDiffError{}
 }
 
@@ -50,7 +57,7 @@ func (n *NoDiff) Close() error {
 	return nil
 }
 
-func (n *NoDiff) ReadAt(_ context.Context, _ []byte, _ int64) (int, error) {
+func (n *NoDiff) ReadAt(_ context.Context, _ []byte, _ int64, _ *storage.FrameTable) (int, error) {
 	return 0, NoDiffError{}
 }
 
@@ -66,12 +73,12 @@ func (n *NoDiff) CacheKey() DiffStoreKey {
 	return ""
 }
 
-func (n *NoDiff) Init(context.Context) error {
-	return NoDiffError{}
-}
-
 func (n *NoDiff) BlockSize() int64 {
 	return 0
+}
+
+func (n *NoDiff) Stats() block.ChunkerStats {
+	return block.ChunkerStats{}
 }
 
 func GenerateDiffCachePath(basePath string, buildId string, diffType DiffType) string {

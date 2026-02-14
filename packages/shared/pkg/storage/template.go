@@ -1,9 +1,5 @@
 package storage
 
-import (
-	"fmt"
-)
-
 const (
 	GuestEnvdPath = "/usr/bin/envd"
 
@@ -13,6 +9,11 @@ const (
 	MetadataName = "metadata.json"
 
 	HeaderSuffix = ".header"
+
+	// CompressedHeaderSuffix is the object-path suffix for compressed headers.
+	// Hardcoded to LZ4 — always the fastest to decompress, independent of
+	// the data compression algorithm.
+	CompressedHeaderSuffix = ".compressed.header.lz4"
 )
 
 type TemplateFiles struct {
@@ -28,26 +29,23 @@ func (t TemplateFiles) StorageDir() string {
 	return t.BuildID
 }
 
-func (t TemplateFiles) StorageMemfilePath() string {
-	return fmt.Sprintf("%s/%s", t.StorageDir(), MemfileName)
+// Path returns "{buildId}/{fileName}".
+func (t TemplateFiles) Path(fileName string) string {
+	return t.BuildID + "/" + fileName
 }
 
-func (t TemplateFiles) StorageMemfileHeaderPath() string {
-	return fmt.Sprintf("%s/%s%s", t.StorageDir(), MemfileName, HeaderSuffix)
+// HeaderPath returns "{buildId}/{fileName}.header".
+func (t TemplateFiles) HeaderPath(fileName string) string {
+	return t.BuildID + "/" + fileName + HeaderSuffix
 }
 
-func (t TemplateFiles) StorageRootfsPath() string {
-	return fmt.Sprintf("%s/%s", t.StorageDir(), RootfsName)
+// CompressedPath returns "{buildId}/{fileName}.{defaultCompressionSuffix}".
+// Write-side only — the read side derives the suffix from the frame table.
+func (t TemplateFiles) CompressedPath(fileName string) string {
+	return t.BuildID + "/" + fileName + DefaultCompressionOptions.CompressionType.Suffix()
 }
 
-func (t TemplateFiles) StorageRootfsHeaderPath() string {
-	return fmt.Sprintf("%s/%s%s", t.StorageDir(), RootfsName, HeaderSuffix)
-}
-
-func (t TemplateFiles) StorageSnapfilePath() string {
-	return fmt.Sprintf("%s/%s", t.StorageDir(), SnapfileName)
-}
-
-func (t TemplateFiles) StorageMetadataPath() string {
-	return fmt.Sprintf("%s/%s", t.StorageDir(), MetadataName)
+// CompressedHeaderPath returns "{buildId}/{fileName}.compressed.header.lz4".
+func (t TemplateFiles) CompressedHeaderPath(fileName string) string {
+	return t.BuildID + "/" + fileName + CompressedHeaderSuffix
 }
