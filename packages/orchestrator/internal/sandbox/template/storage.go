@@ -19,6 +19,10 @@ const (
 	oldRootfsBlockSize     = 2 << 11 // 4 KiB
 )
 
+// useCompressedAssets controls whether to try loading v4 (compressed) headers.
+// Will be replaced with a feature flag.
+var useCompressedAssets = false
+
 type Storage struct {
 	header *header.Header
 	source *build.File
@@ -135,7 +139,7 @@ func NewStorage(
 		}
 
 		var err error
-		if storage.UseCompressedAssets {
+		if useCompressedAssets {
 			h, err = loadV4orV3Header(ctx, persistence, buildId, fileType, headerObjectType)
 		} else {
 			h, err = loadV3Header(ctx, persistence, buildId, fileType, headerObjectType)

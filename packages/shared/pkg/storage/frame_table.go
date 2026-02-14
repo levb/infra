@@ -85,23 +85,6 @@ func (ft *FrameTable) CompressionTypeSuffix() string {
 	return ft.CompressionType.Suffix()
 }
 
-type ChunkerType byte
-
-const (
-	UncompressedMMapChunker ChunkerType = iota
-	DecompressMMapChunker
-	CompressMMapLRUChunker
-)
-
-// Global flags for compression behavior.
-var (
-	// UseCompressedAssets controls whether to read from compressed assets at runtime.
-	UseCompressedAssets = true
-
-	CompressedChunkerType   = CompressMMapLRUChunker
-	UncompressedChunkerType = UncompressedMMapChunker
-)
-
 // FrameGetter reads a single compressed or uncompressed frame from storage.
 type FrameGetter interface {
 	GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte) (Range, error)

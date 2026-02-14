@@ -10,6 +10,19 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
+type chunkerType byte
+
+const (
+	uncompressedMMapChunker chunkerType = iota
+	decompressMMapChunker
+	compressMMapLRUChunker
+)
+
+var (
+	compressedChunkerType   = compressMMapLRUChunker
+	uncompressedChunkerType = uncompressedMMapChunker
+)
+
 type StorageDiff struct {
 	// chunker is lazily initialized via chunkerOnce on first ReadAt/Slice call.
 	chunker     block.Chunker
@@ -125,11 +138,11 @@ func (b *StorageDiff) createChunker(ctx context.Context, ft *storage.FrameTable)
 		estimatedFrames := max(1, int(uSize/estimatedFrameU))
 		lruSize := max(4, estimatedFrames/2)
 
-		switch storage.CompressedChunkerType {
-		case storage.DecompressMMapChunker:
+		switch compressedChunkerType {
+		case decompressMMapChunker:
 			return block.NewDecompressMMapChunker(uSize, rawSize, b.blockSize, b.persistence, actualPath, b.cachePath, b.metrics)
 
-		case storage.CompressMMapLRUChunker:
+		case compressMMapLRUChunker:
 			return block.NewCompressMMapLRUChunker(uSize, rawSize, b.persistence, actualPath, b.cachePath, lruSize, b.metrics)
 
 		default:
@@ -138,11 +151,11 @@ func (b *StorageDiff) createChunker(ctx context.Context, ft *storage.FrameTable)
 	}
 
 	// Uncompressed path
-	switch storage.UncompressedChunkerType {
-	case storage.DecompressMMapChunker:
+	switch uncompressedChunkerType {
+	case decompressMMapChunker:
 		return block.NewDecompressMMapChunker(rawSize, rawSize, b.blockSize, b.persistence, actualPath, b.cachePath, b.metrics)
 
-	case storage.UncompressedMMapChunker:
+	case uncompressedMMapChunker:
 		return block.NewUncompressedMMapChunker(rawSize, b.blockSize, b.persistence, actualPath, b.cachePath, b.metrics)
 
 	default:
