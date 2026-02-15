@@ -8,6 +8,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
@@ -26,15 +27,15 @@ type CompressedFileLRUChunker struct {
 	objectPath string
 
 	// Level 1: Decompressed frame LRU
-	frameLRU      *lru.Cache[int64, []byte]
-	decompressMap *utils.WaitMap
+	frameLRU *lru.Cache[int64, []byte]
 
 	// Level 2: Compressed frame file cache
 	compressedCache *FrameCache
 
-	size    int64 // uncompressed size
-	rawSize int64 // compressed file size
-	metrics metrics.Metrics
+	fetchMap *utils.WaitMap
+	size     int64 // uncompressed size
+	rawSize  int64 // compressed file size
+	metrics  metrics.Metrics
 }
 
 // NewCompressedFileLRUChunker creates a new two-level cache chunker.
@@ -64,7 +65,7 @@ func NewCompressedFileLRUChunker(
 		storage:         s,
 		objectPath:      objectPath,
 		frameLRU:        frameLRU,
-		decompressMap:   utils.NewWaitMap(),
+		fetchMap:        utils.NewWaitMap(),
 		compressedCache: compressedCache,
 		size:            size,
 		rawSize:         rawSize,
@@ -139,10 +140,59 @@ func (c *CompressedFileLRUChunker) getOrFetchFrame(ctx context.Context, frameSta
 		return data, true, nil
 	}
 
-	err := c.decompressMap.Wait(frameStarts.U, func() error {
-		_, err := c.fetchDecompressAndCache(ctx, frameStarts, frameSize, ft)
+	err := c.fetchMap.Wait(frameStarts.U, func() error {
+		framePath, compressedBuf, err := c.compressedCache.getOrFetch(ctx, frameStarts, frameSize, ft)
+		if err != nil {
+			return err
+		}
 
-		return err
+		var data []byte
+
+		if compressedBuf != nil {
+			// We fetched the compressed frame from upstream, but haven't
+			// persisted it to disk yet. Decompress in-memory and persist
+			// asynchronously in the background.
+			var eg errgroup.Group
+
+			eg.Go(func() error {
+				if err := c.compressedCache.Persist(frameStarts, frameSize, compressedBuf); err != nil {
+					// Best-effort — frame will be in LRU, disk is for re-access after eviction.
+					logger.L().Error(ctx, "failed to persist compressed frame to disk", zap.Error(err))
+				}
+
+				return nil
+			})
+
+			eg.Go(func() error {
+				var err error
+				data, err = storage.DecompressFrame(ft.CompressionType, compressedBuf, frameSize.U)
+				if err != nil {
+					return fmt.Errorf("failed to decompress frame at %#x: %w", frameStarts.U, err)
+				}
+
+				return nil
+			})
+
+			if err := eg.Wait(); err != nil {
+				return err
+			}
+		} else {
+			// Slow path: frame already on disk (previous run or LRU eviction re-access)
+			f, err := os.Open(framePath)
+			if err != nil {
+				return fmt.Errorf("failed to open cached frame file %s: %w", framePath, err)
+			}
+			defer f.Close()
+
+			data, err = storage.DecompressReader(ft.CompressionType, f, int(frameSize.U))
+			if err != nil {
+				return fmt.Errorf("failed to decompress frame at %#x: %w", frameStarts.U, err)
+			}
+		}
+
+		c.frameLRU.Add(frameStarts.U, data)
+
+		return nil
 	})
 	if err != nil {
 		return nil, false, err
@@ -154,33 +204,6 @@ func (c *CompressedFileLRUChunker) getOrFetchFrame(ctx context.Context, frameSta
 	}
 
 	return data, false, nil
-}
-
-func (c *CompressedFileLRUChunker) fetchDecompressAndCache(ctx context.Context, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) ([]byte, error) {
-	framePath, err := c.ensureCompressedOnDisk(ctx, frameStarts, frameSize, ft)
-	if err != nil {
-		return nil, err
-	}
-
-	// Stream compressed data from file through decoder — no intermediate []byte in memory
-	f, err := os.Open(framePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open cached frame file %s: %w", framePath, err)
-	}
-	defer f.Close()
-
-	data, err := storage.DecompressReader(ft.CompressionType, f, int(frameSize.U))
-	if err != nil {
-		return nil, fmt.Errorf("failed to decompress frame at %#x: %w", frameStarts.U, err)
-	}
-
-	c.frameLRU.Add(frameStarts.U, data)
-
-	return data, nil
-}
-
-func (c *CompressedFileLRUChunker) ensureCompressedOnDisk(ctx context.Context, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) (string, error) {
-	return c.compressedCache.GetOrFetch(ctx, frameStarts, frameSize, ft)
 }
 
 func (c *CompressedFileLRUChunker) Close() error {
