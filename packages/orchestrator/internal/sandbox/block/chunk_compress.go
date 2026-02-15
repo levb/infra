@@ -16,12 +16,12 @@ import (
 )
 
 // DefaultLRUFrameCount is the default number of decompressed frames to keep in the LRU cache.
-const DefaultLRUFrameCount = 16
+const DefaultLRUFrameCount = 4
 
-// CompressMMapLRUChunker is a two-level cache chunker:
+// CompressedFileLRUChunker is a two-level cache chunker:
 //   - Level 1: LRU cache for decompressed frames (in-memory)
 //   - Level 2: per-frame file cache for compressed frames (on-disk, lazily populated)
-type CompressMMapLRUChunker struct {
+type CompressedFileLRUChunker struct {
 	storage    storage.FrameGetter
 	objectPath string
 
@@ -30,22 +30,22 @@ type CompressMMapLRUChunker struct {
 	decompressMap *utils.WaitMap
 
 	// Level 2: Compressed frame file cache
-	compressedCache *FrameFileCache
+	compressedCache *FrameCache
 
-	virtSize int64 // uncompressed size
-	rawSize  int64 // compressed file size
-	metrics  metrics.Metrics
+	size    int64 // uncompressed size
+	rawSize int64 // compressed file size
+	metrics metrics.Metrics
 }
 
-// NewCompressMMapLRUChunker creates a new two-level cache chunker.
-func NewCompressMMapLRUChunker(
-	virtSize, rawSize int64,
+// NewCompressedFileLRUChunker creates a new two-level cache chunker.
+func NewCompressedFileLRUChunker(
+	size, rawSize int64,
 	s storage.FrameGetter,
 	objectPath string,
 	cachePath string,
 	lruSize int,
 	m metrics.Metrics,
-) (*CompressMMapLRUChunker, error) {
+) (*CompressedFileLRUChunker, error) {
 	if lruSize <= 0 {
 		lruSize = DefaultLRUFrameCount
 	}
@@ -55,28 +55,28 @@ func NewCompressMMapLRUChunker(
 		return nil, fmt.Errorf("failed to create frame LRU: %w", err)
 	}
 
-	compressedCache, err := NewFrameFileCache(cachePath)
+	compressedCache, err := NewFrameCache(cachePath, s, objectPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create compressed cache: %w", err)
 	}
 
-	return &CompressMMapLRUChunker{
+	return &CompressedFileLRUChunker{
 		storage:         s,
 		objectPath:      objectPath,
 		frameLRU:        frameLRU,
 		decompressMap:   utils.NewWaitMap(),
 		compressedCache: compressedCache,
-		virtSize:        virtSize,
+		size:            size,
 		rawSize:         rawSize,
 		metrics:         m,
 	}, nil
 }
 
-func (c *CompressMMapLRUChunker) Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
+func (c *CompressedFileLRUChunker) Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
 	timer := c.metrics.SlicesTimerFactory.Begin()
 
-	if off+length > c.virtSize {
-		length = c.virtSize - off
+	if off+length > c.size {
+		length = c.size - off
 	}
 	if length <= 0 {
 		return []byte{}, nil
@@ -92,7 +92,7 @@ func (c *CompressMMapLRUChunker) Slice(ctx context.Context, off, length int64, f
 			zap.Int64("offset", off),
 			zap.Int64("length", length))
 
-		return nil, fmt.Errorf("CompressMMapLRUChunker requires FrameTable for compressed data at offset %d", off)
+		return nil, fmt.Errorf("CompressedFileLRUChunker requires FrameTable for compressed data at offset %d", off)
 	}
 
 	frameStarts, frameSize, err := ft.FrameFor(off)
@@ -107,39 +107,34 @@ func (c *CompressMMapLRUChunker) Slice(ctx context.Context, off, length int64, f
 	startInFrame := off - frameStarts.U
 	endInFrame := startInFrame + length
 
-	// Fast path: entire read fits in one frame
-	if endInFrame <= int64(frameSize.U) {
-		data, _, err := c.getOrFetchFrame(ctx, frameStarts, frameSize, ft)
-		if err != nil {
-			timer.Failure(ctx, length,
-				attribute.String(pullType, pullTypeRemote),
-				attribute.String(failureReason, failureTypeCacheFetch))
+	if endInFrame > int64(frameSize.U) {
+		timer.Failure(ctx, length,
+			attribute.String(pullType, pullTypeLocal),
+			attribute.String(failureReason, "cross_frame_read"))
 
-			return nil, err
-		}
-
-		timer.Success(ctx, length, attribute.String(pullType, pullTypeRemote))
-
-		if endInFrame > int64(len(data)) {
-			endInFrame = int64(len(data))
-		}
-
-		return data[startInFrame:endInFrame], nil
+		return nil, fmt.Errorf("read spans frame boundary: off=%#x length=%d frameStart=%#x frameSize=%d",
+			off, length, frameStarts.U, frameSize.U)
 	}
 
-	// Slow path: read spans multiple frames
-	logger.L().Error(ctx, "CompressMMapLRU: cross-frame read",
-		zap.String("object", c.objectPath),
-		zap.Int64("offset", off),
-		zap.Int64("length", length),
-		zap.Int32("frameSize", frameSize.U),
-		zap.Int64("frameStartsU", frameStarts.U))
+	data, _, err := c.getOrFetchFrame(ctx, frameStarts, frameSize, ft)
+	if err != nil {
+		timer.Failure(ctx, length,
+			attribute.String(pullType, pullTypeRemote),
+			attribute.String(failureReason, failureTypeCacheFetch))
 
-	return nil, fmt.Errorf("read spans frame boundary - off=%#x length=%d startInFrame=%d endInFrame=%d frameSize=%d frameStartsU=%#x",
-		off, length, startInFrame, endInFrame, frameSize.U, frameStarts.U)
+		return nil, err
+	}
+
+	timer.Success(ctx, length, attribute.String(pullType, pullTypeRemote))
+
+	if endInFrame > int64(len(data)) {
+		endInFrame = int64(len(data))
+	}
+
+	return data[startInFrame:endInFrame], nil
 }
 
-func (c *CompressMMapLRUChunker) getOrFetchFrame(ctx context.Context, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) ([]byte, bool, error) {
+func (c *CompressedFileLRUChunker) getOrFetchFrame(ctx context.Context, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) ([]byte, bool, error) {
 	if data, ok := c.frameLRU.Get(frameStarts.U); ok {
 		return data, true, nil
 	}
@@ -161,7 +156,7 @@ func (c *CompressMMapLRUChunker) getOrFetchFrame(ctx context.Context, frameStart
 	return data, false, nil
 }
 
-func (c *CompressMMapLRUChunker) fetchDecompressAndCache(ctx context.Context, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) ([]byte, error) {
+func (c *CompressedFileLRUChunker) fetchDecompressAndCache(ctx context.Context, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) ([]byte, error) {
 	framePath, err := c.ensureCompressedOnDisk(ctx, frameStarts, frameSize, ft)
 	if err != nil {
 		return nil, err
@@ -184,18 +179,11 @@ func (c *CompressMMapLRUChunker) fetchDecompressAndCache(ctx context.Context, fr
 	return data, nil
 }
 
-func (c *CompressMMapLRUChunker) ensureCompressedOnDisk(ctx context.Context, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) (string, error) {
-	return c.compressedCache.GetOrFetch(frameStarts.C, int64(frameSize.C), func(buf []byte) error {
-		_, err := c.storage.GetFrame(ctx, c.objectPath, frameStarts.U, ft, false, buf)
-		if err != nil {
-			return fmt.Errorf("failed to fetch compressed frame at %#x: %w", frameStarts.C, err)
-		}
-
-		return nil
-	})
+func (c *CompressedFileLRUChunker) ensureCompressedOnDisk(ctx context.Context, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) (string, error) {
+	return c.compressedCache.GetOrFetch(ctx, frameStarts, frameSize, ft)
 }
 
-func (c *CompressMMapLRUChunker) Close() error {
+func (c *CompressedFileLRUChunker) Close() error {
 	if c.frameLRU != nil {
 		c.frameLRU.Purge()
 	}
@@ -207,6 +195,6 @@ func (c *CompressMMapLRUChunker) Close() error {
 	return nil
 }
 
-func (c *CompressMMapLRUChunker) FileSize() (int64, error) {
+func (c *CompressedFileLRUChunker) FileSize() (int64, error) {
 	return c.compressedCache.FileSize()
 }

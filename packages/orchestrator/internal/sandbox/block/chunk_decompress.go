@@ -28,29 +28,29 @@ type DecompressMMapChunker struct {
 	cache   *Cache
 	metrics metrics.Metrics
 
-	virtSize int64 // U space size (uncompressed)
-	rawSize  int64 // C space size (compressed on storage)
+	size    int64 // uncompressed size
+	rawSize int64 // C space size (compressed on storage)
 
 	fetchMap *utils.WaitMap
 }
 
-// NewDecompressMMapChunker creates a chunker for compressed data.
-// virtSize = U space size (uncompressed), rawSize = C space size (compressed)
+// NewDecompressMMapChunker creates a chunker that decompresses data into an mmap cache.
+// size is the uncompressed size, rawSize is the on-storage (possibly compressed) size.
 func NewDecompressMMapChunker(
-	virtSize, rawSize, blockSize int64,
+	size, rawSize, blockSize int64,
 	s storage.FrameGetter,
 	objectPath string,
 	cachePath string,
 	metrics metrics.Metrics,
 ) (*DecompressMMapChunker, error) {
-	// mmap holds decompressed data, so size it to virtSize (U space)
-	cache, err := NewCache(virtSize, blockSize, cachePath, false)
+	// mmap holds decompressed (uncompressed) data
+	cache, err := NewCache(size, blockSize, cachePath, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cache: %w", err)
 	}
 
 	return &DecompressMMapChunker{
-		virtSize:   virtSize,
+		size:       size,
 		rawSize:    rawSize,
 		storage:    s,
 		objectPath: objectPath,
@@ -60,13 +60,13 @@ func NewDecompressMMapChunker(
 	}, nil
 }
 
-// Slice reads data at U offset. Bounds check uses virtSize (U space).
+// Slice reads data at the given uncompressed offset.
 func (c *DecompressMMapChunker) Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
 	if off < 0 || length < 0 {
 		return nil, fmt.Errorf("invalid slice params: off=%d length=%d", off, length)
 	}
-	if off+length > c.virtSize {
-		return nil, fmt.Errorf("slice out of bounds: off=%#x length=%d virtSize=%d", off, length, c.virtSize)
+	if off+length > c.size {
+		return nil, fmt.Errorf("slice out of bounds: off=%#x length=%d size=%d", off, length, c.size)
 	}
 
 	timer := c.metrics.SlicesTimerFactory.Begin()

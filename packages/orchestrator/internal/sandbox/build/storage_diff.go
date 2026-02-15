@@ -15,7 +15,7 @@ type chunkerType byte
 const (
 	uncompressedMMapChunker chunkerType = iota
 	decompressMMapChunker
-	compressMMapLRUChunker
+	compressedFileLRUChunker
 )
 
 var (
@@ -142,8 +142,8 @@ func (b *StorageDiff) createChunker(ctx context.Context, ft *storage.FrameTable)
 		case decompressMMapChunker:
 			return block.NewDecompressMMapChunker(uSize, rawSize, b.blockSize, b.persistence, actualPath, b.cachePath, b.metrics)
 
-		case compressMMapLRUChunker:
-			return block.NewCompressMMapLRUChunker(uSize, rawSize, b.persistence, actualPath, b.cachePath, lruSize, b.metrics)
+		case compressedFileLRUChunker:
+			return block.NewCompressedFileLRUChunker(uSize, rawSize, b.persistence, actualPath, b.cachePath, lruSize, b.metrics)
 
 		default:
 			return nil, fmt.Errorf("unsupported chunker type for object %s", actualPath)

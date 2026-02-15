@@ -24,7 +24,7 @@ type Chunker interface {
 var (
 	_ Chunker = (*UncompressedMMapChunker)(nil)
 	_ Chunker = (*DecompressMMapChunker)(nil)
-	_ Chunker = (*CompressMMapLRUChunker)(nil)
+	_ Chunker = (*CompressedFileLRUChunker)(nil)
 )
 
 // Slicer is the block-level slice interface used by ReadonlyDevice.
