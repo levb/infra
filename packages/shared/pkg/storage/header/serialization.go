@@ -147,6 +147,9 @@ func DeserializeBytes(data []byte) (*Header, error) {
 		if errors.Is(err, io.EOF) {
 			break
 		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to read block mapping: %w", err)
+		}
 
 		mappings = append(mappings, &BuildMap{
 			Offset:             v3.Offset,

@@ -80,10 +80,12 @@ func (b *File) ReadAt(ctx context.Context, p []byte, off int64) (n int, err erro
 			return 0, fmt.Errorf("failed to get build: %w", err)
 		}
 
+		ft := mappedToBuild.FrameTable
+
 		buildN, err := mappedBuild.ReadAt(ctx,
 			p[n:int64(n)+readLength],
 			int64(mappedToBuild.Offset),
-			mappedToBuild.FrameTable,
+			ft,
 		)
 		if err != nil {
 			return 0, fmt.Errorf("failed to read from source: %w", err)

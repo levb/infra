@@ -61,7 +61,11 @@ func loadHeader(ctx context.Context, persistence storage.StorageProvider, path s
 		return nil, err
 	}
 
-	return header.Deserialize(ctx, blob)
+	h, err := header.Deserialize(ctx, blob)
+	if err != nil {
+		return nil, err
+	}
+	return h, nil
 }
 
 // loadV4Header loads a v4 header (LZ4 compressed), decompresses, and deserializes it.

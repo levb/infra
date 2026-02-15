@@ -109,7 +109,8 @@ func (b *StorageDiff) getChunker(ctx context.Context, ft *storage.FrameTable) (b
 // createChunker creates the appropriate chunker based on the frame table.
 func (b *StorageDiff) createChunker(ctx context.Context, ft *storage.FrameTable) (block.Chunker, error) {
 	actualPath := b.storagePath
-	if storage.IsCompressed(ft) {
+	isCompressed := storage.IsCompressed(ft)
+	if isCompressed {
 		actualPath = b.storagePath + ft.CompressionTypeSuffix()
 	}
 
@@ -122,7 +123,6 @@ func (b *StorageDiff) createChunker(ctx context.Context, ft *storage.FrameTable)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get size of %s: %w", actualPath, err)
 	}
-
 	if storage.IsCompressed(ft) {
 		// For compressed data, also get the uncompressed size
 		uObj, err := b.persistence.OpenSeekable(ctx, b.storagePath, b.storageObjectType)
