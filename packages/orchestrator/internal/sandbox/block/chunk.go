@@ -20,22 +20,20 @@ import (
 // in a memory-mapped cache file (Cache). Returns slices directly from the mmap.
 // For compressed source files, use DecompressMMapChunker instead.
 type UncompressedMMapChunker struct {
-	base       storage.FrameGetter
-	objectPath string
-
+	base    storage.SeekableReader
 	cache   *Cache
 	metrics metrics.Metrics
 
-	size int64 // uncompressed size - for uncompressed data, virtSize == rawSize
+	size int64 // uncompressed size
 
+	// TODO: Optimize this so we don't need to keep the fetchers in memory.
 	fetchers *utils.WaitMap
 }
 
 // NewUncompressedMMapChunker creates a mmap-based chunker for uncompressed data.
 func NewUncompressedMMapChunker(
 	size, blockSize int64,
-	s storage.FrameGetter,
-	objectPath string,
+	base storage.SeekableReader,
 	cachePath string,
 	metrics metrics.Metrics,
 ) (*UncompressedMMapChunker, error) {
@@ -45,12 +43,11 @@ func NewUncompressedMMapChunker(
 	}
 
 	chunker := &UncompressedMMapChunker{
-		size:       size,
-		base:       s,
-		objectPath: objectPath,
-		cache:      cache,
-		fetchers:   utils.NewWaitMap(),
-		metrics:    metrics,
+		size:     size,
+		base:     base,
+		cache:    cache,
+		fetchers: utils.NewWaitMap(),
+		metrics:  metrics,
 	}
 
 	return chunker, nil
@@ -126,18 +123,35 @@ func (c *UncompressedMMapChunker) fetchToCache(ctx context.Context, off, length 
 				default:
 				}
 
+				// The size of the buffer is adjusted if the last chunk is not a multiple of the block size.
 				b, releaseCacheCloseLock, err := c.cache.addressBytes(fetchOff, storage.MemoryChunkSize)
 				if err != nil {
 					return err
 				}
 				defer releaseCacheCloseLock()
 
-				_, err = c.base.GetFrame(ctx, c.objectPath, fetchOff, nil, false, b)
+				fetchSW := c.metrics.RemoteReadsTimerFactory.Begin()
+
+				readBytes, err := c.base.ReadAt(ctx, b, fetchOff)
 				if err != nil {
-					return fmt.Errorf("failed to read from storage at %d: %w", fetchOff, err)
+					fetchSW.Failure(ctx, int64(readBytes),
+						attribute.String(failureReason, failureTypeRemoteRead),
+					)
+
+					return fmt.Errorf("failed to read chunk from base %d: %w", fetchOff, err)
 				}
 
-				c.cache.setIsCached(fetchOff, int64(len(b)))
+				if readBytes != len(b) {
+					fetchSW.Failure(ctx, int64(readBytes),
+						attribute.String(failureReason, failureTypeRemoteRead),
+					)
+
+					return fmt.Errorf("failed to read chunk from base %d: expected %d bytes, got %d bytes", fetchOff, len(b), readBytes)
+				}
+
+				c.cache.setIsCached(fetchOff, int64(readBytes))
+
+				fetchSW.Success(ctx, int64(readBytes))
 
 				return nil
 			})

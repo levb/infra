@@ -156,7 +156,7 @@ func (b *StorageDiff) createChunker(ctx context.Context, ft *storage.FrameTable)
 		return block.NewDecompressMMapChunker(rawSize, rawSize, b.blockSize, b.persistence, actualPath, b.cachePath, b.metrics)
 
 	case uncompressedMMapChunker:
-		return block.NewUncompressedMMapChunker(rawSize, b.blockSize, b.persistence, actualPath, b.cachePath, b.metrics)
+		return block.NewUncompressedMMapChunker(rawSize, b.blockSize, obj, b.cachePath, b.metrics)
 
 	default:
 		return nil, fmt.Errorf("unsupported chunker type for object %s", actualPath)
