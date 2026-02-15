@@ -1,36 +1,36 @@
 package block
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"strconv"
+	"os"
 
-	"github.com/klauspost/compress/zstd"
-	lz4 "github.com/pierrec/lz4/v4"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
+	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
+
+// DefaultLRUFrameCount is the default number of decompressed frames to keep in the LRU cache.
+const DefaultLRUFrameCount = 16
 
 // CompressMMapLRUChunker is a two-level cache chunker:
 //   - Level 1: LRU cache for decompressed frames (in-memory)
-//   - Level 2: mmap cache for compressed frames (on-disk, lazily populated)
+//   - Level 2: per-frame file cache for compressed frames (on-disk, lazily populated)
 type CompressMMapLRUChunker struct {
 	storage    storage.FrameGetter
 	objectPath string
 
 	// Level 1: Decompressed frame LRU
-	frameLRU        *FrameLRU
-	decompressGroup singleflight.Group
+	frameLRU      *lru.Cache[int64, []byte]
+	decompressMap *utils.WaitMap
 
-	// Level 2: Compressed frame mmap cache
-	compressedCache *MMapFrameCache
+	// Level 2: Compressed frame file cache
+	compressedCache *FrameFileCache
 
 	virtSize int64 // uncompressed size
 	rawSize  int64 // compressed file size
@@ -50,12 +50,12 @@ func NewCompressMMapLRUChunker(
 		lruSize = DefaultLRUFrameCount
 	}
 
-	frameLRU, err := NewFrameLRU(lruSize)
+	frameLRU, err := lru.New[int64, []byte](lruSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create frame LRU: %w", err)
 	}
 
-	compressedCache, err := NewFrameCache(rawSize, cachePath)
+	compressedCache, err := NewFrameFileCache(cachePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create compressed cache: %w", err)
 	}
@@ -64,6 +64,7 @@ func NewCompressMMapLRUChunker(
 		storage:         s,
 		objectPath:      objectPath,
 		frameLRU:        frameLRU,
+		decompressMap:   utils.NewWaitMap(),
 		compressedCache: compressedCache,
 		virtSize:        virtSize,
 		rawSize:         rawSize,
@@ -139,63 +140,51 @@ func (c *CompressMMapLRUChunker) Slice(ctx context.Context, off, length int64, f
 }
 
 func (c *CompressMMapLRUChunker) getOrFetchFrame(ctx context.Context, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) ([]byte, bool, error) {
-	if frame, ok := c.frameLRU.get(frameStarts.U); ok {
-		return frame.data, true, nil
+	if data, ok := c.frameLRU.Get(frameStarts.U); ok {
+		return data, true, nil
 	}
 
-	key := strconv.FormatInt(frameStarts.U, 10)
-	dataI, err, _ := c.decompressGroup.Do(key, func() (any, error) {
-		if frame, ok := c.frameLRU.get(frameStarts.U); ok {
-			return frame.data, nil
-		}
+	err := c.decompressMap.Wait(frameStarts.U, func() error {
+		_, err := c.fetchDecompressAndCache(ctx, frameStarts, frameSize, ft)
 
-		return c.fetchDecompressAndCache(ctx, frameStarts, frameSize, ft)
+		return err
 	})
 	if err != nil {
 		return nil, false, err
 	}
 
-	return dataI.([]byte), false, nil
+	data, ok := c.frameLRU.Get(frameStarts.U)
+	if !ok {
+		return nil, false, fmt.Errorf("frame at %#x not in LRU after fetch", frameStarts.U)
+	}
+
+	return data, false, nil
 }
 
 func (c *CompressMMapLRUChunker) fetchDecompressAndCache(ctx context.Context, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) ([]byte, error) {
-	compressedData, _, err := c.ensureCompressedInMmap(ctx, frameStarts, frameSize, ft)
+	framePath, err := c.ensureCompressedOnDisk(ctx, frameStarts, frameSize, ft)
 	if err != nil {
 		return nil, err
 	}
 
-	var data []byte
-	switch ft.CompressionType {
-	case storage.CompressionZstd:
-		dec, err := zstd.NewReader(nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create zstd reader: %w", err)
-		}
-		defer dec.Close()
+	// Stream compressed data from file through decoder — no intermediate []byte in memory
+	f, err := os.Open(framePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open cached frame file %s: %w", framePath, err)
+	}
+	defer f.Close()
 
-		data, err = dec.DecodeAll(compressedData, make([]byte, 0, frameSize.U))
-		if err != nil {
-			return nil, fmt.Errorf("failed to decompress frame at %#x: %w", frameStarts.U, err)
-		}
-
-	case storage.CompressionLZ4:
-		data = make([]byte, frameSize.U)
-		n, err := io.ReadFull(lz4.NewReader(bytes.NewReader(compressedData)), data)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decompress frame at %#x: %w", frameStarts.U, err)
-		}
-		data = data[:n]
-
-	default:
-		return nil, fmt.Errorf("unsupported compression type: %d", ft.CompressionType)
+	data, err := storage.DecompressReader(ft.CompressionType, f, int(frameSize.U))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress frame at %#x: %w", frameStarts.U, err)
 	}
 
-	c.frameLRU.put(frameStarts.U, int64(frameSize.U), data)
+	c.frameLRU.Add(frameStarts.U, data)
 
 	return data, nil
 }
 
-func (c *CompressMMapLRUChunker) ensureCompressedInMmap(ctx context.Context, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) ([]byte, bool, error) {
+func (c *CompressMMapLRUChunker) ensureCompressedOnDisk(ctx context.Context, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) (string, error) {
 	return c.compressedCache.GetOrFetch(frameStarts.C, int64(frameSize.C), func(buf []byte) error {
 		_, err := c.storage.GetFrame(ctx, c.objectPath, frameStarts.U, ft, false, buf)
 		if err != nil {

@@ -1,178 +1,104 @@
 package block
 
 import (
-	"errors"
 	"fmt"
-	"math"
 	"os"
-	"strconv"
-	"sync"
+	"path/filepath"
 	"sync/atomic"
-	"syscall"
 
-	"github.com/edsrzf/mmap-go"
-	"golang.org/x/sync/singleflight"
-	"golang.org/x/sys/unix"
+	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
 
-// MMapFrameCache is a compressed frame mmap cache that tracks presence at frame
-// granularity (by offset), eliminating the block-alignment issues of Cache.
-type MMapFrameCache struct {
-	filePath string
-	size     int64
-	mmap     *mmap.MMap
-	mu       sync.RWMutex
-	closed   atomic.Bool
-	frames   sync.Map           // map[int64]struct{} - tracks cached frames by offset
-	fetchers singleflight.Group // dedup concurrent fetches for same offset
+// FrameFileCache stores each compressed frame as an individual file in a directory.
+// Files are named by their C-space offset: frame-<hex_offset>.bin.
+type FrameFileCache struct {
+	dir    string
+	closed atomic.Bool
+
+	fetchers *utils.WaitMap
 }
 
-// NewFrameCache creates a new FrameCache backed by a sparse mmap file.
-func NewFrameCache(size int64, filePath string) (*MMapFrameCache, error) {
-	f, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("error opening file: %w", err)
-	}
-	defer f.Close()
-
-	if size == 0 {
-		return &MMapFrameCache{
-			filePath: filePath,
-			size:     size,
-		}, nil
+// NewFrameFileCache creates a new per-frame file cache in the given directory.
+func NewFrameFileCache(dirPath string) (*FrameFileCache, error) {
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create frame cache dir: %w", err)
 	}
 
-	err = f.Truncate(size)
-	if err != nil {
-		return nil, fmt.Errorf("error allocating file: %w", err)
-	}
-
-	if size > math.MaxInt {
-		return nil, fmt.Errorf("size too big: %d > %d", size, math.MaxInt)
-	}
-
-	mm, err := mmap.MapRegion(f, int(size), unix.PROT_READ|unix.PROT_WRITE, 0, 0)
-	if err != nil {
-		return nil, fmt.Errorf("error mapping file: %w", err)
-	}
-
-	return &MMapFrameCache{
-		mmap:     &mm,
-		filePath: filePath,
-		size:     size,
+	return &FrameFileCache{
+		dir:      dirPath,
+		fetchers: utils.NewWaitMap(),
 	}, nil
 }
 
-// GetOrFetch returns frame data from the cache at the given offset and length.
-// If the frame is not cached, fetchFn is called with a writable mmap buffer to populate it.
-func (fc *MMapFrameCache) GetOrFetch(off, length int64, fetchFn func(buf []byte) error) ([]byte, bool, error) {
-	// Fast path: already cached
-	if _, cached := fc.frames.Load(off); cached {
-		fc.mu.RLock()
-		defer fc.mu.RUnlock()
+// framePath returns the file path for a frame at the given C-space offset.
+func (fc *FrameFileCache) framePath(off int64) string {
+	return filepath.Join(fc.dir, fmt.Sprintf("frame-%x.bin", off))
+}
 
-		if fc.closed.Load() {
-			return nil, false, NewErrCacheClosed(fc.filePath)
-		}
-
-		if fc.mmap == nil {
-			return nil, false, nil
-		}
-
-		end := min(off+length, fc.size)
-
-		return (*fc.mmap)[off:end], true, nil
+// GetOrFetch returns the path to a cached compressed frame file.
+// If the frame is not cached, fetchFn is called with a writable buffer of `length` bytes
+// to populate the frame data, which is then written to disk atomically.
+func (fc *FrameFileCache) GetOrFetch(off, length int64, fetchFn func(buf []byte) error) (string, error) {
+	if fc.closed.Load() {
+		return "", NewErrCacheClosed(fc.dir)
 	}
 
-	// Slow path: fetch with singleflight dedup
-	key := strconv.FormatInt(off, 10)
-	_, err, _ := fc.fetchers.Do(key, func() (any, error) {
-		if _, cached := fc.frames.Load(off); cached {
-			return nil, nil
+	path := fc.framePath(off)
+
+	err := fc.fetchers.Wait(off, func() error {
+		// Double-check if file already exists (e.g. from a previous run with same cache dir)
+		if _, err := os.Stat(path); err == nil {
+			return nil
 		}
 
-		return nil, fc.fetch(off, length, fetchFn)
+		buf := make([]byte, length)
+		if err := fetchFn(buf); err != nil {
+			return err
+		}
+
+		// Write atomically: tmp file + rename
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, buf, 0o644); err != nil {
+			return fmt.Errorf("failed to write frame file %s: %w", tmp, err)
+		}
+
+		if err := os.Rename(tmp, path); err != nil {
+			_ = os.Remove(tmp)
+
+			return fmt.Errorf("failed to rename frame file %s -> %s: %w", tmp, path, err)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return nil, false, err
+		return "", err
 	}
 
-	fc.mu.RLock()
-	defer fc.mu.RUnlock()
-
-	if fc.closed.Load() {
-		return nil, false, NewErrCacheClosed(fc.filePath)
-	}
-
-	if fc.mmap == nil {
-		return nil, false, nil
-	}
-
-	end := min(off+length, fc.size)
-
-	return (*fc.mmap)[off:end], false, nil
+	return path, nil
 }
 
-func (fc *MMapFrameCache) fetch(off, length int64, fetchFn func(buf []byte) error) error {
-	fc.mu.RLock()
-	defer fc.mu.RUnlock()
+// Close removes the cache directory and all frame files.
+func (fc *FrameFileCache) Close() error {
+	fc.closed.Store(true)
 
-	if fc.closed.Load() {
-		return NewErrCacheClosed(fc.filePath)
-	}
-
-	if fc.mmap == nil {
-		return nil
-	}
-
-	end := min(off+length, fc.size)
-	buf := (*fc.mmap)[off:end]
-
-	if err := fetchFn(buf); err != nil {
-		return err
-	}
-
-	fc.frames.Store(off, struct{}{})
-
-	return nil
+	return os.RemoveAll(fc.dir)
 }
 
-func (fc *MMapFrameCache) Close() (e error) {
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-
-	if fc.mmap == nil {
-		return os.RemoveAll(fc.filePath)
-	}
-
-	succ := fc.closed.CompareAndSwap(false, true)
-	if !succ {
-		return NewErrCacheClosed(fc.filePath)
-	}
-
-	err := fc.mmap.Unmap()
+// FileSize returns the total on-disk size of all cached frame files.
+func (fc *FrameFileCache) FileSize() (int64, error) {
+	entries, err := os.ReadDir(fc.dir)
 	if err != nil {
-		e = errors.Join(e, fmt.Errorf("error unmapping mmap: %w", err))
+		return 0, fmt.Errorf("failed to read frame cache dir: %w", err)
 	}
 
-	e = errors.Join(e, os.RemoveAll(fc.filePath))
-
-	return e
-}
-
-// FileSize returns the on-disk size of the cache file.
-func (fc *MMapFrameCache) FileSize() (int64, error) {
-	var stat syscall.Stat_t
-	err := syscall.Stat(fc.filePath, &stat)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get file stats: %w", err)
+	var total int64
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		total += info.Size()
 	}
 
-	var fsStat syscall.Statfs_t
-	err = syscall.Statfs(fc.filePath, &fsStat)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get disk stats for path %s: %w", fc.filePath, err)
-	}
-
-	return stat.Blocks * fsStat.Bsize, nil
+	return total, nil
 }

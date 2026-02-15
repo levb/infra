@@ -65,6 +65,7 @@ func loadHeader(ctx context.Context, persistence storage.StorageProvider, path s
 	if err != nil {
 		return nil, err
 	}
+
 	return h, nil
 }
 

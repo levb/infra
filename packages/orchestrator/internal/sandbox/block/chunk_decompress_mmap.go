@@ -4,17 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
+	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
 
 // DecompressMMapChunker fetches compressed frames from storage, decompresses them
@@ -32,7 +31,7 @@ type DecompressMMapChunker struct {
 	virtSize int64 // U space size (uncompressed)
 	rawSize  int64 // C space size (compressed on storage)
 
-	fetchGroup singleflight.Group
+	fetchMap *utils.WaitMap
 }
 
 // NewDecompressMMapChunker creates a chunker for compressed data.
@@ -57,6 +56,7 @@ func NewDecompressMMapChunker(
 		objectPath: objectPath,
 		cache:      cache,
 		metrics:    metrics,
+		fetchMap:   utils.NewWaitMap(),
 	}, nil
 }
 
@@ -120,67 +120,41 @@ func (c *DecompressMMapChunker) fetchToCache(ctx context.Context, off, length in
 	return c.fetchDecompressToCache(ctx, off, length, ft)
 }
 
-// fetchDecompressToCache fetches compressed frames and decompresses into mmap.
+// fetchDecompressToCache fetches a single compressed frame containing off and decompresses into mmap.
+// The requested range must not cross a frame boundary.
 func (c *DecompressMMapChunker) fetchDecompressToCache(ctx context.Context, off, length int64, ft *storage.FrameTable) error {
-	var eg errgroup.Group
-
-	fetchRange := storage.Range{Start: off, Length: int(length)}
-
-	framesToFetch, err := ft.Subset(fetchRange)
+	frameStarts, frameSize, err := ft.FrameFor(off)
 	if err != nil {
-		return fmt.Errorf("failed to get frame subset for range %v: %w", fetchRange, err)
-	}
-	if framesToFetch == nil || len(framesToFetch.Frames) == 0 {
-		return fmt.Errorf("no frames to fetch for range %v", fetchRange)
+		return fmt.Errorf("failed to get frame for offset %#x: %w", off, err)
 	}
 
-	currentOff := framesToFetch.StartAt.U
-	for _, f := range framesToFetch.Frames {
-		fetchOff := currentOff
-		frameSize := f.U
-		currentOff += int64(f.U)
+	if off+length > frameStarts.U+int64(frameSize.U) {
+		return fmt.Errorf("read spans frame boundary: off=%#x length=%d frameStart=%#x frameSize=%d",
+			off, length, frameStarts.U, frameSize.U)
+	}
 
-		eg.Go(func() (err error) {
-			defer func() {
-				if r := recover(); r != nil {
-					logger.L().Error(ctx, "recovered from panic in the fetch handler", zap.Any("error", r))
-					err = fmt.Errorf("recovered from panic in the fetch handler: %v", r)
-				}
-			}()
+	return c.fetchMap.Wait(frameStarts.U, func() error {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("error fetching frame at %#x: %w", frameStarts.U, ctx.Err())
+		default:
+		}
 
-			key := strconv.FormatInt(fetchOff, 10)
-			_, err, _ = c.fetchGroup.Do(key, func() (any, error) {
-				select {
-				case <-ctx.Done():
-					return nil, fmt.Errorf("error fetching range %d-%d: %w", fetchOff, fetchOff+int64(frameSize), ctx.Err())
-				default:
-				}
-
-				b, releaseCacheCloseLock, err := c.cache.addressBytes(fetchOff, int64(frameSize))
-				if err != nil {
-					return nil, err
-				}
-				defer releaseCacheCloseLock()
-
-				_, err = c.storage.GetFrame(ctx, c.objectPath, fetchOff, framesToFetch, true, b)
-				if err != nil {
-					return nil, fmt.Errorf("failed to read frame from base %d: %w", fetchOff, err)
-				}
-
-				c.cache.setIsCached(fetchOff, int64(frameSize))
-
-				return nil, nil
-			})
-
+		b, releaseCacheCloseLock, err := c.cache.addressBytes(frameStarts.U, int64(frameSize.U))
+		if err != nil {
 			return err
-		})
-	}
+		}
+		defer releaseCacheCloseLock()
 
-	if err = eg.Wait(); err != nil {
-		return fmt.Errorf("failed to ensure data at %v: %w", fetchRange, err)
-	}
+		_, err = c.storage.GetFrame(ctx, c.objectPath, frameStarts.U, ft, true, b)
+		if err != nil {
+			return fmt.Errorf("failed to read frame at %#x: %w", frameStarts.U, err)
+		}
 
-	return nil
+		c.cache.setIsCached(frameStarts.U, int64(frameSize.U))
+
+		return nil
+	})
 }
 
 // fetchUncompressedToCache fetches uncompressed data directly from storage.
@@ -202,28 +176,27 @@ func (c *DecompressMMapChunker) fetchUncompressedToCache(ctx context.Context, of
 				}
 			}()
 
-			key := strconv.FormatInt(fetchOff, 10)
-			_, err, _ = c.fetchGroup.Do(key, func() (any, error) {
+			err = c.fetchMap.Wait(fetchOff, func() error {
 				select {
 				case <-ctx.Done():
-					return nil, fmt.Errorf("error fetching range %d-%d: %w", fetchOff, fetchOff+storage.MemoryChunkSize, ctx.Err())
+					return fmt.Errorf("error fetching range %d-%d: %w", fetchOff, fetchOff+storage.MemoryChunkSize, ctx.Err())
 				default:
 				}
 
 				b, releaseCacheCloseLock, err := c.cache.addressBytes(fetchOff, storage.MemoryChunkSize)
 				if err != nil {
-					return nil, err
+					return err
 				}
 				defer releaseCacheCloseLock()
 
 				_, err = c.storage.GetFrame(ctx, c.objectPath, fetchOff, nil, false, b)
 				if err != nil {
-					return nil, fmt.Errorf("failed to read uncompressed data at %d: %w", fetchOff, err)
+					return fmt.Errorf("failed to read uncompressed data at %d: %w", fetchOff, err)
 				}
 
 				c.cache.setIsCached(fetchOff, int64(len(b)))
 
-				return nil, nil
+				return nil
 			})
 
 			return err

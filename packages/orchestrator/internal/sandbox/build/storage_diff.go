@@ -19,8 +19,8 @@ const (
 )
 
 var (
-	compressedChunkerType   = compressMMapLRUChunker
-	uncompressedChunkerType = uncompressedMMapChunker
+	compressedChunkerType   = decompressMMapChunker
+	uncompressedChunkerType = decompressMMapChunker
 )
 
 type StorageDiff struct {

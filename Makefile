@@ -168,7 +168,8 @@ test:
 
 .PHONY: test-integration
 test-integration:
-	$(MAKE) -C tests/integration test
+	$(MAKE) -C tests/integration test/api/templates
+	$(MAKE) -C tests/integration test/api/sandboxes
 
 .PHONY: connect-orchestrator
 connect-orchestrator:
