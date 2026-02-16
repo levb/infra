@@ -13,6 +13,11 @@ const (
 	MetadataName = "metadata.json"
 
 	HeaderSuffix = ".header"
+
+	// CompressedHeaderSuffix is the object-path suffix for compressed headers.
+	// Hardcoded to LZ4 — always the fastest to decompress, independent of
+	// the data compression algorithm.
+	CompressedHeaderSuffix = ".compressed.header.lz4"
 )
 
 type TemplateFiles struct {
@@ -65,8 +70,14 @@ func (t TemplateFiles) HeaderPath(fileName string) string {
 const V4HeaderSuffix = ".header.v4"
 
 // CompressedPath returns the compressed data path for a given file name.
+// Write-side only — the read side derives the suffix from the frame table.
 func (t TemplateFiles) CompressedPath(fileName string) string {
-	return fmt.Sprintf("%s/%s%s", t.StorageDir(), fileName, DefaultCompressionSuffix)
+	return fmt.Sprintf("%s/%s%s", t.StorageDir(), fileName, DefaultCompressionOptions.CompressionType.Suffix())
+}
+
+// CompressedHeaderPath returns "{buildId}/{fileName}.compressed.header.lz4".
+func (t TemplateFiles) CompressedHeaderPath(fileName string) string {
+	return fmt.Sprintf("%s/%s%s", t.StorageDir(), fileName, CompressedHeaderSuffix)
 }
 
 // V4HeaderPath returns the v4 header path for a given file name.

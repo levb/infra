@@ -1,26 +1,21 @@
 package header
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/google/uuid"
-	lz4 "github.com/pierrec/lz4/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
-func compressLZ4(t *testing.T, data []byte) []byte {
+func compressLZ4Block(t *testing.T, data []byte) []byte {
 	t.Helper()
-	var buf bytes.Buffer
-	w := lz4.NewWriter(&buf)
-	_, err := w.Write(data)
+	compressed, err := storage.CompressLZ4(data)
 	require.NoError(t, err)
-	require.NoError(t, w.Close())
 
-	return buf.Bytes()
+	return compressed
 }
 
 func TestSerializeDeserialize_V3_RoundTrip(t *testing.T) {
@@ -164,7 +159,7 @@ func TestSerializeDeserialize_V4_WithFrameTable(t *testing.T) {
 	data, err := Serialize(metadata, mappings)
 	require.NoError(t, err)
 
-	got, err := DeserializeV4(compressLZ4(t, data))
+	got, err := DeserializeV4(compressLZ4Block(t, data))
 	require.NoError(t, err)
 
 	require.Equal(t, uint64(4), got.Metadata.Version)

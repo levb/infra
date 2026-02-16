@@ -5,30 +5,21 @@ import (
 	"fmt"
 	"sync"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block"
 	blockmetrics "github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
+	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
 
-type chunkerType byte
-
-const (
-	uncompressedMMapChunker chunkerType = iota
-	decompressMMapChunker
-	compressedFileLRUChunker
-)
-
-var (
-	compressedChunkerType   = decompressMMapChunker
-	uncompressedChunkerType = decompressMMapChunker
-)
+func storagePath(buildId string, diffType DiffType) string {
+	return fmt.Sprintf("%s/%s", buildId, diffType)
+}
 
 type StorageDiff struct {
-	// chunker is lazily initialized via chunkerOnce on first ReadAt/Slice call.
-	chunker     block.Chunker
-	chunkerOnce sync.Once
-	chunkerErr  error
-
+	chunker           *utils.SetOnce[block.Chunker]
 	cachePath         string
 	cacheKey          DiffStoreKey
 	storagePath       string
@@ -49,10 +40,6 @@ func (e UnknownDiffTypeError) Error() string {
 	return fmt.Sprintf("unknown diff type: %s", e.DiffType)
 }
 
-func storagePath(buildId string, diffType DiffType) string {
-	return storage.TemplateFiles{BuildID: buildId}.Path(string(diffType))
-}
-
 func newStorageDiff(
 	basePath string,
 	buildId string,
@@ -61,23 +48,23 @@ func newStorageDiff(
 	metrics blockmetrics.Metrics,
 	persistence storage.StorageProvider,
 ) (*StorageDiff, error) {
-	storagePath := storagePath(buildId, diffType)
-	storageObjectType, ok := storageObjectType(diffType)
+	sp := storagePath(buildId, diffType)
+	sot, ok := storageObjectType(diffType)
 	if !ok {
 		return nil, UnknownDiffTypeError{diffType}
 	}
 
 	cachePath := GenerateDiffCachePath(basePath, buildId, diffType)
-	cacheKey := GetDiffStoreKey(buildId, diffType)
 
 	return &StorageDiff{
-		storagePath:       storagePath,
-		storageObjectType: storageObjectType,
+		storagePath:       sp,
+		storageObjectType: sot,
 		cachePath:         cachePath,
+		chunker:           utils.NewSetOnce[block.Chunker](),
 		blockSize:         blockSize,
 		metrics:           metrics,
 		persistence:       persistence,
-		cacheKey:          cacheKey,
+		cacheKey:          GetDiffStoreKey(buildId, diffType),
 	}, nil
 }
 
@@ -96,99 +83,112 @@ func (b *StorageDiff) CacheKey() DiffStoreKey {
 	return b.cacheKey
 }
 
-// getChunker lazily initializes and returns the chunker.
-// The frame table determines whether to use compressed or uncompressed chunker.
-func (b *StorageDiff) getChunker(ctx context.Context, ft *storage.FrameTable) (block.Chunker, error) {
-	b.chunkerOnce.Do(func() {
-		b.chunker, b.chunkerErr = b.createChunker(ctx, ft)
-	})
-
-	return b.chunker, b.chunkerErr
-}
-
-// createChunker creates the appropriate chunker based on the frame table.
-func (b *StorageDiff) createChunker(ctx context.Context, ft *storage.FrameTable) (block.Chunker, error) {
-	actualPath := b.storagePath
-	isCompressed := storage.IsCompressed(ft)
-	if isCompressed {
-		actualPath = b.storagePath + ft.CompressionTypeSuffix()
-	}
-
-	// Get actual file size from storage
-	obj, err := b.persistence.OpenSeekable(ctx, actualPath, b.storageObjectType)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open object %s: %w", actualPath, err)
-	}
-	rawSize, err := obj.Size(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get size of %s: %w", actualPath, err)
-	}
-	if storage.IsCompressed(ft) {
-		// For compressed data, also get the uncompressed size
-		uObj, err := b.persistence.OpenSeekable(ctx, b.storagePath, b.storageObjectType)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open uncompressed object %s: %w", b.storagePath, err)
-		}
-		uSize, err := uObj.Size(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get uncompressed size of %s: %w", b.storagePath, err)
-		}
-
-		const estimatedFrameU = 16 * 1024 * 1024
-		estimatedFrames := max(1, int(uSize/estimatedFrameU))
-		lruSize := max(4, estimatedFrames/2)
-
-		switch compressedChunkerType {
-		case decompressMMapChunker:
-			return block.NewDecompressMMapChunker(uSize, rawSize, b.blockSize, b.persistence, actualPath, b.cachePath, b.metrics)
-
-		case compressedFileLRUChunker:
-			return block.NewCompressedFileLRUChunker(uSize, rawSize, b.persistence, actualPath, b.cachePath, lruSize, b.metrics)
-
-		default:
-			return nil, fmt.Errorf("unsupported chunker type for object %s", actualPath)
-		}
-	}
-
-	// Uncompressed path
-	switch uncompressedChunkerType {
-	case decompressMMapChunker:
-		return block.NewDecompressMMapChunker(rawSize, rawSize, b.blockSize, b.persistence, actualPath, b.cachePath, b.metrics)
-
-	case uncompressedMMapChunker:
-		return block.NewUncompressedMMapChunker(rawSize, b.blockSize, obj, b.cachePath, b.metrics)
-
-	default:
-		return nil, fmt.Errorf("unsupported chunker type for object %s", actualPath)
-	}
-}
-
-func (b *StorageDiff) Close() error {
-	if b.chunker == nil {
+// initChunker lazily creates the chunker on first access.
+func (b *StorageDiff) initChunker(ctx context.Context) error {
+	// If already initialized, nothing to do.
+	if _, err := b.chunker.Result(); err == nil {
 		return nil
 	}
 
-	return b.chunker.Close()
+	c, err := b.createChunker(ctx)
+	if err != nil {
+		b.chunker.SetError(err)
+
+		return err
+	}
+
+	return b.chunker.SetValue(c)
+}
+
+// createChunker probes for available assets and creates a DecompressMMapChunker.
+func (b *StorageDiff) createChunker(ctx context.Context) (block.Chunker, error) {
+	assets := b.probeAssets(ctx)
+	if assets.Size == 0 {
+		return nil, fmt.Errorf("uncompressed asset not found: %s", b.storagePath)
+	}
+
+	b.metrics.ChunkerCreations.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("chunker", block.ChunkerTypeDecompressMMap),
+	))
+
+	return block.NewDecompressMMapChunker(assets, b.blockSize, b.persistence, b.storageObjectType, b.cachePath, b.metrics)
+}
+
+// probeAssets probes for uncompressed and compressed asset variants in parallel.
+func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
+	assets := block.AssetInfo{BasePath: b.storagePath}
+
+	var wg sync.WaitGroup
+
+	// Probe all 3 paths in parallel: uncompressed, .lz4, .zst
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+
+		obj, err := b.persistence.OpenSeekable(ctx, b.storagePath, b.storageObjectType)
+		if err != nil {
+			return
+		}
+
+		assets.Size, _ = obj.Size(ctx)
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		obj, err := b.persistence.OpenSeekable(ctx, b.storagePath+storage.CompressionLZ4.Suffix(), b.storageObjectType)
+		if err != nil {
+			return
+		}
+
+		assets.LZ4Size, _ = obj.Size(ctx)
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		obj, err := b.persistence.OpenSeekable(ctx, b.storagePath+storage.CompressionZstd.Suffix(), b.storageObjectType)
+		if err != nil {
+			return
+		}
+
+		assets.ZstSize, _ = obj.Size(ctx)
+	}()
+
+	wg.Wait()
+
+	return assets
+}
+
+func (b *StorageDiff) Close() error {
+	c, err := b.chunker.Wait()
+	if err != nil {
+		return err
+	}
+
+	return c.Close()
 }
 
 func (b *StorageDiff) ReadAt(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error) {
-	chunker, err := b.getChunker(ctx, ft)
+	if err := b.initChunker(ctx); err != nil {
+		return 0, err
+	}
+
+	chunker, err := b.chunker.Wait()
 	if err != nil {
 		return 0, err
 	}
 
-	slice, err := chunker.Slice(ctx, off, int64(len(p)), ft)
-	if err != nil {
-		return 0, err
-	}
-
-	n := copy(p, slice)
-
-	return n, nil
+	return chunker.ReadAt(ctx, p, off, ft)
 }
 
 func (b *StorageDiff) Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
-	chunker, err := b.getChunker(ctx, ft)
+	if err := b.initChunker(ctx); err != nil {
+		return nil, err
+	}
+
+	chunker, err := b.chunker.Wait()
 	if err != nil {
 		return nil, err
 	}
@@ -196,16 +196,22 @@ func (b *StorageDiff) Slice(ctx context.Context, off, length int64, ft *storage.
 	return chunker.Slice(ctx, off, length, ft)
 }
 
+// The local file might not be synced.
 func (b *StorageDiff) CachePath() (string, error) {
 	return b.cachePath, nil
 }
 
 func (b *StorageDiff) FileSize() (int64, error) {
-	if b.chunker == nil {
-		return 0, fmt.Errorf("chunker not initialized - call ReadAt or Slice first")
+	c, err := b.chunker.Wait()
+	if err != nil {
+		return 0, err
 	}
 
-	return b.chunker.FileSize()
+	return c.FileSize()
+}
+
+func (b *StorageDiff) Size(_ context.Context) (int64, error) {
+	return b.FileSize()
 }
 
 func (b *StorageDiff) BlockSize() int64 {

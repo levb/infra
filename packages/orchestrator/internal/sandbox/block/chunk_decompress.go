@@ -1,79 +1,156 @@
 package block
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"sync"
+	"time"
 
+	"github.com/klauspost/compress/zstd"
+	lz4 "github.com/pierrec/lz4/v4"
 	"go.opentelemetry.io/otel/attribute"
-	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
-	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
-	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
-	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
 
-// DecompressMMapChunker fetches compressed frames from storage, decompresses them
-// immediately, and stores the UNCOMPRESSED data in a memory-mapped cache file.
-// This is essentially the same as UncompressedMMapChunker but handles compressed
-// source data. Both use Cache for block-aligned dirty tracking since the cached
-// data is always uncompressed and block-aligned.
+const (
+	// decompressFetchTimeout is the maximum time a single frame/chunk fetch may take.
+	decompressFetchTimeout = 60 * time.Second
+)
+
+// ChunkerStorage is the storage interface needed by DecompressMMapChunker.
+// It combines frame-based access (for compressed data) with seekable object
+// access (for uncompressed streaming). StorageProvider satisfies this.
+type ChunkerStorage interface {
+	storage.FrameGetter
+	OpenSeekable(ctx context.Context, path string, seekableObjectType storage.SeekableObjectType) (storage.Seekable, error)
+}
+
+// AssetInfo describes the availability of uncompressed and compressed variants
+// of a build artifact. Non-zero size means the asset exists.
+// Compressed paths are derived from BasePath + compression suffix when needed.
+type AssetInfo struct {
+	BasePath string // uncompressed path (e.g., "build-123/memfile")
+	Size     int64  // uncompressed size (0 = doesn't exist)
+	LZ4Size  int64  // compressed .lz4 size (0 = doesn't exist)
+	ZstSize  int64  // compressed .zst size (0 = doesn't exist)
+}
+
+// HasCompressed returns whether a compressed asset matching the FT's
+// compression type exists.
+func (a *AssetInfo) HasCompressed(ft *storage.FrameTable) bool {
+	if ft == nil {
+		return false
+	}
+
+	switch ft.CompressionType {
+	case storage.CompressionLZ4:
+		return a.LZ4Size > 0
+	case storage.CompressionZstd:
+		return a.ZstSize > 0
+	default:
+		return false
+	}
+}
+
+// DecompressMMapChunker fetches data from storage into a memory-mapped cache file.
+//
+// A single instance serves both compressed and uncompressed callers for the same
+// build artifact. The routing decision is made per-Slice based on the FrameTable
+// and asset availability:
+//
+//   - Compressed (ft != nil AND matching compressed asset exists): fetches
+//     compressed frames, decompresses them progressively into mmap.
+//   - Uncompressed (ft == nil OR no compressed asset): streams raw bytes from
+//     storage via OpenRangeReader into mmap.
+//
+// Either way, decompressed bytes end up in the shared mmap cache and are
+// available to all subsequent callers regardless of compression mode.
 type DecompressMMapChunker struct {
-	storage    storage.FrameGetter
-	objectPath string
+	storage    ChunkerStorage
+	assets     AssetInfo
+	objectType storage.SeekableObjectType
 
 	cache   *Cache
 	metrics metrics.Metrics
 
-	size    int64 // uncompressed size
-	rawSize int64 // C space size (compressed on storage)
-
-	fetchMap *utils.WaitMap
+	fetchMu  sync.Mutex
+	fetchMap map[fetchKey]*fetchSession
 }
 
-// NewDecompressMMapChunker creates a chunker that decompresses data into an mmap cache.
-// size is the uncompressed size, rawSize is the on-storage (possibly compressed) size.
+// fetchKey distinguishes compressed and uncompressed fetch sessions that
+// may have overlapping U-space offsets.
+type fetchKey struct {
+	offset     int64
+	compressed bool
+}
+
+var _ Chunker = (*DecompressMMapChunker)(nil)
+
+// NewDecompressMMapChunker creates a chunker that stores decompressed/fetched data
+// in an mmap cache. Works for both compressed and uncompressed data.
+// The AssetInfo describes which variants (uncompressed, .lz4, .zst) are available.
 func NewDecompressMMapChunker(
-	size, rawSize, blockSize int64,
-	s storage.FrameGetter,
-	objectPath string,
+	assets AssetInfo,
+	blockSize int64,
+	s ChunkerStorage,
+	objectType storage.SeekableObjectType,
 	cachePath string,
-	metrics metrics.Metrics,
+	m metrics.Metrics,
 ) (*DecompressMMapChunker, error) {
-	// mmap holds decompressed (uncompressed) data
-	cache, err := NewCache(size, blockSize, cachePath, false)
+	cache, err := NewCache(assets.Size, blockSize, cachePath, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cache: %w", err)
 	}
 
 	return &DecompressMMapChunker{
-		size:       size,
-		rawSize:    rawSize,
 		storage:    s,
-		objectPath: objectPath,
+		assets:     assets,
+		objectType: objectType,
 		cache:      cache,
-		metrics:    metrics,
-		fetchMap:   utils.NewWaitMap(),
+		metrics:    m,
+		fetchMap:   make(map[fetchKey]*fetchSession),
 	}, nil
 }
 
+func (c *DecompressMMapChunker) ReadAt(ctx context.Context, b []byte, off int64, ft *storage.FrameTable) (int, error) {
+	slice, err := c.Slice(ctx, off, int64(len(b)), ft)
+	if err != nil {
+		return 0, fmt.Errorf("failed to slice at %d-%d: %w", off, off+int64(len(b)), err)
+	}
+
+	return copy(b, slice), nil
+}
+
 // Slice reads data at the given uncompressed offset.
+// If ft is non-nil and a matching compressed asset exists, fetches via compressed path.
+// Otherwise falls back to uncompressed streaming.
 func (c *DecompressMMapChunker) Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
 	if off < 0 || length < 0 {
 		return nil, fmt.Errorf("invalid slice params: off=%d length=%d", off, length)
 	}
-	if off+length > c.size {
-		return nil, fmt.Errorf("slice out of bounds: off=%#x length=%d size=%d", off, length, c.size)
+	if off+length > c.assets.Size {
+		return nil, fmt.Errorf("slice out of bounds: off=%#x length=%d size=%d", off, length, c.assets.Size)
 	}
 
-	timer := c.metrics.SlicesTimerFactory.Begin()
+	sliceStart := time.Now()
+	useCompressed := c.assets.HasCompressed(ft)
+	timer := c.metrics.SlicesTimerFactory.Begin(
+		attribute.String(chunkerTypeAttr, ChunkerTypeDecompressMMap),
+		attribute.Bool(compressedAttr, useCompressed),
+	)
 
+	// Fast path: already in mmap cache.
 	b, err := c.cache.Slice(off, length)
 	if err == nil {
 		timer.Success(ctx, length, attribute.String(pullType, pullTypeLocal))
+
+		fmt.Printf("[DECOMPRESS-MMAP] CACHE %s off=%#x len=%d took=%v\n",
+			c.assets.BasePath, off, length, time.Since(sliceStart))
 
 		return b, nil
 	}
@@ -86,13 +163,32 @@ func (c *DecompressMMapChunker) Slice(ctx context.Context, off, length int64, ft
 		return nil, fmt.Errorf("failed read from cache at offset %d: %w", off, err)
 	}
 
-	chunkErr := c.fetchToCache(ctx, off, length, ft)
-	if chunkErr != nil {
+	// Determine session parameters based on compressed vs uncompressed.
+	var (
+		session    *fetchSession
+		sessionErr error
+	)
+
+	if useCompressed {
+		session, sessionErr = c.getOrCreateCompressedSession(ctx, off, ft)
+	} else {
+		session = c.getOrCreateUncompressedSession(ctx, off)
+	}
+
+	if sessionErr != nil {
+		timer.Failure(ctx, length,
+			attribute.String(pullType, pullTypeRemote),
+			attribute.String(failureReason, "session_create"))
+
+		return nil, sessionErr
+	}
+
+	if err := session.registerAndWait(ctx, off, length); err != nil {
 		timer.Failure(ctx, length,
 			attribute.String(pullType, pullTypeRemote),
 			attribute.String(failureReason, failureTypeCacheFetch))
 
-		return nil, fmt.Errorf("failed to ensure data at %d-%d: %w", off, off+length, chunkErr)
+		return nil, fmt.Errorf("failed to fetch data at %#x: %w", off, err)
 	}
 
 	b, cacheErr := c.cache.Slice(off, length)
@@ -101,7 +197,7 @@ func (c *DecompressMMapChunker) Slice(ctx context.Context, off, length int64, ft
 			attribute.String(pullType, pullTypeLocal),
 			attribute.String(failureReason, failureTypeLocalReadAgain))
 
-		return nil, fmt.Errorf("failed to read from cache after ensuring data at %d-%d: %w", off, off+length, cacheErr)
+		return nil, fmt.Errorf("failed to read from cache after fetch at %d-%d: %w", off, off+length, cacheErr)
 	}
 
 	timer.Success(ctx, length, attribute.String(pullType, pullTypeRemote))
@@ -109,105 +205,279 @@ func (c *DecompressMMapChunker) Slice(ctx context.Context, off, length int64, ft
 	return b, nil
 }
 
-// fetchToCache fetches data and stores into mmap.
-// When ft is non-nil, fetches compressed frames and decompresses.
-// When ft is nil, fetches uncompressed data directly.
-func (c *DecompressMMapChunker) fetchToCache(ctx context.Context, off, length int64, ft *storage.FrameTable) error {
-	if ft == nil {
-		return c.fetchUncompressedToCache(ctx, off, length)
-	}
+// --- Compressed path ---
 
-	return c.fetchDecompressToCache(ctx, off, length, ft)
-}
-
-// fetchDecompressToCache fetches a single compressed frame containing off and decompresses into mmap.
-// The requested range must not cross a frame boundary.
-func (c *DecompressMMapChunker) fetchDecompressToCache(ctx context.Context, off, length int64, ft *storage.FrameTable) error {
+func (c *DecompressMMapChunker) getOrCreateCompressedSession(ctx context.Context, off int64, ft *storage.FrameTable) (*fetchSession, error) {
 	frameStarts, frameSize, err := ft.FrameFor(off)
 	if err != nil {
-		return fmt.Errorf("failed to get frame for offset %#x: %w", off, err)
+		return nil, fmt.Errorf("failed to get frame for offset %#x: %w", off, err)
 	}
 
-	if off+length > frameStarts.U+int64(frameSize.U) {
-		return fmt.Errorf("read spans frame boundary: off=%#x length=%d frameStart=%#x frameSize=%d",
-			off, length, frameStarts.U, frameSize.U)
+	key := fetchKey{offset: frameStarts.U, compressed: true}
+
+	c.fetchMu.Lock()
+	if existing, ok := c.fetchMap[key]; ok {
+		c.fetchMu.Unlock()
+
+		return existing, nil
 	}
 
-	return c.fetchMap.Wait(frameStarts.U, func() error {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("error fetching frame at %#x: %w", frameStarts.U, ctx.Err())
-		default:
-		}
+	s := newFetchSession(frameStarts.U, int64(frameSize.U), c.cache.BlockSize(), c.cache.isCached)
+	c.fetchMap[key] = s
+	c.fetchMu.Unlock()
 
-		b, releaseCacheCloseLock, err := c.cache.addressBytes(frameStarts.U, int64(frameSize.U))
-		if err != nil {
-			return err
-		}
-		defer releaseCacheCloseLock()
+	go c.runCompressedFetch(context.WithoutCancel(ctx), s, key, frameStarts, frameSize, ft)
 
-		_, err = c.storage.GetFrame(ctx, c.objectPath, frameStarts.U, ft, true, b)
-		if err != nil {
-			return fmt.Errorf("failed to read frame at %#x: %w", frameStarts.U, err)
-		}
-
-		c.cache.setIsCached(frameStarts.U, int64(frameSize.U))
-
-		return nil
-	})
+	return s, nil
 }
 
-// fetchUncompressedToCache fetches uncompressed data directly from storage.
-func (c *DecompressMMapChunker) fetchUncompressedToCache(ctx context.Context, off, length int64) error {
-	var eg errgroup.Group
+func (c *DecompressMMapChunker) runCompressedFetch(ctx context.Context, s *fetchSession, key fetchKey, frameStarts storage.FrameOffset, frameSize storage.FrameSize, ft *storage.FrameTable) {
+	ctx, cancel := context.WithTimeout(ctx, decompressFetchTimeout)
+	defer cancel()
 
-	chunks := header.BlocksOffsets(length, storage.MemoryChunkSize)
-	startingChunk := header.BlockIdx(off, storage.MemoryChunkSize)
-	startingChunkOffset := header.BlockOffset(startingChunk, storage.MemoryChunkSize)
+	defer func() {
+		if r := recover(); r != nil {
+			c.removeFetchSession(key)
+			s.fail(fmt.Errorf("frame fetch panicked: %v", r))
+		}
+	}()
 
-	for _, chunkOff := range chunks {
-		fetchOff := startingChunkOffset + chunkOff
+	fetchStart := time.Now()
+	fetchSW := c.metrics.RemoteReadsTimerFactory.Begin(
+		attribute.String(chunkerTypeAttr, ChunkerTypeDecompressMMap),
+		attribute.Bool(compressedAttr, true),
+	)
 
-		eg.Go(func() (err error) {
-			defer func() {
-				if r := recover(); r != nil {
-					logger.L().Error(ctx, "recovered from panic in the fetch handler", zap.Any("error", r))
-					err = fmt.Errorf("recovered from panic in the fetch handler: %v", r)
-				}
-			}()
+	// Get mmap region for the decompressed frame.
+	mmapSlice, releaseLock, err := c.cache.addressBytes(frameStarts.U, int64(frameSize.U))
+	if err != nil {
+		fetchSW.Failure(ctx, int64(frameSize.C),
+			attribute.String(failureReason, "mmap_address"))
+		c.removeFetchSession(key)
+		s.fail(err)
 
-			err = c.fetchMap.Wait(fetchOff, func() error {
-				select {
-				case <-ctx.Done():
-					return fmt.Errorf("error fetching range %d-%d: %w", fetchOff, fetchOff+storage.MemoryChunkSize, ctx.Err())
-				default:
-				}
+		return
+	}
+	defer releaseLock()
 
-				b, releaseCacheCloseLock, err := c.cache.addressBytes(fetchOff, storage.MemoryChunkSize)
-				if err != nil {
-					return err
-				}
-				defer releaseCacheCloseLock()
+	// Fetch compressed bytes from storage.
+	compressedPath := c.assets.BasePath + ft.CompressionType.Suffix()
+	compressedBuf := make([]byte, frameSize.C)
+	_, err = c.storage.GetFrame(ctx, compressedPath, frameStarts.U, ft, false, compressedBuf)
+	if err != nil {
+		fetchSW.Failure(ctx, int64(frameSize.C),
+			attribute.String(failureReason, failureTypeRemoteRead))
+		c.removeFetchSession(key)
+		s.fail(fmt.Errorf("failed to fetch compressed frame at %#x: %w", frameStarts.U, err))
 
-				_, err = c.storage.GetFrame(ctx, c.objectPath, fetchOff, nil, false, b)
-				if err != nil {
-					return fmt.Errorf("failed to read uncompressed data at %d: %w", fetchOff, err)
-				}
-
-				c.cache.setIsCached(fetchOff, int64(len(b)))
-
-				return nil
-			})
-
-			return err
-		})
+		return
 	}
 
-	if err := eg.Wait(); err != nil {
-		return fmt.Errorf("failed to fetch uncompressed data at %d-%d: %w", off, off+length, err)
+	fetchDur := time.Since(fetchStart)
+	decompStart := time.Now()
+
+	// Progressively decompress into mmap, notifying waiters as blocks complete.
+	err = c.progressiveDecompress(s, ft.CompressionType, compressedBuf, mmapSlice, frameStarts.U, frameSize)
+	if err != nil {
+		fetchSW.Failure(ctx, int64(frameSize.C),
+			attribute.String(failureReason, "decompress"))
+		c.removeFetchSession(key)
+		s.fail(err)
+
+		return
+	}
+
+	fetchSW.Success(ctx, int64(frameSize.U))
+	// Remove from fetchMap BEFORE notifying waiters, so new requests
+	// arriving after wakeup don't find the stale session.
+	c.removeFetchSession(key)
+	s.complete()
+
+	fmt.Printf("[DECOMPRESS-MMAP] COMPRESSED %s frameU=%#x C=%d->U=%d fetch=%v decomp=%v total=%v\n",
+		c.assets.BasePath, frameStarts.U, frameSize.C, frameSize.U, fetchDur, time.Since(decompStart), time.Since(fetchStart))
+}
+
+func (c *DecompressMMapChunker) progressiveDecompress(s *fetchSession, ct storage.CompressionType, compressed, dst []byte, frameOff int64, frameSize storage.FrameSize) error {
+	reader := bytes.NewReader(compressed)
+	decompReader, err := newDecompressReader(ct, reader)
+	if err != nil {
+		return err
+	}
+	defer closeDecompressReader(decompReader)
+
+	blockSize := c.cache.BlockSize()
+	uSize := int64(frameSize.U)
+	var totalDecompressed int64
+
+	for totalDecompressed < uSize {
+		readEnd := min(totalDecompressed+blockSize, uSize)
+		n, readErr := io.ReadFull(decompReader, dst[totalDecompressed:readEnd])
+		totalDecompressed += int64(n)
+
+		if int64(n) > 0 {
+			c.cache.setIsCached(frameOff+totalDecompressed-int64(n), int64(n))
+			s.advance(totalDecompressed)
+		}
+
+		if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
+			break
+		}
+		if readErr != nil {
+			return fmt.Errorf("decompress error after %d bytes: %w", totalDecompressed, readErr)
+		}
 	}
 
 	return nil
+}
+
+// --- Uncompressed path ---
+
+func (c *DecompressMMapChunker) getOrCreateUncompressedSession(ctx context.Context, off int64) *fetchSession {
+	chunkOff := (off / storage.MemoryChunkSize) * storage.MemoryChunkSize
+	chunkLen := min(int64(storage.MemoryChunkSize), c.assets.Size-chunkOff)
+	key := fetchKey{offset: chunkOff, compressed: false}
+
+	c.fetchMu.Lock()
+	if existing, ok := c.fetchMap[key]; ok {
+		c.fetchMu.Unlock()
+
+		return existing
+	}
+
+	s := newFetchSession(chunkOff, chunkLen, c.cache.BlockSize(), c.cache.isCached)
+	c.fetchMap[key] = s
+	c.fetchMu.Unlock()
+
+	go c.runUncompressedFetch(context.WithoutCancel(ctx), s, key)
+
+	return s
+}
+
+func (c *DecompressMMapChunker) runUncompressedFetch(ctx context.Context, s *fetchSession, key fetchKey) {
+	ctx, cancel := context.WithTimeout(ctx, decompressFetchTimeout)
+	defer cancel()
+
+	defer func() {
+		if r := recover(); r != nil {
+			c.removeFetchSession(key)
+			s.fail(fmt.Errorf("uncompressed fetch panicked: %v", r))
+		}
+	}()
+
+	fetchStart := time.Now()
+
+	// Open a seekable object to get a range reader.
+	obj, err := c.storage.OpenSeekable(ctx, c.assets.BasePath, c.objectType)
+	if err != nil {
+		c.removeFetchSession(key)
+		s.fail(fmt.Errorf("failed to open seekable %s: %w", c.assets.BasePath, err))
+
+		return
+	}
+
+	mmapSlice, releaseLock, err := c.cache.addressBytes(s.chunkOff, s.chunkLen)
+	if err != nil {
+		c.removeFetchSession(key)
+		s.fail(err)
+
+		return
+	}
+	defer releaseLock()
+
+	fetchTimer := c.metrics.RemoteReadsTimerFactory.Begin(
+		attribute.String(chunkerTypeAttr, ChunkerTypeDecompressMMap),
+		attribute.Bool(compressedAttr, false),
+	)
+
+	reader, err := obj.OpenRangeReader(ctx, s.chunkOff, s.chunkLen)
+	if err != nil {
+		fetchTimer.Failure(ctx, s.chunkLen,
+			attribute.String(failureReason, failureTypeRemoteRead))
+		c.removeFetchSession(key)
+		s.fail(fmt.Errorf("failed to open range reader at %d: %w", s.chunkOff, err))
+
+		return
+	}
+	defer reader.Close()
+
+	blockSize := c.cache.BlockSize()
+	var totalRead int64
+	var prevCompleted int64
+
+	for totalRead < s.chunkLen {
+		readEnd := min(totalRead+blockSize, s.chunkLen)
+		n, readErr := reader.Read(mmapSlice[totalRead:readEnd])
+		totalRead += int64(n)
+
+		completedBlocks := totalRead / blockSize
+		if completedBlocks > prevCompleted {
+			newBytes := (completedBlocks - prevCompleted) * blockSize
+			c.cache.setIsCached(s.chunkOff+prevCompleted*blockSize, newBytes)
+			prevCompleted = completedBlocks
+
+			s.advance(completedBlocks * blockSize)
+		}
+
+		if errors.Is(readErr, io.EOF) {
+			if totalRead > prevCompleted*blockSize {
+				c.cache.setIsCached(s.chunkOff+prevCompleted*blockSize, totalRead-prevCompleted*blockSize)
+			}
+
+			break
+		}
+
+		if readErr != nil {
+			fetchTimer.Failure(ctx, s.chunkLen,
+				attribute.String(failureReason, failureTypeRemoteRead))
+			c.removeFetchSession(key)
+			s.fail(fmt.Errorf("failed reading at offset %d after %d bytes: %w", s.chunkOff, totalRead, readErr))
+
+			return
+		}
+	}
+
+	fetchTimer.Success(ctx, s.chunkLen)
+	// Remove from fetchMap BEFORE notifying waiters, so new requests
+	// arriving after wakeup don't find the stale session.
+	c.removeFetchSession(key)
+	s.complete()
+
+	fmt.Printf("[DECOMPRESS-MMAP] UNCOMPRESSED %s off=%#x len=%d fetch=%v\n",
+		c.assets.BasePath, s.chunkOff, s.chunkLen, time.Since(fetchStart))
+}
+
+// removeFetchSession removes a session from the fetchMap.
+// Must be called BEFORE complete()/fail() to prevent stale session reuse.
+func (c *DecompressMMapChunker) removeFetchSession(key fetchKey) {
+	c.fetchMu.Lock()
+	delete(c.fetchMap, key)
+	c.fetchMu.Unlock()
+}
+
+// --- Shared helpers ---
+
+// newDecompressReader creates a streaming decompression reader for the given type.
+func newDecompressReader(ct storage.CompressionType, r io.Reader) (io.Reader, error) {
+	switch ct {
+	case storage.CompressionLZ4:
+		return lz4.NewReader(r), nil
+	case storage.CompressionZstd:
+		dec, err := zstd.NewReader(r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create zstd reader: %w", err)
+		}
+
+		return dec, nil
+	default:
+		return nil, fmt.Errorf("unsupported compression type: %s", ct)
+	}
+}
+
+// closeDecompressReader closes decompression readers that implement io.Closer.
+func closeDecompressReader(r io.Reader) {
+	if c, ok := r.(io.Closer); ok {
+		c.Close()
+	}
 }
 
 func (c *DecompressMMapChunker) Close() error {

@@ -9,20 +9,24 @@ import (
 )
 
 const (
-	orchestratorBlockSlices      = "orchestrator.blocks.slices"
-	orchestratorBlockChunksFetch = "orchestrator.blocks.chunks.fetch"
-	orchestratorBlockChunksStore = "orchestrator.blocks.chunks.store"
+	orchestratorBlockSlices          = "orchestrator.blocks.slices"
+	orchestratorBlockChunksFetch     = "orchestrator.blocks.chunks.fetch"
+	orchestratorBlockChunksStore     = "orchestrator.blocks.chunks.store"
+	orchestratorBlockChunkerCreation = "orchestrator.blocks.chunker.creation"
 )
 
 type Metrics struct {
-	// SlicesMetric is used to measure page faulting performance.
+	// SlicesTimerFactory measures page faulting performance.
 	SlicesTimerFactory telemetry.TimerFactory
 
-	// WriteChunksMetric is used to measure the time taken to download chunks from remote storage
+	// RemoteReadsTimerFactory measures the time taken to download chunks from remote storage.
 	RemoteReadsTimerFactory telemetry.TimerFactory
 
-	// WriteChunksMetric is used to measure performance of writing chunks to disk.
+	// WriteChunksTimerFactory measures performance of writing chunks to disk.
 	WriteChunksTimerFactory telemetry.TimerFactory
+
+	// ChunkerCreations counts chunker instantiations by type and compression mode.
+	ChunkerCreations metric.Int64Counter
 }
 
 func NewMetrics(meterProvider metric.MeterProvider) (Metrics, error) {
@@ -56,6 +60,13 @@ func NewMetrics(meterProvider metric.MeterProvider) (Metrics, error) {
 		"Total cache writes",
 	); err != nil {
 		return m, fmt.Errorf("failed to get stored chunks metric: %w", err)
+	}
+
+	if m.ChunkerCreations, err = blocksMeter.Int64Counter(
+		orchestratorBlockChunkerCreation,
+		metric.WithDescription("Number of chunker instantiations"),
+	); err != nil {
+		return m, fmt.Errorf("failed to create chunker creation counter: %w", err)
 	}
 
 	return m, nil

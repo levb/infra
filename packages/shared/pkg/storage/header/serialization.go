@@ -9,12 +9,11 @@ import (
 	"io"
 
 	"github.com/google/uuid"
-	lz4 "github.com/pierrec/lz4/v4"
 
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
-const metadataVersion = 3
+const metadataVersion = 4
 
 type Metadata struct {
 	Version    uint64
@@ -141,77 +140,62 @@ func DeserializeBytes(data []byte) (*Header, error) {
 
 	mappings := make([]*BuildMap, 0)
 
+MAPPINGS:
 	for {
-		var v3 v3SerializableBuildMap
-		err = binary.Read(reader, binary.LittleEndian, &v3)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to read block mapping: %w", err)
-		}
+		var m BuildMap
 
-		mappings = append(mappings, &BuildMap{
-			Offset:             v3.Offset,
-			Length:             v3.Length,
-			BuildId:            v3.BuildId,
-			BuildStorageOffset: v3.BuildStorageOffset,
-		})
-	}
-
-	return newValidatedHeader(&metadata, mappings)
-}
-
-// DeserializeV4 decompresses LZ4 data and deserializes a v4 header with frame tables.
-func DeserializeV4(data []byte) (*Header, error) {
-	decompressed, err := io.ReadAll(lz4.NewReader(bytes.NewReader(data)))
-	if err != nil {
-		return nil, fmt.Errorf("failed to decompress v4 header: %w", err)
-	}
-
-	var metadata Metadata
-	reader := bytes.NewReader(decompressed)
-	err = binary.Read(reader, binary.LittleEndian, &metadata)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read metadata: %w", err)
-	}
-
-	mappings := make([]*BuildMap, 0)
-
-	for {
-		var v4 v4SerializableBuildMap
-		err = binary.Read(reader, binary.LittleEndian, &v4)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-
-		m := BuildMap{
-			Offset:             v4.Offset,
-			Length:             v4.Length,
-			BuildId:            v4.BuildId,
-			BuildStorageOffset: v4.BuildStorageOffset,
-		}
-
-		if v4.CompressionTypeNumFrames != 0 {
-			m.FrameTable = &storage.FrameTable{
-				CompressionType: storage.CompressionType((v4.CompressionTypeNumFrames >> 24) & 0xFF),
+		switch metadata.Version {
+		case 0, 1, 2, 3:
+			var v3 v3SerializableBuildMap
+			err = binary.Read(reader, binary.LittleEndian, &v3)
+			if errors.Is(err, io.EOF) {
+				break MAPPINGS
 			}
-			numFrames := v4.CompressionTypeNumFrames & 0xFFFFFF
-
-			var startAt storage.FrameOffset
-			err = binary.Read(reader, binary.LittleEndian, &startAt)
 			if err != nil {
-				return nil, fmt.Errorf("failed to read compression frames starting offset: %w", err)
+				return nil, fmt.Errorf("failed to read block mapping: %w", err)
 			}
-			m.FrameTable.StartAt = startAt
 
-			for range numFrames {
-				var frame storage.FrameSize
-				err = binary.Read(reader, binary.LittleEndian, &frame)
-				if err != nil {
-					return nil, fmt.Errorf("failed to read the expected compression frame: %w", err)
+			m.Offset = v3.Offset
+			m.Length = v3.Length
+			m.BuildId = v3.BuildId
+			m.BuildStorageOffset = v3.BuildStorageOffset
+
+		case 4:
+			var v4 v4SerializableBuildMap
+			err = binary.Read(reader, binary.LittleEndian, &v4)
+			if errors.Is(err, io.EOF) {
+				break MAPPINGS
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to read block mapping: %w", err)
+			}
+
+			m.Offset = v4.Offset
+			m.Length = v4.Length
+			m.BuildId = v4.BuildId
+			m.BuildStorageOffset = v4.BuildStorageOffset
+
+			if v4.CompressionTypeNumFrames != 0 {
+				m.FrameTable = &storage.FrameTable{
+					CompressionType: storage.CompressionType((v4.CompressionTypeNumFrames >> 24) & 0xFF),
 				}
-				m.FrameTable.Frames = append(m.FrameTable.Frames, frame)
+				numFrames := v4.CompressionTypeNumFrames & 0xFFFFFF
+
+				var startAt storage.FrameOffset
+				err = binary.Read(reader, binary.LittleEndian, &startAt)
+				if err != nil {
+					return nil, fmt.Errorf("failed to read compression frames starting offset: %w", err)
+				}
+				m.FrameTable.StartAt = startAt
+
+				for range numFrames {
+					var frame storage.FrameSize
+					err = binary.Read(reader, binary.LittleEndian, &frame)
+					if err != nil {
+						return nil, fmt.Errorf("failed to read the expected compression frame: %w", err)
+					}
+					m.FrameTable.Frames = append(m.FrameTable.Frames, frame)
+				}
 			}
 		}
 
@@ -219,6 +203,16 @@ func DeserializeV4(data []byte) (*Header, error) {
 	}
 
 	return newValidatedHeader(&metadata, mappings)
+}
+
+// DeserializeV4 decompresses LZ4-block-compressed data and deserializes a v4 header with frame tables.
+func DeserializeV4(data []byte) (*Header, error) {
+	decompressed, err := storage.DecompressLZ4(data, storage.MaxCompressedHeaderSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress v4 header: %w", err)
+	}
+
+	return DeserializeBytes(decompressed)
 }
 
 func newValidatedHeader(metadata *Metadata, mappings []*BuildMap) (*Header, error) {
