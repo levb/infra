@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io"
 
+	"go.uber.org/zap"
+
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block"
 	blockmetrics "github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
 	featureflags "github.com/e2b-dev/infra/packages/shared/pkg/feature-flags"
+	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
@@ -99,7 +102,14 @@ func (b *StorageDiff) Init(ctx context.Context) error {
 	}
 
 	var c block.Chunker
-	if b.featureFlags.BoolFlag(ctx, featureflags.UseStreamingChunkerFlag) {
+	useStreaming := b.featureFlags.BoolFlag(ctx, featureflags.UseStreamingChunkerFlag)
+	logger.L().Debug(ctx, "initializing chunker",
+		zap.Bool("streaming", useStreaming),
+		zap.String("path", b.storagePath),
+		zap.Int64("size", size),
+	)
+
+	if useStreaming {
 		c, err = block.NewStreamingChunker(size, b.blockSize, obj, b.cachePath, b.metrics)
 	} else {
 		c, err = block.NewFullFetchChunker(size, b.blockSize, obj, b.cachePath, b.metrics)
