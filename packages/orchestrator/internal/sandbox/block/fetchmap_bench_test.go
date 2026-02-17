@@ -9,10 +9,25 @@ import (
 )
 
 // Benchmarks comparing map implementations for the fetchMap in StreamingChunker.
-// The fetchMap holds ~1-4 entries (one per in-flight 4MB chunk fetch), so the
-// dominant cost is synchronization overhead, not map operations themselves.
+//
+// Cardinality context — concurrent fetchMap entries depend on request source:
+//
+//   - UFFD page faults: 4KB (regular) or 2MB (hugepage) reads. Concurrency
+//     limited by vCPU count (typically 1-2). Each read hits one 4MB chunk,
+//     so ~2 sessions.
+//   - Prefetcher: 16 fetch workers + 8 copy workers, each calling Slice
+//     with blockSize. Worst case all hit different chunks → ~24 sessions.
+//   - NBD: Overlay.ReadAt breaks requests into blockSize (4KB) chunks,
+//     each calling StreamingChunker.ReadAt. Largely sequential → ~1-3 sessions.
+//
+// Realistic peak is ~16-24 concurrent sessions (prefetcher burst). We bench
+// at 4, 16, and 64 entries to cover typical, peak, and worst-case.
 
-const benchEntries = 4
+type fetchMapImpl interface {
+	get(int64) (*fetchSession, bool)
+	set(int64, *fetchSession)
+	del(int64)
+}
 
 // --- mutex + map[int64] (current implementation) ---
 
@@ -21,7 +36,7 @@ type mutexMap struct {
 	m  map[int64]*fetchSession
 }
 
-func newMutexMap() *mutexMap {
+func newMutexMap() fetchMapImpl {
 	return &mutexMap{m: make(map[int64]*fetchSession)}
 }
 
@@ -50,7 +65,7 @@ type cmapStringMap struct {
 	m cmap.ConcurrentMap[string, *fetchSession]
 }
 
-func newCmapStringMap() *cmapStringMap {
+func newCmapStringMap() fetchMapImpl {
 	return &cmapStringMap{m: cmap.New[*fetchSession]()}
 }
 
@@ -66,104 +81,85 @@ func (cm *cmapStringMap) del(key int64) {
 	cm.m.Remove(fmt.Sprintf("%d", key))
 }
 
-// --- Benchmarks ---
+// --- Table-driven benchmarks ---
+
+var mapImpls = []struct {
+	name string
+	new  func() fetchMapImpl
+}{
+	{"MutexMap", newMutexMap},
+	{"CmapString", newCmapStringMap},
+}
+
+// Cardinalities matching real request patterns:
+//
+//	1  = single UFFD fault or sequential NBD read (dominant case)
+//	4  = UFFD faults + NBD (typical, 1-2 vCPUs)
+//	16 = prefetcher fetch workers (default MemoryPrefetchMaxFetchWorkers)
+//	64 = worst case (prefetcher + UFFD + NBD all hitting different chunks)
+var cardinalities = []int{1, 4, 16, 64}
 
 func BenchmarkFetchMap_Serial(b *testing.B) {
 	session := &fetchSession{}
-
-	b.Run("MutexMap", func(b *testing.B) {
-		mm := newMutexMap()
-		for i := 0; i < b.N; i++ {
-			key := int64(i % benchEntries)
-			mm.set(key, session)
-			mm.get(key)
-			mm.del(key)
+	for _, impl := range mapImpls {
+		for _, n := range cardinalities {
+			b.Run(fmt.Sprintf("%s/%d_keys", impl.name, n), func(b *testing.B) {
+				m := impl.new()
+				for i := 0; i < b.N; i++ {
+					key := int64(i % n)
+					m.set(key, session)
+					m.get(key)
+					m.del(key)
+				}
+			})
 		}
-	})
-
-	b.Run("CmapString", func(b *testing.B) {
-		cm := newCmapStringMap()
-		for i := 0; i < b.N; i++ {
-			key := int64(i % benchEntries)
-			cm.set(key, session)
-			cm.get(key)
-			cm.del(key)
-		}
-	})
+	}
 }
 
 func BenchmarkFetchMap_Parallel(b *testing.B) {
 	session := &fetchSession{}
-
-	b.Run("MutexMap", func(b *testing.B) {
-		mm := newMutexMap()
-		b.RunParallel(func(pb *testing.PB) {
-			i := 0
-			for pb.Next() {
-				key := int64(i % benchEntries)
-				mm.set(key, session)
-				mm.get(key)
-				mm.del(key)
-				i++
-			}
-		})
-	})
-
-	b.Run("CmapString", func(b *testing.B) {
-		cm := newCmapStringMap()
-		b.RunParallel(func(pb *testing.PB) {
-			i := 0
-			for pb.Next() {
-				key := int64(i % benchEntries)
-				cm.set(key, session)
-				cm.get(key)
-				cm.del(key)
-				i++
-			}
-		})
-	})
+	for _, impl := range mapImpls {
+		for _, n := range cardinalities {
+			b.Run(fmt.Sprintf("%s/%d_keys", impl.name, n), func(b *testing.B) {
+				m := impl.new()
+				b.RunParallel(func(pb *testing.PB) {
+					i := 0
+					for pb.Next() {
+						key := int64(i % n)
+						m.set(key, session)
+						m.get(key)
+						m.del(key)
+						i++
+					}
+				})
+			})
+		}
+	}
 }
 
 func BenchmarkFetchMap_ReadHeavy(b *testing.B) {
 	session := &fetchSession{}
-
-	b.Run("MutexMap", func(b *testing.B) {
-		mm := newMutexMap()
-		for i := range int64(benchEntries) {
-			mm.set(i, session)
-		}
-		b.ResetTimer()
-		b.RunParallel(func(pb *testing.PB) {
-			i := 0
-			for pb.Next() {
-				key := int64(i % benchEntries)
-				if i%10 == 0 {
-					mm.set(key, session)
-				} else {
-					mm.get(key)
+	for _, impl := range mapImpls {
+		for _, n := range cardinalities {
+			b.Run(fmt.Sprintf("%s/%d_keys", impl.name, n), func(b *testing.B) {
+				m := impl.new()
+				for i := range int64(n) {
+					m.set(i, session)
 				}
-				i++
-			}
-		})
-	})
-
-	b.Run("CmapString", func(b *testing.B) {
-		cm := newCmapStringMap()
-		for i := range int64(benchEntries) {
-			cm.set(i, session)
+				b.ResetTimer()
+				b.RunParallel(func(pb *testing.PB) {
+					i := 0
+					for pb.Next() {
+						key := int64(i % n)
+						if i%10 == 0 {
+							m.set(key, session)
+						} else {
+							m.get(key)
+						}
+						i++
+					}
+				})
+			})
 		}
-		b.ResetTimer()
-		b.RunParallel(func(pb *testing.PB) {
-			i := 0
-			for pb.Next() {
-				key := int64(i % benchEntries)
-				if i%10 == 0 {
-					cm.set(key, session)
-				} else {
-					cm.get(key)
-				}
-				i++
-			}
-		})
-	})
+	}
 }
