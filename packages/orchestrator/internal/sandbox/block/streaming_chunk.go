@@ -22,6 +22,15 @@ const (
 	// defaultFetchTimeout is the maximum time a single 4MB chunk fetch may take.
 	// Acts as a safety net: if the upstream hangs, the goroutine won't live forever.
 	defaultFetchTimeout = 60 * time.Second
+
+	// readBatchSize is the maximum number of bytes read from the upstream
+	// socket in a single Read call. Larger batches reduce syscall overhead
+	// (a 4KB read-cap on a 4MB chunk = 1024 syscalls). The notification
+	// granularity remains blockSize — after each Read we mark all newly
+	// completed blocks and wake their waiters. Read is allowed to return
+	// fewer bytes than requested, so we still wake promptly when the kernel
+	// buffer has less than a full batch.
+	readBatchSize = 256 * 1024 // 256 KB
 )
 
 type rangeWaiter struct {
@@ -363,9 +372,9 @@ func (c *StreamingChunker) progressiveRead(ctx context.Context, s *fetchSession,
 	var prevCompleted int64
 
 	for totalRead < s.chunkLen {
-		// Cap each Read to blockSize so the HTTP/GCS client returns after each
-		// block rather than buffering the entire remaining range.
-		readEnd := min(totalRead+blockSize, s.chunkLen)
+		// Read in large batches to reduce syscall overhead, but still
+		// track and notify waiters at blockSize granularity below.
+		readEnd := min(totalRead+readBatchSize, s.chunkLen)
 		n, readErr := reader.Read(mmapSlice[totalRead:readEnd])
 		totalRead += int64(n)
 
