@@ -1,6 +1,7 @@
 package block
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"fmt"
@@ -93,6 +94,13 @@ func (r *slowReader) Close() error {
 
 // fastUpstream simulates NFS: same interfaces but no delay.
 type fastUpstream = slowUpstream
+
+// streamingFunc adapts a function into a StreamingReader.
+type streamingFunc func(ctx context.Context, off, length int64) (io.ReadCloser, error)
+
+func (f streamingFunc) OpenRangeReader(ctx context.Context, off, length int64) (io.ReadCloser, error) {
+	return f(ctx, off, length)
+}
 
 // errorAfterNUpstream fails after reading n bytes.
 type errorAfterNUpstream struct {
@@ -542,16 +550,21 @@ func TestStreamingChunker_ConcurrentSameChunk_SharedSession(t *testing.T) {
 	t.Parallel()
 
 	data := makeTestData(t, storage.MemoryChunkSize)
+
+	gate := make(chan struct{})
 	openCount := atomic.Int64{}
 
-	upstream := &countingUpstream{
-		inner: &slowUpstream{
-			data:      data,
-			blockSize: testBlockSize,
-			delay:     50 * time.Microsecond,
-		},
-		readCount: &openCount,
-	}
+	// OpenRangeReader blocks on the gate, keeping the session in fetchMap
+	// until both callers have entered. This removes the scheduling-dependent
+	// race in the old slow-upstream version of this test.
+	upstream := streamingFunc(func(_ context.Context, off, length int64) (io.ReadCloser, error) {
+		openCount.Add(1)
+		<-gate
+
+		end := min(off+length, int64(len(data)))
+
+		return io.NopCloser(bytes.NewReader(data[off:end])), nil
+	})
 
 	chunker, err := NewStreamingChunker(
 		int64(len(data)), testBlockSize,
@@ -589,14 +602,14 @@ func TestStreamingChunker_ConcurrentSameChunk_SharedSession(t *testing.T) {
 		return nil
 	})
 
+	// Let both goroutines enter getOrCreateSession, then release the fetch.
+	time.Sleep(10 * time.Millisecond)
+	close(gate)
+
 	require.NoError(t, eg.Wait())
 
-	// Both callers got the right data.
 	assert.Equal(t, data[offA:offA+testBlockSize], sliceA)
 	assert.Equal(t, data[offB:offB+testBlockSize], sliceB)
-
-	// Only one OpenRangeReader call should have been made, meaning both
-	// requests shared the same fetch session for the chunk.
 	assert.Equal(t, int64(1), openCount.Load(),
 		"expected exactly 1 OpenRangeReader call (shared session), got %d", openCount.Load())
 }

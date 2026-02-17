@@ -24,9 +24,9 @@ import (
 // at 4, 16, and 64 entries to cover typical, peak, and worst-case.
 
 type fetchMapImpl interface {
-	get(int64) (*fetchSession, bool)
-	set(int64, *fetchSession)
-	del(int64)
+	get(key int64) (*fetchSession, bool)
+	set(key int64, v *fetchSession)
+	del(key int64)
 }
 
 // --- mutex + map[int64] (current implementation) ---
@@ -44,6 +44,7 @@ func (mm *mutexMap) get(key int64) (*fetchSession, bool) {
 	mm.mu.Lock()
 	v, ok := mm.m[key]
 	mm.mu.Unlock()
+
 	return v, ok
 }
 
@@ -105,7 +106,7 @@ func BenchmarkFetchMap_Serial(b *testing.B) {
 		for _, n := range cardinalities {
 			b.Run(fmt.Sprintf("%s/%d_keys", impl.name, n), func(b *testing.B) {
 				m := impl.new()
-				for i := 0; i < b.N; i++ {
+				for i := range b.N {
 					key := int64(i % n)
 					m.set(key, session)
 					m.get(key)
