@@ -99,7 +99,7 @@ func (b *StorageDiff) Init(ctx context.Context) error {
 	}
 
 	var c block.Chunker
-	if b.featureFlags != nil && b.featureFlags.BoolFlag(ctx, featureflags.UseStreamingChunkerFlag) {
+	if b.featureFlags.BoolFlag(ctx, featureflags.UseStreamingChunkerFlag) {
 		c, err = block.NewStreamingChunker(size, b.blockSize, obj, b.cachePath, b.metrics)
 	} else {
 		c, err = block.NewFullFetchChunker(size, b.blockSize, obj, b.cachePath, b.metrics)

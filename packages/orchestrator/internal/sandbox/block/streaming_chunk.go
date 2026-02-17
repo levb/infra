@@ -15,6 +15,7 @@ import (
 
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
+	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
 )
 
 const (
@@ -126,10 +127,8 @@ func (s *fetchSession) notifyWaiters(sendErr error) {
 		for _, w := range s.waiters {
 			if sendErr != nil && w.endByte > s.bytesReady {
 				w.ch <- sendErr
-			} else {
-				w.ch <- nil
-				close(w.ch)
 			}
+			close(w.ch)
 		}
 		s.waiters = nil
 
@@ -139,7 +138,7 @@ func (s *fetchSession) notifyWaiters(sendErr error) {
 	// Progress: pop satisfied waiters from the sorted front.
 	i := 0
 	for i < len(s.waiters) && s.waiters[i].endByte <= s.bytesReady {
-		s.waiters[i].ch <- nil
+		close(s.waiters[i].ch)
 		i++
 	}
 	s.waiters = s.waiters[i:]
@@ -226,8 +225,8 @@ func (c *StreamingChunker) Slice(ctx context.Context, off, length int64) ([]byte
 	}
 
 	// Compute which 4MB chunks overlap with the requested range
-	firstChunkOff := (off / storage.MemoryChunkSize) * storage.MemoryChunkSize
-	lastChunkOff := ((off + length - 1) / storage.MemoryChunkSize) * storage.MemoryChunkSize
+	firstChunkOff := header.BlockOffset(header.BlockIdx(off, storage.MemoryChunkSize), storage.MemoryChunkSize)
+	lastChunkOff := header.BlockOffset(header.BlockIdx(off+length-1, storage.MemoryChunkSize), storage.MemoryChunkSize)
 
 	var eg errgroup.Group
 
@@ -299,12 +298,13 @@ func (c *StreamingChunker) getOrCreateSession(ctx context.Context, fetchOff int6
 
 func (s *fetchSession) setState(state fetchState, err error, onlyIfRunning bool) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if !onlyIfRunning || s.state == fetchStateRunning {
 		s.state = state
 		s.fetchErr = err
 		s.notifyWaiters(err)
 	}
-	s.mu.Unlock()
 }
 
 func (c *StreamingChunker) runFetch(ctx context.Context, s *fetchSession) {
