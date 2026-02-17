@@ -554,6 +554,8 @@ resource "nomad_job" "loki" {
     cpu_count                = var.loki_resources_cpu_count
     loki_service_port_number = var.loki_service_port.port
     loki_service_port_name   = var.loki_service_port.name
+    loki_use_v13_schema_from = var.loki_use_v13_schema_from
+
   })
 }
 
@@ -702,6 +704,9 @@ resource "nomad_job" "clickhouse_migrator" {
     job_constraint_prefix = var.clickhouse_job_constraint_prefix
     node_pool             = var.clickhouse_node_pool
 
-    clickhouse_connection_string = local.clickhouse_connection_string
+    clickhouse_username = var.clickhouse_username
+    clickhouse_password = random_password.clickhouse_password.result
+    clickhouse_port     = var.clickhouse_server_port.port
+    clickhouse_database = var.clickhouse_database
   })
 }
