@@ -134,7 +134,9 @@ type StorageProvider interface {
 	GetDetails() string
 	// GetFrame reads a single frame from storage into buf.
 	// When frameTable is nil (uncompressed data), reads directly without frame translation.
-	GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte) (Range, error)
+	// When onProgress is non-nil, data is written in block-aligned chunks and onProgress
+	// is called after each chunk with the cumulative byte count written so far.
+	GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, onProgress func(totalWritten int64)) (Range, error)
 }
 
 type Blob interface {
@@ -241,7 +243,13 @@ func LoadBlob(ctx context.Context, s StorageProvider, path string, objType Objec
 
 // getFrame is the shared implementation for reading a single frame from storage.
 // Each backend (GCP, AWS, FS) calls this with their own rangeRead callback.
-func getFrame(ctx context.Context, rangeRead rangeReadFunc, storageDetails string, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte) (Range, error) {
+//
+// When onProgress is non-nil and decompress is true, the decompressed output is
+// written to buf in MemoryChunkSize-aligned blocks and onProgress is called after
+// each block with the cumulative bytes written. This pipelines network I/O with
+// decompression — the LZ4/zstd reader pulls compressed bytes from the HTTP stream
+// on demand, so fetch and decompress overlap naturally.
+func getFrame(ctx context.Context, rangeRead rangeReadFunc, storageDetails string, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, onProgress func(totalWritten int64)) (Range, error) {
 	// Handle uncompressed data (nil frameTable) - read directly without frame translation
 	if !IsCompressed(frameTable) {
 		return getFrameUncompressed(ctx, rangeRead, objectPath, offsetU, buf)
@@ -292,9 +300,40 @@ func getFrame(ctx context.Context, rangeRead rangeReadFunc, storageDetails strin
 		}
 	}
 
+	// Progressive mode: read in MemoryChunkSize blocks, call onProgress after each.
+	if onProgress != nil {
+		return readProgressive(from, buf, readSize, frameStart.C, onProgress)
+	}
+
 	n, err := io.ReadFull(from, buf[:readSize])
 
 	return Range{Start: frameStart.C, Length: n}, err
+}
+
+// readProgressive reads from src into buf in MemoryChunkSize-aligned blocks,
+// calling onProgress after each block with the cumulative bytes written.
+func readProgressive(src io.Reader, buf []byte, totalSize int, rangeStart int64, onProgress func(totalWritten int64)) (Range, error) {
+	var total int64
+
+	for total < int64(totalSize) {
+		end := min(total+MemoryChunkSize, int64(totalSize))
+		n, err := io.ReadFull(src, buf[total:end])
+		total += int64(n)
+
+		if int64(n) > 0 {
+			onProgress(total)
+		}
+
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			break
+		}
+
+		if err != nil {
+			return Range{}, fmt.Errorf("progressive read error after %d bytes: %w", total, err)
+		}
+	}
+
+	return Range{Start: rangeStart, Length: int(total)}, nil
 }
 
 // getFrameUncompressed reads uncompressed data directly from storage.

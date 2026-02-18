@@ -403,7 +403,7 @@ func validateArtifact(ctx context.Context, storagePath, buildID, artifactName st
 	dataMD5 := hex.EncodeToString(hash.Sum(nil))
 	fmt.Printf("  Data MD5 (storage): %s\n", dataMD5)
 
-	// 6. Validate compressed header if it exists
+	// 6. Validate compressed header and frames if it exists
 	compressedH, _, compErr := cmdutil.ReadCompressedHeader(ctx, storagePath, buildID, artifactName)
 
 	switch {
@@ -411,9 +411,12 @@ func validateArtifact(ctx context.Context, storagePath, buildID, artifactName st
 		fmt.Printf("  Compressed header: read error: %s\n", compErr)
 	case compressedH != nil:
 		if err := header.ValidateHeader(compressedH); err != nil {
-			fmt.Printf("  Compressed header: validation FAILED: %s\n", err)
-		} else {
-			fmt.Printf("  Compressed header: validated (mappings=%d)\n", len(compressedH.Mapping))
+			return fmt.Errorf("compressed header validation failed: %w", err)
+		}
+		fmt.Printf("  Compressed header: validated (mappings=%d)\n", len(compressedH.Mapping))
+
+		if err := validateCompressedFrames(ctx, storagePath, artifactName, compressedH); err != nil {
+			return fmt.Errorf("compressed frame validation failed: %w", err)
 		}
 	default:
 		fmt.Printf("  Compressed header: not present\n")
@@ -487,6 +490,139 @@ func validateMapping(ctx context.Context, storagePath, artifactName string, h *h
 			return fmt.Errorf("failed to read last compressed frame at C=%d: %w", lastOffset, err)
 		}
 	}
+
+	return nil
+}
+
+// validateCompressedFrames decompresses every frame described in the compressed
+// header and compares the result with the uncompressed data file byte-for-byte.
+func validateCompressedFrames(ctx context.Context, storagePath, artifactName string, compressedH *header.Header) error {
+	// Collect unique frames to validate, keyed by (buildID, C-offset).
+	type frameInfo struct {
+		offset storage.FrameOffset
+		size   storage.FrameSize
+		ct     storage.CompressionType
+	}
+	type frameKey struct {
+		buildID string
+		cOffset int64
+	}
+
+	buildFrames := make(map[string][]frameInfo)
+	seen := make(map[frameKey]bool)
+
+	for _, mapping := range compressedH.Mapping {
+		ft := mapping.FrameTable
+		if !storage.IsCompressed(ft) {
+			continue
+		}
+
+		bid := mapping.BuildId.String()
+		if bid == cmdutil.NilUUID {
+			continue
+		}
+
+		currentOffset := ft.StartAt
+		for _, frame := range ft.Frames {
+			key := frameKey{bid, currentOffset.C}
+			if !seen[key] {
+				seen[key] = true
+				buildFrames[bid] = append(buildFrames[bid], frameInfo{
+					offset: currentOffset,
+					size:   frame,
+					ct:     ft.CompressionType,
+				})
+			}
+			currentOffset.Add(frame)
+		}
+	}
+
+	if len(buildFrames) == 0 {
+		fmt.Printf("  No compressed frames to validate\n")
+
+		return nil
+	}
+
+	totalFrames := 0
+	for _, frames := range buildFrames {
+		totalFrames += len(frames)
+	}
+	fmt.Printf("  Validating %d unique compressed frames across %d builds\n", totalFrames, len(buildFrames))
+
+	for bid, frames := range buildFrames {
+		// Open compressed file (e.g., memfile.lz4)
+		compressedFile := artifactName + frames[0].ct.Suffix()
+		compReader, compSize, _, err := cmdutil.OpenDataFile(ctx, storagePath, bid, compressedFile)
+		if err != nil {
+			return fmt.Errorf("build %s: failed to open %s: %w", bid, compressedFile, err)
+		}
+
+		// Open uncompressed file (e.g., memfile)
+		uncReader, uncSize, _, err := cmdutil.OpenDataFile(ctx, storagePath, bid, artifactName)
+		if err != nil {
+			compReader.Close()
+
+			return fmt.Errorf("build %s: failed to open %s: %w", bid, artifactName, err)
+		}
+
+		fmt.Printf("  Build %s: %d frames, compressed=%d uncompressed=%d\n", bid, len(frames), compSize, uncSize)
+
+		for i, frame := range frames {
+			// Read compressed bytes from .lz4 at C offset
+			compBuf := make([]byte, frame.size.C)
+			_, err := compReader.ReadAt(compBuf, frame.offset.C)
+			if err != nil {
+				compReader.Close()
+				uncReader.Close()
+
+				return fmt.Errorf("build %s frame[%d]: read compressed at C=%d size=%d: %w",
+					bid, i, frame.offset.C, frame.size.C, err)
+			}
+
+			// Decompress
+			decompressed, err := storage.DecompressFrame(frame.ct, compBuf, frame.size.U)
+			if err != nil {
+				previewLen := min(32, len(compBuf))
+				compReader.Close()
+				uncReader.Close()
+
+				return fmt.Errorf("build %s frame[%d]: decompress at C=%d (first %d bytes: %x): %w",
+					bid, i, frame.offset.C, previewLen, compBuf[:previewLen], err)
+			}
+
+			// Read corresponding uncompressed bytes
+			uncBuf := make([]byte, frame.size.U)
+			_, err = uncReader.ReadAt(uncBuf, frame.offset.U)
+			if err != nil {
+				compReader.Close()
+				uncReader.Close()
+
+				return fmt.Errorf("build %s frame[%d]: read uncompressed at U=%#x size=%d: %w",
+					bid, i, frame.offset.U, frame.size.U, err)
+			}
+
+			// Compare
+			if !bytes.Equal(decompressed, uncBuf) {
+				for j := range decompressed {
+					if j < len(uncBuf) && decompressed[j] != uncBuf[j] {
+						compReader.Close()
+						uncReader.Close()
+
+						return fmt.Errorf("build %s frame[%d]: mismatch at U=%#x+%d (byte %d: got %#x want %#x)",
+							bid, i, frame.offset.U, j, j, decompressed[j], uncBuf[j])
+					}
+				}
+			}
+
+			fmt.Printf("    frame[%d] U=%#x C=%d OK (%d→%d bytes)\n",
+				i, frame.offset.U, frame.offset.C, frame.size.C, frame.size.U)
+		}
+
+		compReader.Close()
+		uncReader.Close()
+	}
+
+	fmt.Printf("  Compressed frames: all %d validated\n", totalFrames)
 
 	return nil
 }

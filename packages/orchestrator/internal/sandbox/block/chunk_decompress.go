@@ -1,7 +1,6 @@
 package block
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,8 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/klauspost/compress/zstd"
-	lz4 "github.com/pierrec/lz4/v4"
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
@@ -137,8 +134,8 @@ func (c *DecompressMMapChunker) Slice(ctx context.Context, off, length int64, ft
 		return nil, fmt.Errorf("slice out of bounds: off=%#x length=%d size=%d", off, length, c.assets.Size)
 	}
 
-	sliceStart := time.Now()
 	useCompressed := c.assets.HasCompressed(ft)
+
 	timer := c.metrics.SlicesTimerFactory.Begin(
 		attribute.String(chunkerTypeAttr, ChunkerTypeDecompressMMap),
 		attribute.Bool(compressedAttr, useCompressed),
@@ -148,9 +145,6 @@ func (c *DecompressMMapChunker) Slice(ctx context.Context, off, length int64, ft
 	b, err := c.cache.Slice(off, length)
 	if err == nil {
 		timer.Success(ctx, length, attribute.String(pullType, pullTypeLocal))
-
-		fmt.Printf("[DECOMPRESS-MMAP] CACHE %s off=%#x len=%d took=%v\n",
-			c.assets.BasePath, off, length, time.Since(sliceStart))
 
 		return b, nil
 	}
@@ -242,7 +236,6 @@ func (c *DecompressMMapChunker) runCompressedFetch(ctx context.Context, s *fetch
 		}
 	}()
 
-	fetchStart := time.Now()
 	fetchSW := c.metrics.RemoteReadsTimerFactory.Begin(
 		attribute.String(chunkerTypeAttr, ChunkerTypeDecompressMMap),
 		attribute.Bool(compressedAttr, true),
@@ -260,10 +253,19 @@ func (c *DecompressMMapChunker) runCompressedFetch(ctx context.Context, s *fetch
 	}
 	defer releaseLock()
 
-	// Fetch compressed bytes from storage.
+	// Fetch + decompress in one pipelined call. The onProgress callback
+	// publishes decompressed blocks to the mmap cache and wakes waiters
+	// as each MemoryChunkSize-aligned block completes.
 	compressedPath := c.assets.BasePath + ft.CompressionType.Suffix()
-	compressedBuf := make([]byte, frameSize.C)
-	_, err = c.storage.GetFrame(ctx, compressedPath, frameStarts.U, ft, false, compressedBuf)
+	var prevTotal int64
+	onProgress := func(totalWritten int64) {
+		newBytes := totalWritten - prevTotal
+		c.cache.setIsCached(frameStarts.U+prevTotal, newBytes)
+		s.advance(totalWritten)
+		prevTotal = totalWritten
+	}
+
+	_, err = c.storage.GetFrame(ctx, compressedPath, frameStarts.U, ft, true, mmapSlice[:frameSize.U], onProgress)
 	if err != nil {
 		fetchSW.Failure(ctx, int64(frameSize.C),
 			attribute.String(failureReason, failureTypeRemoteRead))
@@ -273,61 +275,11 @@ func (c *DecompressMMapChunker) runCompressedFetch(ctx context.Context, s *fetch
 		return
 	}
 
-	fetchDur := time.Since(fetchStart)
-	decompStart := time.Now()
-
-	// Progressively decompress into mmap, notifying waiters as blocks complete.
-	err = c.progressiveDecompress(s, ft.CompressionType, compressedBuf, mmapSlice, frameStarts.U, frameSize)
-	if err != nil {
-		fetchSW.Failure(ctx, int64(frameSize.C),
-			attribute.String(failureReason, "decompress"))
-		c.removeFetchSession(key)
-		s.fail(err)
-
-		return
-	}
-
 	fetchSW.Success(ctx, int64(frameSize.U))
 	// Remove from fetchMap BEFORE notifying waiters, so new requests
 	// arriving after wakeup don't find the stale session.
 	c.removeFetchSession(key)
 	s.complete()
-
-	fmt.Printf("[DECOMPRESS-MMAP] COMPRESSED %s frameU=%#x C=%d->U=%d fetch=%v decomp=%v total=%v\n",
-		c.assets.BasePath, frameStarts.U, frameSize.C, frameSize.U, fetchDur, time.Since(decompStart), time.Since(fetchStart))
-}
-
-func (c *DecompressMMapChunker) progressiveDecompress(s *fetchSession, ct storage.CompressionType, compressed, dst []byte, frameOff int64, frameSize storage.FrameSize) error {
-	reader := bytes.NewReader(compressed)
-	decompReader, err := newDecompressReader(ct, reader)
-	if err != nil {
-		return err
-	}
-	defer closeDecompressReader(decompReader)
-
-	blockSize := c.cache.BlockSize()
-	uSize := int64(frameSize.U)
-	var totalDecompressed int64
-
-	for totalDecompressed < uSize {
-		readEnd := min(totalDecompressed+blockSize, uSize)
-		n, readErr := io.ReadFull(decompReader, dst[totalDecompressed:readEnd])
-		totalDecompressed += int64(n)
-
-		if int64(n) > 0 {
-			c.cache.setIsCached(frameOff+totalDecompressed-int64(n), int64(n))
-			s.advance(totalDecompressed)
-		}
-
-		if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
-			break
-		}
-		if readErr != nil {
-			return fmt.Errorf("decompress error after %d bytes: %w", totalDecompressed, readErr)
-		}
-	}
-
-	return nil
 }
 
 // --- Uncompressed path ---
@@ -363,8 +315,6 @@ func (c *DecompressMMapChunker) runUncompressedFetch(ctx context.Context, s *fet
 			s.fail(fmt.Errorf("uncompressed fetch panicked: %v", r))
 		}
 	}()
-
-	fetchStart := time.Now()
 
 	// Open a seekable object to get a range reader.
 	obj, err := c.storage.OpenSeekable(ctx, c.assets.BasePath, c.objectType)
@@ -441,9 +391,6 @@ func (c *DecompressMMapChunker) runUncompressedFetch(ctx context.Context, s *fet
 	// arriving after wakeup don't find the stale session.
 	c.removeFetchSession(key)
 	s.complete()
-
-	fmt.Printf("[DECOMPRESS-MMAP] UNCOMPRESSED %s off=%#x len=%d fetch=%v\n",
-		c.assets.BasePath, s.chunkOff, s.chunkLen, time.Since(fetchStart))
 }
 
 // removeFetchSession removes a session from the fetchMap.
@@ -452,32 +399,6 @@ func (c *DecompressMMapChunker) removeFetchSession(key fetchKey) {
 	c.fetchMu.Lock()
 	delete(c.fetchMap, key)
 	c.fetchMu.Unlock()
-}
-
-// --- Shared helpers ---
-
-// newDecompressReader creates a streaming decompression reader for the given type.
-func newDecompressReader(ct storage.CompressionType, r io.Reader) (io.Reader, error) {
-	switch ct {
-	case storage.CompressionLZ4:
-		return lz4.NewReader(r), nil
-	case storage.CompressionZstd:
-		dec, err := zstd.NewReader(r)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create zstd reader: %w", err)
-		}
-
-		return dec, nil
-	default:
-		return nil, fmt.Errorf("unsupported compression type: %s", ct)
-	}
-}
-
-// closeDecompressReader closes decompression readers that implement io.Closer.
-func closeDecompressReader(r io.Reader) {
-	if c, ok := r.(io.Closer); ok {
-		c.Close()
-	}
 }
 
 func (c *DecompressMMapChunker) Close() error {

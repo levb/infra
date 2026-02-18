@@ -42,7 +42,7 @@ func (g *testFrameGetter) OpenSeekable(_ context.Context, _ string, _ storage.Se
 	return &slowUpstream{data: g.uncompressed, blockSize: testBlockSize, delay: g.delay}, nil
 }
 
-func (g *testFrameGetter) GetFrame(_ context.Context, _ string, offsetU int64, ft *storage.FrameTable, decompress bool, buf []byte) (storage.Range, error) {
+func (g *testFrameGetter) GetFrame(_ context.Context, _ string, offsetU int64, ft *storage.FrameTable, decompress bool, buf []byte, onProgress func(int64)) (storage.Range, error) {
 	g.fetchCount.Add(1)
 
 	if g.delay > 0 {
@@ -57,6 +57,16 @@ func (g *testFrameGetter) GetFrame(_ context.Context, _ string, offsetU int64, f
 	if decompress {
 		uEnd := min(starts.U+int64(size.U), int64(len(g.uncompressed)))
 		n := copy(buf, g.uncompressed[starts.U:uEnd])
+
+		if onProgress != nil {
+			// Simulate progressive delivery in blockSize chunks.
+			for written := int64(testBlockSize); written <= int64(n); written += int64(testBlockSize) {
+				onProgress(written)
+			}
+			if int64(n)%int64(testBlockSize) != 0 {
+				onProgress(int64(n))
+			}
+		}
 
 		return storage.Range{Start: starts.U, Length: n}, nil
 	}
@@ -450,7 +460,7 @@ type testUncompressedStorage struct {
 	upstream *slowUpstream
 }
 
-func (t *testUncompressedStorage) GetFrame(context.Context, string, int64, *storage.FrameTable, bool, []byte) (storage.Range, error) {
+func (t *testUncompressedStorage) GetFrame(context.Context, string, int64, *storage.FrameTable, bool, []byte, func(int64)) (storage.Range, error) {
 	return storage.Range{}, fmt.Errorf("testUncompressedStorage: GetFrame not supported")
 }
 

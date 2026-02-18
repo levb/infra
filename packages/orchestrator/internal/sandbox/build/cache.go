@@ -98,9 +98,9 @@ func (s *DiffStore) Close() {
 	s.cache.Stop()
 }
 
-func (s *DiffStore) Get(_ context.Context, diff Diff) (Diff, error) {
+func (s *DiffStore) Get(ctx context.Context, diff Diff) (Diff, error) {
 	s.resetDelete(diff.CacheKey())
-	source, _ := s.cache.GetOrSet(
+	source, found := s.cache.GetOrSet(
 		diff.CacheKey(),
 		diff,
 		ttlcache.WithTTL[DiffStoreKey, Diff](ttlcache.DefaultTTL),
@@ -111,8 +111,13 @@ func (s *DiffStore) Get(_ context.Context, diff Diff) (Diff, error) {
 		return nil, fmt.Errorf("failed to get source from cache: %s", diff.CacheKey())
 	}
 
-	// Chunker is lazily initialized on first ReadAt/Slice call using the frame table
-	// from the mapping. No explicit Init() needed.
+	if !found {
+		err := diff.Init(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to init source: %w", err)
+		}
+	}
+
 	return value, nil
 }
 

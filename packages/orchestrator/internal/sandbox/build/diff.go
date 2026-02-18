@@ -23,18 +23,14 @@ const (
 	Rootfs  DiffType = storage.RootfsName
 )
 
-// Diff represents a build's file (memfile or rootfs) that can be read.
-// Implementations must support lazy initialization using the frame table
-// provided to ReadAt/Slice on first access.
 type Diff interface {
 	io.Closer
 	CacheKey() DiffStoreKey
 	CachePath() (string, error)
 	FileSize() (int64, error)
 	BlockSize() int64
-	// ReadAt reads data at offset. The frame table is used for lazy chunker init.
+	Init(ctx context.Context) error
 	ReadAt(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error)
-	// Slice returns a view into the data. The frame table is used for lazy chunker init.
 	Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error)
 }
 
@@ -64,6 +60,10 @@ func (n *NoDiff) FileSize() (int64, error) {
 
 func (n *NoDiff) CacheKey() DiffStoreKey {
 	return ""
+}
+
+func (n *NoDiff) Init(context.Context) error {
+	return NoDiffError{}
 }
 
 func (n *NoDiff) BlockSize() int64 {

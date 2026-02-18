@@ -16,13 +16,13 @@ const (
 )
 
 type Metrics struct {
-	// SlicesTimerFactory measures page faulting performance.
+	// SlicesMetric is used to measure page faulting performance.
 	SlicesTimerFactory telemetry.TimerFactory
 
-	// RemoteReadsTimerFactory measures the time taken to download chunks from remote storage.
+	// WriteChunksMetric is used to measure the time taken to download chunks from remote storage
 	RemoteReadsTimerFactory telemetry.TimerFactory
 
-	// WriteChunksTimerFactory measures performance of writing chunks to disk.
+	// WriteChunksMetric is used to measure performance of writing chunks to disk.
 	WriteChunksTimerFactory telemetry.TimerFactory
 
 	// ChunkerCreations counts chunker instantiations by type and compression mode.

@@ -83,21 +83,16 @@ func (b *StorageDiff) CacheKey() DiffStoreKey {
 	return b.cacheKey
 }
 
-// initChunker lazily creates the chunker on first access.
-func (b *StorageDiff) initChunker(ctx context.Context) error {
-	// If already initialized, nothing to do.
-	if _, err := b.chunker.Result(); err == nil {
-		return nil
-	}
-
-	c, err := b.createChunker(ctx)
+func (b *StorageDiff) Init(ctx context.Context) error {
+	chunker, err := b.createChunker(ctx)
 	if err != nil {
-		b.chunker.SetError(err)
+		errMsg := fmt.Errorf("failed to create chunker: %w", err)
+		b.chunker.SetError(errMsg)
 
-		return err
+		return errMsg
 	}
 
-	return b.chunker.SetValue(c)
+	return b.chunker.SetValue(chunker)
 }
 
 // createChunker probes for available assets and creates a DecompressMMapChunker.
@@ -131,29 +126,46 @@ func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 			return
 		}
 
-		assets.Size, _ = obj.Size(ctx)
+		size, err := obj.Size(ctx)
+		if err != nil {
+			return
+		}
+
+		assets.Size = size
 	}()
 
 	go func() {
 		defer wg.Done()
 
-		obj, err := b.persistence.OpenSeekable(ctx, b.storagePath+storage.CompressionLZ4.Suffix(), b.storageObjectType)
+		lz4Path := b.storagePath + storage.CompressionLZ4.Suffix()
+		obj, err := b.persistence.OpenSeekable(ctx, lz4Path, b.storageObjectType)
 		if err != nil {
 			return
 		}
 
-		assets.LZ4Size, _ = obj.Size(ctx)
+		size, err := obj.Size(ctx)
+		if err != nil {
+			return
+		}
+
+		assets.LZ4Size = size
 	}()
 
 	go func() {
 		defer wg.Done()
 
-		obj, err := b.persistence.OpenSeekable(ctx, b.storagePath+storage.CompressionZstd.Suffix(), b.storageObjectType)
+		zstPath := b.storagePath + storage.CompressionZstd.Suffix()
+		obj, err := b.persistence.OpenSeekable(ctx, zstPath, b.storageObjectType)
 		if err != nil {
 			return
 		}
 
-		assets.ZstSize, _ = obj.Size(ctx)
+		size, err := obj.Size(ctx)
+		if err != nil {
+			return
+		}
+
+		assets.ZstSize = size
 	}()
 
 	wg.Wait()
@@ -171,10 +183,6 @@ func (b *StorageDiff) Close() error {
 }
 
 func (b *StorageDiff) ReadAt(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error) {
-	if err := b.initChunker(ctx); err != nil {
-		return 0, err
-	}
-
 	chunker, err := b.chunker.Wait()
 	if err != nil {
 		return 0, err
@@ -184,10 +192,6 @@ func (b *StorageDiff) ReadAt(ctx context.Context, p []byte, off int64, ft *stora
 }
 
 func (b *StorageDiff) Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
-	if err := b.initChunker(ctx); err != nil {
-		return nil, err
-	}
-
 	chunker, err := b.chunker.Wait()
 	if err != nil {
 		return nil, err

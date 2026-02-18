@@ -116,36 +116,17 @@ func loadV4orV3Header(ctx context.Context, persistence storage.StorageProvider, 
 	_ = eg.Wait()
 
 	if compressedErr == nil && compressedHeader != nil {
-		fmt.Printf("[HEADER] build=%s file=%s -> LOADED V4 compressed header (version=%d, mappings=%d)\n",
-			buildId, fileType, compressedHeader.Metadata.Version, len(compressedHeader.Mapping))
-		for i, m := range compressedHeader.Mapping {
-			if m.FrameTable != nil {
-				fmt.Printf("[HEADER]   mapping[%d] buildId=%s offset=%d len=%d compression=%s frames=%d\n",
-					i, m.BuildId, m.Offset, m.Length, m.FrameTable.CompressionType, len(m.FrameTable.Frames))
-			} else {
-				fmt.Printf("[HEADER]   mapping[%d] buildId=%s offset=%d len=%d (no compression)\n",
-					i, m.BuildId, m.Offset, m.Length)
-			}
-		}
-
 		return compressedHeader, nil
 	}
 	if defaultErr == nil && defaultHeader != nil {
-		fmt.Printf("[HEADER] build=%s file=%s -> LOADED V3 uncompressed header (version=%d, mappings=%d)\n",
-			buildId, fileType, defaultHeader.Metadata.Version, len(defaultHeader.Mapping))
-
 		return defaultHeader, nil
 	}
 	if compressedErr != nil {
-		fmt.Printf("[HEADER] build=%s file=%s -> v4 load error: %v\n", buildId, fileType, compressedErr)
+		return nil, compressedErr
 	}
 	if defaultErr != nil {
-		fmt.Printf("[HEADER] build=%s file=%s -> v3 load error: %v\n", buildId, fileType, defaultErr)
-
 		return nil, defaultErr
 	}
-
-	fmt.Printf("[HEADER] build=%s file=%s -> no header found\n", buildId, fileType)
 
 	return nil, nil
 }

@@ -465,8 +465,8 @@ func parseServiceAccountBase64(serviceAccount string) (*gcpServiceToken, error) 
 	return &sa, nil
 }
 
-func (s *gcpStorage) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte) (Range, error) {
-	return getFrame(ctx, s.rangeRead, s.GetDetails(), objectPath, offsetU, frameTable, decompress, buf)
+func (s *gcpStorage) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, onProgress func(totalWritten int64)) (Range, error) {
+	return getFrame(ctx, s.rangeRead, s.GetDetails(), objectPath, offsetU, frameTable, decompress, buf, onProgress)
 }
 
 func (s *gcpStorage) rangeRead(ctx context.Context, objectPath string, offset int64, length int) (io.ReadCloser, error) {
