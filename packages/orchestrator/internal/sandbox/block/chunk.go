@@ -33,6 +33,11 @@ const (
 
 	// decompressFetchTimeout is the maximum time a single frame/chunk fetch may take.
 	decompressFetchTimeout = 60 * time.Second
+
+	// defaultMinReadBatchSize is the floor for the read batch size when blockSize
+	// is very small (e.g. 4KB rootfs). The actual batch is max(blockSize, minReadBatchSize).
+	// This reduces syscall overhead and lock/notify frequency.
+	defaultMinReadBatchSize = 16 * 1024 // 16 KB
 )
 
 // ChunkerStorage is the storage interface needed by Chunker.
@@ -368,11 +373,12 @@ func (c *Chunker) runUncompressedFetch(ctx context.Context, s *fetchSession, key
 	defer reader.Close()
 
 	blockSize := c.cache.BlockSize()
+	readBatch := max(blockSize, defaultMinReadBatchSize)
 	var totalRead int64
 	var prevCompleted int64
 
 	for totalRead < s.chunkLen {
-		readEnd := min(totalRead+blockSize, s.chunkLen)
+		readEnd := min(totalRead+readBatch, s.chunkLen)
 		n, readErr := reader.Read(mmapSlice[totalRead:readEnd])
 		totalRead += int64(n)
 

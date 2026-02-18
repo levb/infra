@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 )
 
 // rangeWaiter represents a goroutine waiting for a byte range to become available.
@@ -48,7 +49,12 @@ type fetchSession struct {
 	waiters    []*rangeWaiter // sorted by endByte ascending
 	state      fetchState
 	fetchErr   error
-	bytesReady int64
+
+	// bytesReady is the byte count (from chunkOff) up to which all blocks
+	// are fully written and marked cached. Atomic so registerAndWait can do
+	// a lock-free fast-path check: bytesReady only increases, so a
+	// Load() >= endByte guarantees data availability without taking the mutex.
+	bytesReady atomic.Int64
 
 	// isCachedFn optionally checks if a range is already available from a
 	// persistent cache (e.g., mmap). This handles data cached by previous
@@ -80,6 +86,12 @@ func (s *fetchSession) registerAndWait(ctx context.Context, off, length int64) e
 		endByte = s.chunkLen
 	}
 
+	// Lock-free fast path: bytesReady only increases, so >= endByte
+	// guarantees data is available without taking the mutex.
+	if s.bytesReady.Load() >= endByte {
+		return nil
+	}
+
 	// Fast path: persistent cache from a previous session.
 	if s.isCachedFn != nil && s.isCachedFn(off, length) {
 		return nil
@@ -89,10 +101,6 @@ func (s *fetchSession) registerAndWait(ctx context.Context, off, length int64) e
 
 	if s.state == fetchStateDone {
 		s.mu.Unlock()
-		// Double-check persistent cache in case of races.
-		if s.isCachedFn != nil && s.isCachedFn(off, length) {
-			return nil
-		}
 
 		return nil // done means all data is available
 	}
@@ -100,7 +108,7 @@ func (s *fetchSession) registerAndWait(ctx context.Context, off, length int64) e
 	// Session errored — partial data may still be usable.
 	if s.state == fetchStateErrored {
 		fetchErr := s.fetchErr
-		ready := s.bytesReady
+		ready := s.bytesReady.Load()
 		s.mu.Unlock()
 
 		if ready >= endByte {
@@ -114,8 +122,8 @@ func (s *fetchSession) registerAndWait(ctx context.Context, off, length int64) e
 		return fmt.Errorf("fetch failed: %w", fetchErr)
 	}
 
-	// Already enough progress.
-	if s.bytesReady >= endByte {
+	// Re-check under lock (another goroutine may have advanced).
+	if s.bytesReady.Load() >= endByte {
 		s.mu.Unlock()
 
 		return nil
@@ -146,7 +154,7 @@ func (s *fetchSession) registerAndWait(ctx context.Context, off, length int64) e
 // Must be called from the fetch goroutine as data becomes available.
 func (s *fetchSession) advance(bytesReady int64) {
 	s.mu.Lock()
-	s.bytesReady = bytesReady
+	s.bytesReady.Store(bytesReady)
 	s.notifyWaiters(nil)
 	s.mu.Unlock()
 }
@@ -155,7 +163,7 @@ func (s *fetchSession) advance(bytesReady int64) {
 func (s *fetchSession) complete() {
 	s.mu.Lock()
 	s.state = fetchStateDone
-	s.bytesReady = s.chunkLen
+	s.bytesReady.Store(s.chunkLen)
 	s.notifyWaiters(nil)
 	s.mu.Unlock()
 }
@@ -176,10 +184,12 @@ func (s *fetchSession) fail(err error) {
 // In terminal states all remaining waiters are notified.
 // Must be called with s.mu held.
 func (s *fetchSession) notifyWaiters(sendErr error) {
+	ready := s.bytesReady.Load()
+
 	// Terminal: notify every remaining waiter.
 	if s.state != fetchStateRunning {
 		for _, w := range s.waiters {
-			if sendErr != nil && w.endByte > s.bytesReady {
+			if sendErr != nil && w.endByte > ready {
 				w.ch <- sendErr
 			} else {
 				w.ch <- nil
@@ -192,7 +202,7 @@ func (s *fetchSession) notifyWaiters(sendErr error) {
 
 	// Progress: pop satisfied waiters from the sorted front.
 	i := 0
-	for i < len(s.waiters) && s.waiters[i].endByte <= s.bytesReady {
+	for i < len(s.waiters) && s.waiters[i].endByte <= ready {
 		s.waiters[i].ch <- nil
 		i++
 	}
