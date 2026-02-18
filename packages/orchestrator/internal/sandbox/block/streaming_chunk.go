@@ -24,9 +24,9 @@ const (
 	// Acts as a safety net: if the upstream hangs, the goroutine won't live forever.
 	defaultFetchTimeout = 60 * time.Second
 
-	// minReadBatchSize is the floor for the read batch size when blockSize
+	// defaultMinReadBatchSize is the floor for the read batch size when blockSize
 	// is very small (e.g. 4KB rootfs). The actual batch is max(blockSize, minReadBatchSize).
-	minReadBatchSize = 16 * 1024 // 16 KB
+	defaultMinReadBatchSize = 16 * 1024 // 16 KB
 )
 
 type rangeWaiter struct {
@@ -151,10 +151,11 @@ func (s *fetchSession) notifyWaiters(sendErr error) {
 }
 
 type StreamingChunker struct {
-	upstream     storage.StreamingReader
-	cache        *Cache
-	metrics      metrics.Metrics
-	fetchTimeout time.Duration
+	upstream         storage.StreamingReader
+	cache            *Cache
+	metrics          metrics.Metrics
+	fetchTimeout     time.Duration
+	minReadBatchSize int64
 
 	size int64
 
@@ -167,19 +168,25 @@ func NewStreamingChunker(
 	upstream storage.StreamingReader,
 	cachePath string,
 	metrics metrics.Metrics,
+	minReadBatchSize int64,
 ) (*StreamingChunker, error) {
 	cache, err := NewCache(size, blockSize, cachePath, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file cache: %w", err)
 	}
 
+	if minReadBatchSize <= 0 {
+		minReadBatchSize = defaultMinReadBatchSize
+	}
+
 	return &StreamingChunker{
-		size:         size,
-		upstream:     upstream,
-		cache:        cache,
-		metrics:      metrics,
-		fetchTimeout: defaultFetchTimeout,
-		fetchMap:     make(map[int64]*fetchSession),
+		size:             size,
+		upstream:         upstream,
+		cache:            cache,
+		metrics:          metrics,
+		fetchTimeout:     defaultFetchTimeout,
+		minReadBatchSize: minReadBatchSize,
+		fetchMap:         make(map[int64]*fetchSession),
 	}, nil
 }
 
@@ -373,7 +380,7 @@ func (c *StreamingChunker) progressiveRead(ctx context.Context, s *fetchSession,
 	defer reader.Close()
 
 	blockSize := c.cache.BlockSize()
-	readBatch := max(blockSize, minReadBatchSize)
+	readBatch := max(blockSize, c.minReadBatchSize)
 	var totalRead int64
 	var prevCompleted int64
 

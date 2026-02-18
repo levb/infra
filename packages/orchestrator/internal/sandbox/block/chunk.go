@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
+	featureflags "github.com/e2b-dev/infra/packages/shared/pkg/feature-flags"
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
@@ -24,6 +25,40 @@ type Chunker interface {
 	WriteTo(ctx context.Context, w io.Writer) (int64, error)
 	Close() error
 	FileSize() (int64, error)
+}
+
+// NewChunker creates a Chunker based on the chunker-config feature flag.
+// It reads the flag internally so callers don't need to parse flag values.
+func NewChunker(
+	ctx context.Context,
+	featureFlags *featureflags.Client,
+	size, blockSize int64,
+	upstream storage.Seekable,
+	cachePath string,
+	metrics metrics.Metrics,
+) (Chunker, error) {
+	useStreaming, minReadBatchSizeKB := getChunkerConfig(ctx, featureFlags)
+
+	if useStreaming {
+		return NewStreamingChunker(size, blockSize, upstream, cachePath, metrics, int64(minReadBatchSizeKB)*1024)
+	}
+
+	return NewFullFetchChunker(size, blockSize, upstream, cachePath, metrics)
+}
+
+// getChunkerConfig fetches the chunker-config feature flag and returns the parsed values.
+func getChunkerConfig(ctx context.Context, ff *featureflags.Client) (useStreaming bool, minReadBatchSizeKB int) {
+	value := ff.JSONFlag(ctx, featureflags.ChunkerConfigFlag)
+
+	if v := value.GetByKey("useStreaming"); v.IsDefined() {
+		useStreaming = v.BoolValue()
+	}
+
+	if v := value.GetByKey("minReadBatchSizeKB"); v.IsDefined() {
+		minReadBatchSizeKB = v.IntValue()
+	}
+
+	return useStreaming, minReadBatchSizeKB
 }
 
 type FullFetchChunker struct {

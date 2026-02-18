@@ -92,12 +92,8 @@ var (
 	BestOfKTooManyStartingFlag          = newBoolFlag("best-of-k-too-many-starting", false)
 	EdgeProvidedSandboxMetricsFlag      = newBoolFlag("edge-provided-sandbox-metrics", false)
 	CreateStorageCacheSpansFlag         = newBoolFlag("create-storage-cache-spans", env.IsDevelopment())
-	// NOTE: Flipping this flag has no effect on chunkers already created for
-	// cached templates. A service restart (redeploy) is required for the
-	// change to take effect.
-	UseStreamingChunkerFlag = newBoolFlag("use-streaming-chunker", false)
-	SandboxAutoResumeFlag   = newBoolFlag("sandbox-auto-resume", env.IsDevelopment())
-	PersistentVolumesFlag   = newBoolFlag("can-use-persistent-volumes", env.IsDevelopment())
+	SandboxAutoResumeFlag               = newBoolFlag("sandbox-auto-resume", env.IsDevelopment())
+	PersistentVolumesFlag               = newBoolFlag("can-use-persistent-volumes", env.IsDevelopment())
 )
 
 type IntFlag struct {
@@ -242,3 +238,15 @@ func GetTrackedTemplatesSet(ctx context.Context, ff *Client) map[string]struct{}
 
 	return result
 }
+
+// ChunkerConfigFlag is a JSON flag controlling the chunker implementation and tuning.
+//
+// NOTE: Changing this flag has no effect on chunkers already created for
+// cached templates. A service restart (redeploy) is required for the
+// change to take effect.
+//
+// JSON format: {"useStreaming": false, "minReadBatchSizeKB": 16}
+var ChunkerConfigFlag = newJSONFlag("chunker-config", ldvalue.FromJSONMarshal(map[string]any{
+	"useStreaming":       false,
+	"minReadBatchSizeKB": 16,
+}))
