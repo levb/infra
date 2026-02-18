@@ -185,7 +185,7 @@ func (_c *MockSeekable_ReadAt_Call) RunAndReturn(run func(ctx context.Context, b
 }
 
 // Size provides a mock function for the type MockSeekable
-func (_mock *MockSeekable) Size(ctx context.Context) (int64, int64, error) {
+func (_mock *MockSeekable) Size(ctx context.Context) (int64, error) {
 	ret := _mock.Called(ctx)
 
 	if len(ret) == 0 {
@@ -193,9 +193,8 @@ func (_mock *MockSeekable) Size(ctx context.Context) (int64, int64, error) {
 	}
 
 	var r0 int64
-	var r1 int64
-	var r2 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context) (int64, int64, error)); ok {
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) (int64, error)); ok {
 		return returnFunc(ctx)
 	}
 	if returnFunc, ok := ret.Get(0).(func(context.Context) int64); ok {
@@ -203,17 +202,12 @@ func (_mock *MockSeekable) Size(ctx context.Context) (int64, int64, error) {
 	} else {
 		r0 = ret.Get(0).(int64)
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context) int64); ok {
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
 		r1 = returnFunc(ctx)
 	} else {
-		r1 = ret.Get(1).(int64)
+		r1 = ret.Error(1)
 	}
-	if returnFunc, ok := ret.Get(2).(func(context.Context) error); ok {
-		r2 = returnFunc(ctx)
-	} else {
-		r2 = ret.Error(2)
-	}
-	return r0, r1, r2
+	return r0, r1
 }
 
 // MockSeekable_Size_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Size'
@@ -240,12 +234,12 @@ func (_c *MockSeekable_Size_Call) Run(run func(ctx context.Context)) *MockSeekab
 	return _c
 }
 
-func (_c *MockSeekable_Size_Call) Return(uncompressed int64, compressed int64, err error) *MockSeekable_Size_Call {
-	_c.Call.Return(uncompressed, compressed, err)
+func (_c *MockSeekable_Size_Call) Return(size int64, err error) *MockSeekable_Size_Call {
+	_c.Call.Return(size, err)
 	return _c
 }
 
-func (_c *MockSeekable_Size_Call) RunAndReturn(run func(ctx context.Context) (int64, int64, error)) *MockSeekable_Size_Call {
+func (_c *MockSeekable_Size_Call) RunAndReturn(run func(ctx context.Context) (int64, error)) *MockSeekable_Size_Call {
 	_c.Call.Return(run)
 	return _c
 }

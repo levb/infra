@@ -129,24 +129,24 @@ func makeCompressedTestData(t *testing.T, dataSize, frameSize int, delay time.Du
 
 type chunkerTestCase struct {
 	name       string
-	newChunker func(t *testing.T, data []byte, delay time.Duration) (Chunker, *storage.FrameTable)
+	newChunker func(t *testing.T, data []byte, delay time.Duration) (*Chunker, *storage.FrameTable)
 }
 
 func allChunkerTestCases() []chunkerTestCase {
 	return []chunkerTestCase{
 		{
-			name: "DecompressMMapChunker_Compressed",
-			newChunker: func(t *testing.T, data []byte, delay time.Duration) (Chunker, *storage.FrameTable) {
+			name: "Chunker_Compressed",
+			newChunker: func(t *testing.T, data []byte, delay time.Duration) (*Chunker, *storage.FrameTable) {
 				t.Helper()
 				_, ft, getter := makeCompressedTestData(t, len(data), testFrameSize, delay)
 				// Use the getter's uncompressed data as the source truth
 				// since compression may round-trip differently.
 				copy(data, getter.uncompressed)
-				c, err := NewDecompressMMapChunker(
+				c, err := NewChunker(
 					AssetInfo{
 						BasePath: "test-object",
 						Size:     int64(len(data)),
-						LZ4Size:  1, // non-zero = exists
+						HasLZ4:   true,
 					},
 					testBlockSize,
 					getter,
@@ -160,11 +160,11 @@ func allChunkerTestCases() []chunkerTestCase {
 			},
 		},
 		{
-			name: "DecompressMMapChunker_Uncompressed",
-			newChunker: func(t *testing.T, data []byte, delay time.Duration) (Chunker, *storage.FrameTable) {
+			name: "Chunker_Uncompressed",
+			newChunker: func(t *testing.T, data []byte, delay time.Duration) (*Chunker, *storage.FrameTable) {
 				t.Helper()
 				upstream := &slowUpstream{data: data, blockSize: testBlockSize, delay: delay}
-				c, err := NewDecompressMMapChunker(
+				c, err := NewChunker(
 					AssetInfo{
 						BasePath: "test-object",
 						Size:     int64(len(data)),
@@ -420,11 +420,11 @@ func TestChunker_FetchDedup(t *testing.T) {
 		_, ft, getter := makeCompressedTestData(t, testFileSize, testFrameSize, 10*time.Millisecond)
 		copy(data, getter.uncompressed)
 
-		chunker, err := NewDecompressMMapChunker(
+		chunker, err := NewChunker(
 			AssetInfo{
 				BasePath: "test-object",
 				Size:     int64(len(data)),
-				LZ4Size:  1,
+				HasLZ4:   true,
 			},
 			testBlockSize,
 			getter,
@@ -472,17 +472,17 @@ func (t *testUncompressedStorage) OpenSeekable(_ context.Context, _ string, _ st
 // instance correctly serves both compressed and uncompressed callers, sharing
 // the mmap cache across modes. If region X is fetched via compressed path,
 // a subsequent uncompressed request for region X is served from cache (no fetch).
-func TestDecompressMMapChunker_DualMode_SharedCache(t *testing.T) {
+func TestChunker_DualMode_SharedCache(t *testing.T) {
 	t.Parallel()
 
 	data, ft, getter := makeCompressedTestData(t, testFileSize, testFrameSize, 0)
 
 	// Create ONE chunker with both compressed and uncompressed assets available.
-	chunker, err := NewDecompressMMapChunker(
+	chunker, err := NewChunker(
 		AssetInfo{
 			BasePath: "test-object",
 			Size:     int64(len(data)),
-			LZ4Size:  1, // non-zero = compressed exists
+			HasLZ4:   true,
 		},
 		testBlockSize,
 		getter,

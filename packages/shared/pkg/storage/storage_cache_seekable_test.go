@@ -32,12 +32,12 @@ func TestCachedFileObjectProvider_Size(t *testing.T) {
 		const expectedSize int64 = 1024
 
 		inner := storagemocks.NewMockSeekable(t)
-		inner.EXPECT().Size(mock.Anything).Return(expectedSize, int64(0), nil)
+		inner.EXPECT().Size(mock.Anything).Return(expectedSize, nil)
 
 		c := cachedSeekable{path: t.TempDir(), inner: inner, tracer: noopTracer}
 
 		// first call will write to cache
-		size, _, err := c.Size(t.Context())
+		size, err := c.Size(t.Context())
 		require.NoError(t, err)
 		assert.Equal(t, expectedSize, size)
 
@@ -47,7 +47,7 @@ func TestCachedFileObjectProvider_Size(t *testing.T) {
 		// second call must come from cache
 		c.inner = nil
 
-		size, _, err = c.Size(t.Context())
+		size, err = c.Size(t.Context())
 		require.NoError(t, err)
 		assert.Equal(t, expectedSize, size)
 	})
@@ -91,7 +91,7 @@ func TestCachedFileObjectProvider_WriteFromFileSystem(t *testing.T) {
 		c.inner = nil
 
 		// size should be cached
-		size, _, err := c.Size(t.Context())
+		size, err := c.Size(t.Context())
 		require.NoError(t, err)
 		assert.Equal(t, int64(len(data)), size)
 

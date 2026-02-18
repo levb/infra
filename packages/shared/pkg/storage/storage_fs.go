@@ -161,27 +161,27 @@ func (o *fsObject) Exists(_ context.Context) (bool, error) {
 	return err == nil, err
 }
 
-func (o *fsObject) Size(_ context.Context) (uncompressed, compressed int64, err error) {
+func (o *fsObject) Size(_ context.Context) (int64, error) {
 	handle, err := o.getHandle(true)
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
 	defer handle.Close()
 
 	fileInfo, err := handle.Stat()
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
 
 	// Check for .uncompressed-size sidecar file
 	sidecarPath := o.path + ".uncompressed-size"
 	if sidecarData, sidecarErr := os.ReadFile(sidecarPath); sidecarErr == nil {
 		if parsed, parseErr := strconv.ParseInt(strings.TrimSpace(string(sidecarData)), 10, 64); parseErr == nil {
-			return parsed, fileInfo.Size(), nil
+			return parsed, nil
 		}
 	}
 
-	return fileInfo.Size(), 0, nil
+	return fileInfo.Size(), nil
 }
 
 func (o *fsObject) Delete(_ context.Context) error {

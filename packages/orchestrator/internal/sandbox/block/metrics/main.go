@@ -9,10 +9,9 @@ import (
 )
 
 const (
-	orchestratorBlockSlices          = "orchestrator.blocks.slices"
-	orchestratorBlockChunksFetch     = "orchestrator.blocks.chunks.fetch"
-	orchestratorBlockChunksStore     = "orchestrator.blocks.chunks.store"
-	orchestratorBlockChunkerCreation = "orchestrator.blocks.chunker.creation"
+	orchestratorBlockSlices      = "orchestrator.blocks.slices"
+	orchestratorBlockChunksFetch = "orchestrator.blocks.chunks.fetch"
+	orchestratorBlockChunksStore = "orchestrator.blocks.chunks.store"
 )
 
 type Metrics struct {
@@ -24,9 +23,6 @@ type Metrics struct {
 
 	// WriteChunksMetric is used to measure performance of writing chunks to disk.
 	WriteChunksTimerFactory telemetry.TimerFactory
-
-	// ChunkerCreations counts chunker instantiations by type and compression mode.
-	ChunkerCreations metric.Int64Counter
 }
 
 func NewMetrics(meterProvider metric.MeterProvider) (Metrics, error) {
@@ -60,13 +56,6 @@ func NewMetrics(meterProvider metric.MeterProvider) (Metrics, error) {
 		"Total cache writes",
 	); err != nil {
 		return m, fmt.Errorf("failed to get stored chunks metric: %w", err)
-	}
-
-	if m.ChunkerCreations, err = blocksMeter.Int64Counter(
-		orchestratorBlockChunkerCreation,
-		metric.WithDescription("Number of chunker instantiations"),
-	); err != nil {
-		return m, fmt.Errorf("failed to create chunker creation counter: %w", err)
 	}
 
 	return m, nil

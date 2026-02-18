@@ -47,7 +47,7 @@ func TemplateRootfs(ctx context.Context, buildID string) (*BuildDevice, *Cleaner
 			return nil, &cleaner, fmt.Errorf("failed to open object: %w", err)
 		}
 
-		size, _, err := r.Size(ctx)
+		size, err := r.Size(ctx)
 		if err != nil {
 			return nil, &cleaner, fmt.Errorf("failed to get object size: %w", err)
 		}

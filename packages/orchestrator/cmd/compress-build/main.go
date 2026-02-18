@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/cmd/internal/cmdutil"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
@@ -306,10 +307,15 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 
 	if cfg.verbose {
 		frameIdx := 0
+		lastFrameTime := time.Now()
 		opts.OnFrameReady = func(offset storage.FrameOffset, size storage.FrameSize, _ []byte) error {
-			fmt.Printf("    frame[%d] U=%#x+%#x C=%#x+%#x (ratio=%.2fx)\n",
+			now := time.Now()
+			elapsed := now.Sub(lastFrameTime)
+			mbps := float64(size.U) / elapsed.Seconds() / (1024 * 1024)
+			lastFrameTime = now
+			fmt.Printf("    frame[%d] U=%#x+%#x C=%#x+%#x ratio=%.2fx %v %.0f MB/s\n",
 				frameIdx, offset.U, size.U, offset.C, size.C,
-				float64(size.U)/float64(size.C))
+				float64(size.U)/float64(size.C), elapsed.Round(time.Millisecond), mbps)
 			frameIdx++
 
 			return nil
@@ -333,10 +339,12 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 		cfg.compType, cfg.level, cfg.frameSize, cfg.maxFrameU)
 
 	// Compress
+	compressStart := time.Now()
 	frameTable, err := storage.CompressStream(ctx, sectionReader, opts, uploader)
 	if err != nil {
 		return fmt.Errorf("compress: %w", err)
 	}
+	compressElapsed := time.Since(compressStart)
 
 	// Print compression stats
 	var totalU, totalC int64
@@ -346,8 +354,10 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 	}
 	ratio := float64(totalU) / float64(totalC)
 	savings := 100.0 * (1.0 - float64(totalC)/float64(totalU))
-	fmt.Printf("  Compressed: %d frames, U=%#x C=%#x ratio=%.2fx savings=%.1f%%\n",
-		len(frameTable.Frames), totalU, totalC, ratio, savings)
+	mbps := float64(totalU) / compressElapsed.Seconds() / (1024 * 1024)
+	fmt.Printf("  Compressed: %d frames, U=%#x C=%#x ratio=%.2fx savings=%.1f%% in %v (%.0f MB/s)\n",
+		len(frameTable.Frames), totalU, totalC, ratio, savings,
+		compressElapsed.Round(time.Millisecond), mbps)
 
 	// Apply frame tables to header (current build's own data)
 	h.AddFrames(frameTable)

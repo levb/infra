@@ -262,7 +262,7 @@ func (o *awsObject) ReadAt(ctx context.Context, buff []byte, off int64) (n int, 
 	return n, err
 }
 
-func (o *awsObject) Size(ctx context.Context) (uncompressed, compressed int64, err error) {
+func (o *awsObject) Size(ctx context.Context) (int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, awsOperationTimeout)
 	defer cancel()
 
@@ -271,24 +271,24 @@ func (o *awsObject) Size(ctx context.Context) (uncompressed, compressed int64, e
 		var nsk *types.NoSuchKey
 		var nfd *types.NotFound
 		if errors.As(err, &nsk) || errors.As(err, &nfd) {
-			return 0, 0, ErrObjectNotExist
+			return 0, ErrObjectNotExist
 		}
 
-		return 0, 0, err
+		return 0, err
 	}
 
 	if v, ok := resp.Metadata["uncompressed-size"]; ok {
 		parsed, parseErr := strconv.ParseInt(v, 10, 64)
 		if parseErr == nil {
-			return parsed, *resp.ContentLength, nil
+			return parsed, nil
 		}
 	}
 
-	return *resp.ContentLength, 0, nil
+	return *resp.ContentLength, nil
 }
 
 func (o *awsObject) Exists(ctx context.Context) (bool, error) {
-	_, _, err := o.Size(ctx)
+	_, err := o.Size(ctx)
 
 	return err == nil, ignoreNotExists(err)
 }

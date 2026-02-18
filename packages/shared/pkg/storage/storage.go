@@ -158,10 +158,9 @@ type Blob interface {
 type SeekableReader interface {
 	// Random slice access, off and buffer length must be aligned to block size
 	ReadAt(ctx context.Context, buffer []byte, off int64) (int, error)
-	// Size returns the uncompressed and compressed sizes.
-	// For uncompressed objects: (fileSize, 0, nil).
-	// For compressed objects with metadata: (uncompressedSize, compressedFileSize, nil).
-	Size(ctx context.Context) (uncompressed, compressed int64, err error)
+	// Size returns the uncompressed size of the object.
+	// For compressed objects with metadata, this returns the original uncompressed size.
+	Size(ctx context.Context) (int64, error)
 }
 
 // StreamingReader supports progressive reads via a streaming range reader.

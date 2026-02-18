@@ -66,6 +66,6 @@ func (z *ZeroDevice) Close() error {
 	return nil
 }
 
-func (z *ZeroDevice) Size(_ context.Context) (int64, int64, error) {
-	return z.size, 0, nil
+func (z *ZeroDevice) Size(_ context.Context) (int64, error) {
+	return z.size, nil
 }

@@ -169,7 +169,7 @@ func NewStorage(
 			return nil, err
 		}
 
-		size, _, err := object.Size(ctx)
+		size, err := object.Size(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get object size: %w", err)
 		}
@@ -217,8 +217,8 @@ func (d *Storage) ReadAt(ctx context.Context, p []byte, off int64) (int, error) 
 	return d.source.ReadAt(ctx, p, off)
 }
 
-func (d *Storage) Size(_ context.Context) (int64, int64, error) {
-	return int64(d.header.Metadata.Size), 0, nil
+func (d *Storage) Size(_ context.Context) (int64, error) {
+	return int64(d.header.Metadata.Size), nil
 }
 
 func (d *Storage) BlockSize() int64 {

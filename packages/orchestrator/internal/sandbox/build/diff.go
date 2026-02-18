@@ -6,6 +6,7 @@ import (
 	"io"
 	"path/filepath"
 
+	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block"
 	"github.com/e2b-dev/infra/packages/shared/pkg/id"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
@@ -25,13 +26,12 @@ const (
 
 type Diff interface {
 	io.Closer
+	block.FramedReader // ReadAt(ctx, p, off, ft) + Slice(ctx, off, length, ft)
 	CacheKey() DiffStoreKey
 	CachePath() (string, error)
 	FileSize() (int64, error)
 	BlockSize() int64
 	Init(ctx context.Context) error
-	ReadAt(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error)
-	Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error)
 }
 
 type NoDiff struct{}

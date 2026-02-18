@@ -5,9 +5,6 @@ import (
 	"fmt"
 	"sync"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
-
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block"
 	blockmetrics "github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
@@ -19,7 +16,7 @@ func storagePath(buildId string, diffType DiffType) string {
 }
 
 type StorageDiff struct {
-	chunker           *utils.SetOnce[block.Chunker]
+	chunker           *utils.SetOnce[*block.Chunker]
 	cachePath         string
 	cacheKey          DiffStoreKey
 	storagePath       string
@@ -60,7 +57,7 @@ func newStorageDiff(
 		storagePath:       sp,
 		storageObjectType: sot,
 		cachePath:         cachePath,
-		chunker:           utils.NewSetOnce[block.Chunker](),
+		chunker:           utils.NewSetOnce[*block.Chunker](),
 		blockSize:         blockSize,
 		metrics:           metrics,
 		persistence:       persistence,
@@ -95,24 +92,20 @@ func (b *StorageDiff) Init(ctx context.Context) error {
 	return b.chunker.SetValue(chunker)
 }
 
-// createChunker probes for available assets and creates a DecompressMMapChunker.
-func (b *StorageDiff) createChunker(ctx context.Context) (block.Chunker, error) {
+// createChunker probes for available assets and creates a Chunker.
+func (b *StorageDiff) createChunker(ctx context.Context) (*block.Chunker, error) {
 	assets := b.probeAssets(ctx)
 	if assets.Size == 0 {
 		return nil, fmt.Errorf("no asset found for %s (no uncompressed or compressed with metadata)", b.storagePath)
 	}
 
-	b.metrics.ChunkerCreations.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("chunker", block.ChunkerTypeDecompressMMap),
-	))
-
-	return block.NewDecompressMMapChunker(assets, b.blockSize, b.persistence, b.storageObjectType, b.cachePath, b.metrics)
+	return block.NewChunker(assets, b.blockSize, b.persistence, b.storageObjectType, b.cachePath, b.metrics)
 }
 
 // probeAssets probes for uncompressed and compressed asset variants in parallel.
-// For compressed objects, Size() returns (uncompressedSize, compressedSize, err)
-// via GCS/S3 metadata, allowing us to derive the mmap allocation size even
-// when the uncompressed object doesn't exist.
+// For compressed objects, Size() returns the uncompressed size from metadata,
+// allowing us to derive the mmap allocation size even when the uncompressed
+// object doesn't exist.
 func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 	assets := block.AssetInfo{BasePath: b.storagePath}
 
@@ -133,7 +126,7 @@ func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 			return
 		}
 
-		uncompSize, _, err := obj.Size(ctx)
+		uncompSize, err := obj.Size(ctx)
 		if err != nil {
 			return
 		}
@@ -151,12 +144,12 @@ func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 			return
 		}
 
-		uncompSize, compSize, err := obj.Size(ctx)
+		uncompSize, err := obj.Size(ctx)
 		if err != nil {
 			return
 		}
 
-		assets.LZ4Size = compSize
+		assets.HasLZ4 = true
 		lz4UncompSize = uncompSize
 	}()
 
@@ -169,12 +162,12 @@ func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 			return
 		}
 
-		uncompSize, compSize, err := obj.Size(ctx)
+		uncompSize, err := obj.Size(ctx)
 		if err != nil {
 			return
 		}
 
-		assets.ZstSize = compSize
+		assets.HasZst = true
 		zstUncompSize = uncompSize
 	}()
 
@@ -234,10 +227,8 @@ func (b *StorageDiff) FileSize() (int64, error) {
 	return c.FileSize()
 }
 
-func (b *StorageDiff) Size(_ context.Context) (int64, int64, error) {
-	s, err := b.FileSize()
-
-	return s, 0, err
+func (b *StorageDiff) Size(_ context.Context) (int64, error) {
+	return b.FileSize()
 }
 
 func (b *StorageDiff) BlockSize() int64 {
