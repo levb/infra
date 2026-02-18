@@ -257,7 +257,7 @@ func (c *DecompressMMapChunker) runCompressedFetch(ctx context.Context, s *fetch
 	// Fetch + decompress in one pipelined call. The onProgress callback
 	// publishes decompressed blocks to the mmap cache and wakes waiters
 	// as each MemoryChunkSize-aligned block completes.
-	compressedPath := c.assets.BasePath + ft.CompressionType.Suffix()
+	compressedPath := storage.V4DataPath(c.assets.BasePath, ft.CompressionType)
 	var prevTotal int64
 	onProgress := func(totalWritten int64) {
 		newBytes := totalWritten - prevTotal

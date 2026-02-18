@@ -122,7 +122,7 @@ func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 		zstUncompSize int64
 	)
 
-	// Probe all 3 paths in parallel: uncompressed, .lz4, .zst
+	// Probe all 3 paths in parallel: uncompressed, v4.*.lz4, v4.*.zst
 	wg.Add(3)
 
 	go func() {
@@ -145,7 +145,7 @@ func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 	go func() {
 		defer wg.Done()
 
-		lz4Path := b.storagePath + storage.CompressionLZ4.Suffix()
+		lz4Path := storage.V4DataPath(b.storagePath, storage.CompressionLZ4)
 		obj, err := b.persistence.OpenSeekable(ctx, lz4Path, b.storageObjectType)
 		if err != nil {
 			return
@@ -163,7 +163,7 @@ func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 	go func() {
 		defer wg.Done()
 
-		zstPath := b.storagePath + storage.CompressionZstd.Suffix()
+		zstPath := storage.V4DataPath(b.storagePath, storage.CompressionZstd)
 		obj, err := b.persistence.OpenSeekable(ctx, zstPath, b.storageObjectType)
 		if err != nil {
 			return

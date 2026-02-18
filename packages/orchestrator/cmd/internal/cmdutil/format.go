@@ -9,6 +9,44 @@ import (
 
 const NilUUID = "00000000-0000-0000-0000-000000000000"
 
+// ANSI color codes for compression ratio visualization.
+const (
+	colorReset  = "\033[0m"
+	colorRed    = "\033[91m" // bright red — incompressible
+	colorYellow = "\033[33m" // yellow — poor
+	colorGreen  = "\033[32m" // green — good
+	colorCyan   = "\033[36m" // cyan — very sparse
+	colorBlue   = "\033[34m" // blue — nearly empty
+)
+
+// RatioColor returns an ANSI color code for a compression ratio value.
+func RatioColor(ratio float64) string {
+	switch {
+	case ratio < 1.5:
+		return colorRed
+	case ratio < 2.5:
+		return colorYellow
+	case ratio < 4:
+		return colorReset
+	case ratio < 8:
+		return colorGreen
+	case ratio < 50:
+		return colorCyan
+	default:
+		return colorBlue
+	}
+}
+
+// FormatRatio returns a color-coded ratio string (4 chars wide).
+func FormatRatio(ratio float64) string {
+	color := RatioColor(ratio)
+	if ratio >= 100 {
+		return fmt.Sprintf("%s%4.0f%s", color, ratio, colorReset)
+	}
+
+	return fmt.Sprintf("%s%4.1f%s", color, ratio, colorReset)
+}
+
 // FormatMappingWithCompression returns mapping info with compression details.
 func FormatMappingWithCompression(mapping *header.BuildMap, blockSize uint64) string {
 	base := mapping.Format(blockSize)
@@ -26,8 +64,8 @@ func FormatMappingWithCompression(mapping *header.BuildMap, blockSize uint64) st
 
 	ratio := float64(totalU) / float64(totalC)
 
-	return fmt.Sprintf("%s [%s: %d frames, U=%#x C=%#x ratio=%.2fx]",
-		base, ft.CompressionType.String(), len(ft.Frames), totalU, totalC, ratio)
+	return fmt.Sprintf("%s [%s: %d frames, U=%#x C=%#x ratio=%s]",
+		base, ft.CompressionType.String(), len(ft.Frames), totalU, totalC, FormatRatio(ratio))
 }
 
 // PrintCompressionSummary prints compression statistics for a header.
@@ -39,7 +77,7 @@ func PrintCompressionSummary(h *header.Header) {
 	type buildStats struct {
 		uncompressedBytes int64
 		compressedBytes   int64
-		frames            int
+		frames            []storage.FrameSize
 		compressed        bool
 	}
 	buildCompressionStats := make(map[string]*buildStats)
@@ -64,9 +102,9 @@ func PrintCompressionSummary(h *header.Header) {
 				totalCompressedBytes += int64(frame.C)
 				stats.uncompressedBytes += int64(frame.U)
 				stats.compressedBytes += int64(frame.C)
+				stats.frames = append(stats.frames, frame)
 			}
 			totalFrames += len(mapping.FrameTable.Frames)
-			stats.frames += len(mapping.FrameTable.Frames)
 		} else {
 			uncompressedMappings++
 			totalUncompressedBytes += int64(mapping.Length)
@@ -91,7 +129,7 @@ func PrintCompressionSummary(h *header.Header) {
 		fmt.Printf("Total frames:      %d\n", totalFrames)
 		fmt.Printf("Uncompressed size: %#x (%.2f MiB)\n", totalUncompressedBytes, float64(totalUncompressedBytes)/1024/1024)
 		fmt.Printf("Compressed size:   %#x (%.2f MiB)\n", totalCompressedBytes, float64(totalCompressedBytes)/1024/1024)
-		fmt.Printf("Compression ratio: %.2fx (%.1f%% space savings)\n", ratio, savings)
+		fmt.Printf("Compression ratio: %s (%.1f%% space savings)\n", FormatRatio(ratio), savings)
 	} else {
 		fmt.Printf("All mappings are uncompressed\n")
 	}
@@ -115,12 +153,45 @@ func PrintCompressionSummary(h *header.Header) {
 				label += " (parent)"
 			}
 
-			if stats.compressed {
-				ratio := float64(stats.uncompressedBytes) / float64(stats.compressedBytes)
-				fmt.Printf("  %s: %d frames, U=%#x C=%#x (%.2fx)\n",
-					label, stats.frames, stats.uncompressedBytes, stats.compressedBytes, ratio)
-			} else {
+			if !stats.compressed {
 				fmt.Printf("  %s: uncompressed, %#x\n", label, stats.uncompressedBytes)
+
+				continue
+			}
+
+			ratio := float64(stats.uncompressedBytes) / float64(stats.compressedBytes)
+			fmt.Printf("  %s: %d frames, U=%#x C=%#x (%s)\n",
+				label, len(stats.frames), stats.uncompressedBytes, stats.compressedBytes, FormatRatio(ratio))
+
+			// Frame stats
+			if len(stats.frames) > 0 {
+				minC, maxC := stats.frames[0].C, stats.frames[0].C
+				for _, f := range stats.frames[1:] {
+					minC = min(minC, f.C)
+					maxC = max(maxC, f.C)
+				}
+				avgC := stats.compressedBytes / int64(len(stats.frames))
+				fmt.Printf("    Frame sizes: avg %d KiB, min %d KiB, max %d KiB\n",
+					avgC/1024, minC/1024, maxC/1024)
+			}
+
+			// Ratio matrix: 16 frames per row
+			if len(stats.frames) > 1 {
+				const cols = 16
+				fmt.Printf("\n    Ratio matrix (%d per row):\n", cols)
+				for row := 0; row < len(stats.frames); row += cols {
+					end := row + cols
+					if end > len(stats.frames) {
+						end = len(stats.frames)
+					}
+					fmt.Printf("    %4d: ", row)
+					for _, f := range stats.frames[row:end] {
+						r := float64(f.U) / float64(f.C)
+						fmt.Printf(" %s", FormatRatio(r))
+					}
+					fmt.Println()
+				}
+				fmt.Println()
 			}
 		}
 	}
