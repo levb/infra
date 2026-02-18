@@ -22,7 +22,7 @@ const (
 	testFileSize  = testFrameSize * 4
 )
 
-// testFrameGetter implements ChunkerStorage for testing.
+// testFrameGetter implements Storage for testing.
 // It serves both compressed frames (via GetFrame) and uncompressed data (via OpenSeekable).
 type testFrameGetter struct {
 	uncompressed []byte
@@ -35,7 +35,7 @@ type testFrameGetter struct {
 	uncompressedFetchCount atomic.Int64
 }
 
-// OpenSeekable implements ChunkerStorage for testing. Returns a slowUpstream for uncompressed reads.
+// OpenSeekable implements Storage for testing. Returns a slowUpstream for uncompressed reads.
 func (g *testFrameGetter) OpenSeekable(_ context.Context, _ string, _ storage.SeekableObjectType) (storage.Seekable, error) {
 	g.uncompressedFetchCount.Add(1)
 
@@ -454,7 +454,7 @@ func TestChunker_FetchDedup(t *testing.T) {
 	})
 }
 
-// testUncompressedStorage implements ChunkerStorage for uncompressed-only tests.
+// testUncompressedStorage implements Storage for uncompressed-only tests.
 // GetFrame always fails; only OpenSeekable is supported.
 type testUncompressedStorage struct {
 	upstream *slowUpstream

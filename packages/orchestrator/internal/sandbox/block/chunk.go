@@ -14,78 +14,19 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
-const (
-	pullType       = "pull-type"
-	pullTypeLocal  = "local"
-	pullTypeRemote = "remote"
-
-	failureReason = "failure-reason"
-
-	failureTypeLocalRead      = "local-read"
-	failureTypeLocalReadAgain = "local-read-again"
-	failureTypeRemoteRead     = "remote-read"
-	failureTypeCacheFetch     = "cache-fetch"
-
-	chunkerTypeAttr = "chunker"
-	compressedAttr  = "compressed"
-
-	ChunkerTypeDecompressMMap = "decompress-mmap"
-
-	// decompressFetchTimeout is the maximum time a single frame/chunk fetch may take.
-	decompressFetchTimeout = 60 * time.Second
-)
-
-// ChunkerStorage is the storage interface needed by Chunker.
-// It combines frame-based access (for compressed data) with seekable object
-// access (for uncompressed streaming). StorageProvider satisfies this.
-type ChunkerStorage interface {
+// Storage combines frame-based access (compressed) with seekable access
+// (uncompressed). StorageProvider satisfies this.
+type Storage interface {
 	storage.FrameGetter
 	OpenSeekable(ctx context.Context, path string, seekableObjectType storage.SeekableObjectType) (storage.Seekable, error)
 }
 
-// AssetInfo describes the availability of uncompressed and compressed variants
-// of a build artifact.
-// Compressed paths are derived from BasePath + compression suffix when needed.
-type AssetInfo struct {
-	BasePath        string // uncompressed path (e.g., "build-123/memfile")
-	Size            int64  // uncompressed size (from either source)
-	HasUncompressed bool   // true if the uncompressed object exists in storage
-	HasLZ4          bool   // true if a .lz4 compressed variant exists
-	HasZst          bool   // true if a .zst compressed variant exists
-}
-
-// HasCompressed returns whether a compressed asset matching the FT's
-// compression type exists.
-func (a *AssetInfo) HasCompressed(ft *storage.FrameTable) bool {
-	if ft == nil {
-		return false
-	}
-
-	switch ft.CompressionType {
-	case storage.CompressionLZ4:
-		return a.HasLZ4
-	case storage.CompressionZstd:
-		return a.HasZst
-	default:
-		return false
-	}
-}
-
-// Chunker fetches data from storage into a memory-mapped cache file.
-//
-// A single instance serves both compressed and uncompressed callers for the same
-// build artifact. The routing decision is made per-Slice based on the FrameTable
-// and asset availability:
-//
-//   - Compressed (ft != nil AND matching compressed asset exists): fetches
-//     compressed frames, decompresses them progressively into mmap.
-//   - Uncompressed (ft == nil OR no compressed asset): streams raw bytes from
-//     storage via OpenRangeReader into mmap.
-//
-// Either way, decompressed bytes end up in the shared mmap cache and are
-// available to all subsequent callers regardless of compression mode.
+// Chunker fetches data from storage into a shared mmap cache.
+// Each GetBlock routes to compressed or uncompressed fetch based on the
+// FrameTable and AssetInfo. Either way data lands decompressed in mmap,
+// so subsequent reads are always local cache hits.
 type Chunker struct {
-	storage    ChunkerStorage
+	storage    Storage
 	assets     AssetInfo
 	objectType storage.SeekableObjectType
 
@@ -96,22 +37,13 @@ type Chunker struct {
 	fetchMap map[fetchKey]*fetchSession
 }
 
-// fetchKey distinguishes compressed and uncompressed fetch sessions that
-// may have overlapping U-space offsets.
-type fetchKey struct {
-	offset     int64
-	compressed bool
-}
-
 var _ Reader = (*Chunker)(nil)
 
-// NewChunker creates a chunker that stores decompressed/fetched data
-// in an mmap cache. Works for both compressed and uncompressed data.
-// The AssetInfo describes which variants (uncompressed, .lz4, .zst) are available.
+// NewChunker creates a Chunker backed by a new mmap cache at cachePath.
 func NewChunker(
 	assets AssetInfo,
 	blockSize int64,
-	s ChunkerStorage,
+	s Storage,
 	objectType storage.SeekableObjectType,
 	cachePath string,
 	m metrics.Metrics,
@@ -161,7 +93,8 @@ func (c *Chunker) GetBlock(ctx context.Context, off, length int64, ft *storage.F
 	// Fast path: already in mmap cache.
 	b, err := c.cache.Slice(off, length)
 	if err == nil {
-		timer.Success(ctx, length, attribute.String(pullType, pullTypeLocal))
+		timer.Success(ctx, length,
+			attribute.String(pullType, pullTypeLocal))
 
 		return b, nil
 	}
@@ -174,7 +107,6 @@ func (c *Chunker) GetBlock(ctx context.Context, off, length int64, ft *storage.F
 		return nil, fmt.Errorf("failed read from cache at offset %d: %w", off, err)
 	}
 
-	// Determine session parameters based on compressed vs uncompressed.
 	var (
 		session    *fetchSession
 		sessionErr error
@@ -211,7 +143,8 @@ func (c *Chunker) GetBlock(ctx context.Context, off, length int64, ft *storage.F
 		return nil, fmt.Errorf("failed to read from cache after fetch at %d-%d: %w", off, off+length, cacheErr)
 	}
 
-	timer.Success(ctx, length, attribute.String(pullType, pullTypeRemote))
+	timer.Success(ctx, length,
+		attribute.String(pullType, pullTypeRemote))
 
 	return b, nil
 }
@@ -258,7 +191,6 @@ func (c *Chunker) runCompressedFetch(ctx context.Context, s *fetchSession, key f
 		attribute.Bool(compressedAttr, true),
 	)
 
-	// Get mmap region for the decompressed frame.
 	mmapSlice, releaseLock, err := c.cache.addressBytes(frameStarts.U, int64(frameSize.U))
 	if err != nil {
 		fetchSW.Failure(ctx, int64(frameSize.C),
@@ -270,9 +202,7 @@ func (c *Chunker) runCompressedFetch(ctx context.Context, s *fetchSession, key f
 	}
 	defer releaseLock()
 
-	// Fetch + decompress in one pipelined call. The onProgress callback
-	// publishes decompressed blocks to the mmap cache and wakes waiters
-	// as each MemoryChunkSize-aligned block completes.
+	// onProgress publishes blocks to cache and wakes waiters as they complete.
 	compressedPath := storage.V4DataPath(c.assets.BasePath, ft.CompressionType)
 	var prevTotal int64
 	onProgress := func(totalWritten int64) {
@@ -293,8 +223,6 @@ func (c *Chunker) runCompressedFetch(ctx context.Context, s *fetchSession, key f
 	}
 
 	fetchSW.Success(ctx, int64(frameSize.U))
-	// Remove from fetchMap BEFORE notifying waiters, so new requests
-	// arriving after wakeup don't find the stale session.
 	c.removeFetchSession(key)
 	s.complete()
 }
@@ -333,7 +261,6 @@ func (c *Chunker) runUncompressedFetch(ctx context.Context, s *fetchSession, key
 		}
 	}()
 
-	// Open a seekable object to get a range reader.
 	obj, err := c.storage.OpenSeekable(ctx, c.assets.BasePath, c.objectType)
 	if err != nil {
 		c.removeFetchSession(key)
@@ -404,8 +331,6 @@ func (c *Chunker) runUncompressedFetch(ctx context.Context, s *fetchSession, key
 	}
 
 	fetchTimer.Success(ctx, s.chunkLen)
-	// Remove from fetchMap BEFORE notifying waiters, so new requests
-	// arriving after wakeup don't find the stale session.
 	c.removeFetchSession(key)
 	s.complete()
 }
@@ -425,3 +350,58 @@ func (c *Chunker) Close() error {
 func (c *Chunker) FileSize() (int64, error) {
 	return c.cache.FileSize()
 }
+
+// fetchKey distinguishes compressed and uncompressed fetch sessions that
+// may have overlapping U-space offsets.
+type fetchKey struct {
+	offset     int64
+	compressed bool
+}
+
+// AssetInfo describes which storage variants exist for a build artifact.
+type AssetInfo struct {
+	BasePath        string // uncompressed path (e.g., "build-123/memfile")
+	Size            int64  // uncompressed size (from either source)
+	HasUncompressed bool   // true if the uncompressed object exists in storage
+	HasLZ4          bool   // true if a .lz4 compressed variant exists
+	HasZst          bool   // true if a .zst compressed variant exists
+}
+
+// HasCompressed reports whether a compressed asset matching ft's type exists.
+func (a *AssetInfo) HasCompressed(ft *storage.FrameTable) bool {
+	if ft == nil {
+		return false
+	}
+
+	switch ft.CompressionType {
+	case storage.CompressionLZ4:
+		return a.HasLZ4
+	case storage.CompressionZstd:
+		return a.HasZst
+	default:
+		return false
+	}
+}
+
+// --- Metric attribute constants ---
+
+const (
+	pullType       = "pull-type"
+	pullTypeLocal  = "local"
+	pullTypeRemote = "remote"
+
+	failureReason = "failure-reason"
+
+	failureTypeLocalRead      = "local-read"
+	failureTypeLocalReadAgain = "local-read-again"
+	failureTypeRemoteRead     = "remote-read"
+	failureTypeCacheFetch     = "cache-fetch"
+
+	chunkerTypeAttr = "chunker"
+	compressedAttr  = "compressed"
+
+	ChunkerTypeDecompressMMap = "decompress-mmap"
+
+	// decompressFetchTimeout is the maximum time a single frame/chunk fetch may take.
+	decompressFetchTimeout = 60 * time.Second
+)
