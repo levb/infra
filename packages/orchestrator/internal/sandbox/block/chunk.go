@@ -103,7 +103,7 @@ type fetchKey struct {
 	compressed bool
 }
 
-var _ FramedReader = (*Chunker)(nil)
+var _ Reader = (*Chunker)(nil)
 
 // NewChunker creates a chunker that stores decompressed/fetched data
 // in an mmap cache. Works for both compressed and uncompressed data.
@@ -131,19 +131,19 @@ func NewChunker(
 	}, nil
 }
 
-func (c *Chunker) ReadAt(ctx context.Context, b []byte, off int64, ft *storage.FrameTable) (int, error) {
-	slice, err := c.Slice(ctx, off, int64(len(b)), ft)
+func (c *Chunker) ReadBlock(ctx context.Context, b []byte, off int64, ft *storage.FrameTable) (int, error) {
+	slice, err := c.GetBlock(ctx, off, int64(len(b)), ft)
 	if err != nil {
-		return 0, fmt.Errorf("failed to slice at %d-%d: %w", off, off+int64(len(b)), err)
+		return 0, fmt.Errorf("failed to get block at %d-%d: %w", off, off+int64(len(b)), err)
 	}
 
 	return copy(b, slice), nil
 }
 
-// Slice reads data at the given uncompressed offset.
+// GetBlock reads data at the given uncompressed offset.
 // If ft is non-nil and a matching compressed asset exists, fetches via compressed path.
 // Otherwise falls back to uncompressed streaming.
-func (c *Chunker) Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
+func (c *Chunker) GetBlock(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
 	if off < 0 || length < 0 {
 		return nil, fmt.Errorf("invalid slice params: off=%d length=%d", off, length)
 	}

@@ -82,7 +82,7 @@ func (b *File) ReadAt(ctx context.Context, p []byte, off int64) (n int, err erro
 
 		ft := mappedToBuild.FrameTable
 
-		buildN, err := mappedBuild.ReadAt(ctx,
+		buildN, err := mappedBuild.ReadBlock(ctx,
 			p[n:int64(n)+readLength],
 			int64(mappedToBuild.Offset),
 			ft,
@@ -114,7 +114,7 @@ func (b *File) Slice(ctx context.Context, off, _ int64) ([]byte, error) {
 		return nil, fmt.Errorf("failed to get build: %w", err)
 	}
 
-	return build.Slice(ctx, int64(mappedBuild.Offset), int64(b.header.Metadata.BlockSize), mappedBuild.FrameTable)
+	return build.GetBlock(ctx, int64(mappedBuild.Offset), int64(b.header.Metadata.BlockSize), mappedBuild.FrameTable)
 }
 
 func (b *File) getBuild(ctx context.Context, buildID uuid.UUID) (Diff, error) {

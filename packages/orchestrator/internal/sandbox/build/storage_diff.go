@@ -45,8 +45,8 @@ func newStorageDiff(
 	metrics blockmetrics.Metrics,
 	persistence storage.StorageProvider,
 ) (*StorageDiff, error) {
-	sp := storagePath(buildId, diffType)
-	sot, ok := storageObjectType(diffType)
+	storagePath := storagePath(buildId, diffType)
+	storageObjectType, ok := storageObjectType(diffType)
 	if !ok {
 		return nil, UnknownDiffTypeError{diffType}
 	}
@@ -54,8 +54,8 @@ func newStorageDiff(
 	cachePath := GenerateDiffCachePath(basePath, buildId, diffType)
 
 	return &StorageDiff{
-		storagePath:       sp,
-		storageObjectType: sot,
+		storagePath:       storagePath,
+		storageObjectType: storageObjectType,
 		cachePath:         cachePath,
 		chunker:           utils.NewSetOnce[*block.Chunker](),
 		blockSize:         blockSize,
@@ -195,22 +195,22 @@ func (b *StorageDiff) Close() error {
 	return c.Close()
 }
 
-func (b *StorageDiff) ReadAt(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error) {
+func (b *StorageDiff) ReadBlock(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error) {
 	chunker, err := b.chunker.Wait()
 	if err != nil {
 		return 0, err
 	}
 
-	return chunker.ReadAt(ctx, p, off, ft)
+	return chunker.ReadBlock(ctx, p, off, ft)
 }
 
-func (b *StorageDiff) Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
+func (b *StorageDiff) GetBlock(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
 	chunker, err := b.chunker.Wait()
 	if err != nil {
 		return nil, err
 	}
 
-	return chunker.Slice(ctx, off, length, ft)
+	return chunker.GetBlock(ctx, off, length, ft)
 }
 
 // The local file might not be synced.
@@ -225,10 +225,6 @@ func (b *StorageDiff) FileSize() (int64, error) {
 	}
 
 	return c.FileSize()
-}
-
-func (b *StorageDiff) Size(_ context.Context) (int64, error) {
-	return b.FileSize()
 }
 
 func (b *StorageDiff) BlockSize() int64 {

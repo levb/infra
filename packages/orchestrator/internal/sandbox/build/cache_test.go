@@ -518,7 +518,7 @@ func (d *concurrentTestDiff) Init(_ context.Context) error {
 	return d.data.SetValue(d.testData)
 }
 
-func (d *concurrentTestDiff) ReadAt(_ context.Context, p []byte, off int64, _ *storage.FrameTable) (int, error) {
+func (d *concurrentTestDiff) ReadBlock(_ context.Context, p []byte, off int64, _ *storage.FrameTable) (int, error) {
 	data, err := d.data.Wait()
 	if err != nil {
 		return 0, err
@@ -527,7 +527,7 @@ func (d *concurrentTestDiff) ReadAt(_ context.Context, p []byte, off int64, _ *s
 	return copy(p, data[off:]), nil
 }
 
-func (d *concurrentTestDiff) Slice(_ context.Context, off, length int64, _ *storage.FrameTable) ([]byte, error) {
+func (d *concurrentTestDiff) GetBlock(_ context.Context, off, length int64, _ *storage.FrameTable) ([]byte, error) {
 	data, err := d.data.Wait()
 	if err != nil {
 		return nil, err
@@ -586,7 +586,7 @@ func TestDiffStoreConcurrentInitAndAccess(t *testing.T) {
 
 			// Read — blocks until the winning goroutine's Init completes.
 			buf := make([]byte, 256)
-			n, err := result.ReadAt(t.Context(), buf, 0, nil)
+			n, err := result.ReadBlock(t.Context(), buf, 0, nil)
 			assert.NoError(t, err)
 			assert.Equal(t, 256, n)
 			assert.Equal(t, testData[:256], buf)

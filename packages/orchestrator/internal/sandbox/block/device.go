@@ -15,10 +15,10 @@ func (BytesNotAvailableError) Error() string {
 	return "The requested bytes are not available on the device"
 }
 
-// FramedReader reads data using an optional FrameTable for compression awareness.
-type FramedReader interface {
-	ReadAt(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error)
-	Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error)
+// Reader reads data using an optional FrameTable for compression awareness.
+type Reader interface {
+	ReadBlock(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error)
+	GetBlock(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error)
 }
 
 // Slicer is the block-level slice interface used by ReadonlyDevice.

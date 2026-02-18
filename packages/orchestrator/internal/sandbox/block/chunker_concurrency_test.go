@@ -203,7 +203,7 @@ func TestChunker_ConcurrentSameOffset(t *testing.T) {
 
 			for i := range numGoroutines {
 				eg.Go(func() error {
-					slice, err := chunker.Slice(t.Context(), off, readLen, ft)
+					slice, err := chunker.GetBlock(t.Context(), off, readLen, ft)
 					if err != nil {
 						return fmt.Errorf("goroutine %d: %w", i, err)
 					}
@@ -252,7 +252,7 @@ func TestChunker_ConcurrentDifferentOffsets(t *testing.T) {
 
 			for i := range numGoroutines {
 				eg.Go(func() error {
-					slice, err := chunker.Slice(t.Context(), offsets[i], readLen, ft)
+					slice, err := chunker.GetBlock(t.Context(), offsets[i], readLen, ft)
 					if err != nil {
 						return fmt.Errorf("goroutine %d (off=%d): %w", i, offsets[i], err)
 					}
@@ -284,7 +284,7 @@ func TestChunker_ConcurrentMixed(t *testing.T) {
 			chunker, ft := tc.newChunker(t, data, 50*time.Microsecond)
 			defer chunker.Close()
 
-			// Mix of ReadAt, Slice, and repeated same-offset reads.
+			// Mix of ReadBlock, GetBlock, and repeated same-offset reads.
 			const numGoroutines = 15
 			readLen := int64(testBlockSize)
 
@@ -294,23 +294,23 @@ func TestChunker_ConcurrentMixed(t *testing.T) {
 				off := int64((i % 4) * testBlockSize) // 4 distinct offsets
 				eg.Go(func() error {
 					if i%2 == 0 {
-						// Slice path
-						slice, err := chunker.Slice(t.Context(), off, readLen, ft)
+						// GetBlock path
+						slice, err := chunker.GetBlock(t.Context(), off, readLen, ft)
 						if err != nil {
-							return fmt.Errorf("goroutine %d Slice: %w", i, err)
+							return fmt.Errorf("goroutine %d GetBlock: %w", i, err)
 						}
 						if !bytes.Equal(data[off:off+readLen], slice) {
-							return fmt.Errorf("goroutine %d Slice: data mismatch at off=%d", i, off)
+							return fmt.Errorf("goroutine %d GetBlock: data mismatch at off=%d", i, off)
 						}
 					} else {
-						// ReadAt path
+						// ReadBlock path
 						buf := make([]byte, readLen)
-						n, err := chunker.ReadAt(t.Context(), buf, off, ft)
+						n, err := chunker.ReadBlock(t.Context(), buf, off, ft)
 						if err != nil {
-							return fmt.Errorf("goroutine %d ReadAt: %w", i, err)
+							return fmt.Errorf("goroutine %d ReadBlock: %w", i, err)
 						}
 						if !bytes.Equal(data[off:off+int64(n)], buf[:n]) {
-							return fmt.Errorf("goroutine %d ReadAt: data mismatch at off=%d", i, off)
+							return fmt.Errorf("goroutine %d ReadBlock: data mismatch at off=%d", i, off)
 						}
 					}
 
@@ -344,7 +344,7 @@ func TestChunker_ConcurrentStress(t *testing.T) {
 				eg.Go(func() error {
 					for j := range opsPerGoroutine {
 						off := int64(((i*opsPerGoroutine)+j)%(len(data)/int(readLen))) * readLen
-						slice, err := chunker.Slice(t.Context(), off, readLen, ft)
+						slice, err := chunker.GetBlock(t.Context(), off, readLen, ft)
 						if err != nil {
 							return fmt.Errorf("goroutine %d op %d: %w", i, j, err)
 						}
@@ -362,10 +362,10 @@ func TestChunker_ConcurrentStress(t *testing.T) {
 	}
 }
 
-func TestChunker_ConcurrentReadAt_CrossFrame(t *testing.T) {
+func TestChunker_ConcurrentReadBlock_CrossFrame(t *testing.T) {
 	t.Parallel()
 
-	// Test cross-frame ReadAt for both compressed and uncompressed modes.
+	// Test cross-frame ReadBlock for both compressed and uncompressed modes.
 	for _, tc := range allChunkerTestCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -388,7 +388,7 @@ func TestChunker_ConcurrentReadAt_CrossFrame(t *testing.T) {
 				off := int64(0) // all read from start
 				eg.Go(func() error {
 					buf := make([]byte, readLen)
-					n, err := chunker.ReadAt(t.Context(), buf, off, ft)
+					n, err := chunker.ReadBlock(t.Context(), buf, off, ft)
 					if err != nil {
 						return fmt.Errorf("goroutine %d: %w", i, err)
 					}
@@ -441,7 +441,7 @@ func TestChunker_FetchDedup(t *testing.T) {
 		for range numGoroutines {
 			eg.Go(func() error {
 				// All request offset 0 (same frame).
-				_, err := chunker.Slice(t.Context(), 0, testBlockSize, ft)
+				_, err := chunker.GetBlock(t.Context(), 0, testBlockSize, ft)
 
 				return err
 			})
@@ -496,7 +496,7 @@ func TestChunker_DualMode_SharedCache(t *testing.T) {
 	readLen := int64(testBlockSize)
 
 	// --- Phase 1: Compressed caller fetches frame 0 ---
-	slice1, err := chunker.Slice(t.Context(), 0, readLen, ft)
+	slice1, err := chunker.GetBlock(t.Context(), 0, readLen, ft)
 	require.NoError(t, err)
 	assert.Equal(t, data[0:readLen], slice1, "compressed read: data mismatch at offset 0")
 
@@ -505,7 +505,7 @@ func TestChunker_DualMode_SharedCache(t *testing.T) {
 	assert.Equal(t, int64(1), compressedFetches, "expected 1 compressed fetch for frame 0")
 
 	// --- Phase 2: Uncompressed caller reads offset 0 — should be served from cache ---
-	slice2, err := chunker.Slice(t.Context(), 0, readLen, nil)
+	slice2, err := chunker.GetBlock(t.Context(), 0, readLen, nil)
 	require.NoError(t, err)
 	assert.Equal(t, data[0:readLen], slice2, "uncompressed read from cache: data mismatch at offset 0")
 
@@ -517,7 +517,7 @@ func TestChunker_DualMode_SharedCache(t *testing.T) {
 
 	// --- Phase 3: Uncompressed caller reads a new region (frame 1) ---
 	frame1Off := int64(testFrameSize) // start of frame 1
-	slice3, err := chunker.Slice(t.Context(), frame1Off, readLen, nil)
+	slice3, err := chunker.GetBlock(t.Context(), frame1Off, readLen, nil)
 	require.NoError(t, err)
 	assert.Equal(t, data[frame1Off:frame1Off+readLen], slice3,
 		"uncompressed read: data mismatch at frame 1")
@@ -528,7 +528,7 @@ func TestChunker_DualMode_SharedCache(t *testing.T) {
 	uncompressedFetches = getter.uncompressedFetchCount.Load()
 
 	// --- Phase 4: Compressed caller reads frame 1 — should be served from cache ---
-	slice4, err := chunker.Slice(t.Context(), frame1Off, readLen, ft)
+	slice4, err := chunker.GetBlock(t.Context(), frame1Off, readLen, ft)
 	require.NoError(t, err)
 	assert.Equal(t, data[frame1Off:frame1Off+readLen], slice4,
 		"compressed read from cache: data mismatch at frame 1")
