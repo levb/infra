@@ -14,10 +14,12 @@ const (
 
 	HeaderSuffix = ".header"
 
-	// CompressedHeaderSuffix is the object-path suffix for compressed headers.
-	// Hardcoded to LZ4 — always the fastest to decompress, independent of
-	// the data compression algorithm.
-	CompressedHeaderSuffix = ".compressed.header.lz4"
+	// v4Prefix is prepended to the base filename for all v4 compressed assets.
+	v4Prefix = "v4."
+
+	// v4HeaderSuffix is the suffix after the base filename for v4 headers.
+	// V4 headers are always LZ4-block-compressed.
+	v4HeaderSuffix = ".header.lz4"
 )
 
 type TemplateFiles struct {
@@ -57,33 +59,41 @@ func (t TemplateFiles) StorageMetadataPath() string {
 	return fmt.Sprintf("%s/%s", t.StorageDir(), MetadataName)
 }
 
-// Path returns the storage path for a given file name within this build.
-func (t TemplateFiles) Path(fileName string) string {
-	return fmt.Sprintf("%s/%s", t.StorageDir(), fileName)
-}
-
 // HeaderPath returns the header storage path for a given file name within this build.
 func (t TemplateFiles) HeaderPath(fileName string) string {
 	return fmt.Sprintf("%s/%s%s", t.StorageDir(), fileName, HeaderSuffix)
 }
 
-const V4HeaderSuffix = ".header.v4"
-
-// CompressedPath returns the compressed data path for a given file name.
-// Write-side only — the read side derives the suffix from the frame table.
-func (t TemplateFiles) CompressedPath(fileName string) string {
-	return fmt.Sprintf("%s/%s%s", t.StorageDir(), fileName, DefaultCompressionOptions.CompressionType.Suffix())
+// V4DataName returns the v4 data filename: "v4.memfile.lz4".
+func V4DataName(fileName string, ct CompressionType) string {
+	return v4Prefix + fileName + ct.Suffix()
 }
 
-// CompressedHeaderPath returns "{buildId}/{fileName}.compressed.header.lz4".
+// V4HeaderName returns the v4 header filename: "v4.memfile.header.lz4".
+func V4HeaderName(fileName string) string {
+	return v4Prefix + fileName + v4HeaderSuffix
+}
+
+// V4DataPath transforms a base object path (e.g. "buildId/memfile") into
+// the v4 compressed data path (e.g. "buildId/v4.memfile.lz4").
+func V4DataPath(basePath string, ct CompressionType) string {
+	dir, file := splitPath(basePath)
+	return dir + V4DataName(file, ct)
+}
+
+// splitPath splits "dir/file" into ("dir/", "file"). If there's no slash,
+// dir is empty.
+func splitPath(p string) (dir, file string) {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '/' {
+			return p[:i+1], p[i+1:]
+		}
+	}
+
+	return "", p
+}
+
+// CompressedHeaderPath returns the v4 header path: "{buildId}/v4.{fileName}.header.lz4".
 func (t TemplateFiles) CompressedHeaderPath(fileName string) string {
-	return fmt.Sprintf("%s/%s%s", t.StorageDir(), fileName, CompressedHeaderSuffix)
+	return fmt.Sprintf("%s/%s", t.StorageDir(), V4HeaderName(fileName))
 }
-
-// V4HeaderPath returns the v4 header path for a given file name.
-func (t TemplateFiles) V4HeaderPath(fileName string) string {
-	return fmt.Sprintf("%s/%s%s", t.StorageDir(), fileName, V4HeaderSuffix)
-}
-
-// DefaultCompressionSuffix is the file extension for compressed assets.
-var DefaultCompressionSuffix = CompressionLZ4.Suffix()

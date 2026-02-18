@@ -230,10 +230,11 @@ func ReadFileIfExists(ctx context.Context, storagePath, buildID, filename string
 	return data, source, nil
 }
 
-// ReadCompressedHeader reads a .compressed.header.lz4 file, LZ4-block-decompresses it, and deserializes.
-// Returns nil, "", nil when the compressed header doesn't exist.
+// ReadCompressedHeader reads a v4 header file (e.g. "v4.memfile.header.lz4"),
+// LZ4-block-decompresses it, and deserializes.
+// Returns nil, "", nil when the v4 header doesn't exist.
 func ReadCompressedHeader(ctx context.Context, storagePath, buildID, artifactName string) (*header.Header, string, error) {
-	filename := artifactName + storage.CompressedHeaderSuffix
+	filename := storage.V4HeaderName(artifactName)
 	data, source, err := ReadFileIfExists(ctx, storagePath, buildID, filename)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to read compressed header: %w", err)

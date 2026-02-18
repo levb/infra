@@ -27,7 +27,7 @@ func main() {
 	storagePath := flag.String("storage", ".local-build", "storage: local path or gs://bucket")
 	memfile := flag.Bool("memfile", false, "inspect memfile artifact")
 	rootfs := flag.Bool("rootfs", false, "inspect rootfs artifact")
-	compressed := flag.Bool("compressed", false, "read compressed header (.compressed.header.lz4)")
+	compressed := flag.Bool("compressed", false, "read v4 compressed header (.v4.header)")
 	summary := flag.Bool("summary", false, "show only metadata + summary (skip per-mapping listing)")
 	listFiles := flag.Bool("list-files", false, "list all files for this build with existence and size info")
 	data := flag.Bool("data", false, "inspect data blocks (default: header only)")
@@ -554,8 +554,8 @@ func validateCompressedFrames(ctx context.Context, storagePath, artifactName str
 	fmt.Printf("  Validating %d unique compressed frames across %d builds\n", totalFrames, len(buildFrames))
 
 	for bid, frames := range buildFrames {
-		// Open compressed file (e.g., memfile.lz4)
-		compressedFile := artifactName + frames[0].ct.Suffix()
+		// Open compressed file (e.g., v4.memfile.lz4)
+		compressedFile := storage.V4DataName(artifactName, frames[0].ct)
 		compReader, compSize, _, err := cmdutil.OpenDataFile(ctx, storagePath, bid, compressedFile)
 		if err != nil {
 			return fmt.Errorf("build %s: failed to open %s: %w", bid, compressedFile, err)

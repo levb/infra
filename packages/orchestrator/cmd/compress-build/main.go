@@ -175,7 +175,7 @@ func compressBuild(ctx context.Context, cfg *compressConfig, buildID string, vis
 				// Check if the dependency already has compressed data.
 				alreadyCompressed := true
 				for _, a := range artifacts {
-					compressedFile := a.file + cfg.compType.Suffix()
+					compressedFile := storage.V4DataName(a.file, cfg.compType)
 					info := cmdutil.ProbeFile(ctx, cfg.storagePath, depBuild, compressedFile)
 					if !info.Exists {
 						alreadyCompressed = false
@@ -262,7 +262,7 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 		h.Metadata.Version, len(h.Mapping), h.Metadata.Size)
 
 	// Check if compressed data already exists
-	compressedFile := file + cfg.compType.Suffix()
+	compressedFile := storage.V4DataName(file, cfg.compType)
 	existing := cmdutil.ProbeFile(ctx, cfg.storagePath, buildID, compressedFile)
 	if existing.Exists {
 		fmt.Printf("  Compressed file already exists: %s (%#x), skipping\n", existing.Path, existing.Size)
@@ -270,8 +270,8 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 		return nil
 	}
 
-	// Check if compressed header already exists
-	compressedHeaderFile := file + storage.CompressedHeaderSuffix
+	// Check if v4 header already exists
+	compressedHeaderFile := storage.V4HeaderName(file)
 	existingHeader := cmdutil.ProbeFile(ctx, cfg.storagePath, buildID, compressedHeaderFile)
 	if existingHeader.Exists {
 		fmt.Printf("  Compressed header already exists: %s (%#x), skipping\n", existingHeader.Path, existingHeader.Size)
@@ -313,9 +313,10 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 			elapsed := now.Sub(lastFrameTime)
 			mbps := float64(size.U) / elapsed.Seconds() / (1024 * 1024)
 			lastFrameTime = now
-			fmt.Printf("    frame[%d] U=%#x+%#x C=%#x+%#x ratio=%.2fx %v %.0f MB/s\n",
+			ratio := float64(size.U) / float64(size.C)
+			fmt.Printf("    frame[%d] U=%#x+%#x C=%#x+%#x ratio=%s %v %.0f MB/s\n",
 				frameIdx, offset.U, size.U, offset.C, size.C,
-				float64(size.U)/float64(size.C), elapsed.Round(time.Millisecond), mbps)
+				cmdutil.FormatRatio(ratio), elapsed.Round(time.Millisecond), mbps)
 			frameIdx++
 
 			return nil
@@ -355,8 +356,8 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 	ratio := float64(totalU) / float64(totalC)
 	savings := 100.0 * (1.0 - float64(totalC)/float64(totalU))
 	mbps := float64(totalU) / compressElapsed.Seconds() / (1024 * 1024)
-	fmt.Printf("  Compressed: %d frames, U=%#x C=%#x ratio=%.2fx savings=%.1f%% in %v (%.0f MB/s)\n",
-		len(frameTable.Frames), totalU, totalC, ratio, savings,
+	fmt.Printf("  Compressed: %d frames, U=%#x C=%#x ratio=%s savings=%.1f%% in %v (%.0f MB/s)\n",
+		len(frameTable.Frames), totalU, totalC, cmdutil.FormatRatio(ratio), savings,
 		compressElapsed.Round(time.Millisecond), mbps)
 
 	// Apply frame tables to header (current build's own data)
@@ -442,7 +443,7 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 //
 // When a derived template references base build data, the header mappings for
 // those base builds initially have nil FrameTable. If the base build was
-// previously compressed (has a .compressed.header.lz4), we read its FrameTable
+// previously compressed (has a v4 header), we read its FrameTable
 // and apply it to the matching mappings in this header. This ensures the
 // orchestrator creates compressed chunkers for ALL layers, not just the current build.
 func propagateDependencyFrames(ctx context.Context, storagePath string, h *header.Header, artifactFile string) error {
