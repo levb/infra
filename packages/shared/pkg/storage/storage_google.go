@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -204,12 +205,12 @@ func (o *gcpObject) Delete(ctx context.Context) error {
 }
 
 func (o *gcpObject) Exists(ctx context.Context) (bool, error) {
-	_, err := o.Size(ctx)
+	_, _, err := o.Size(ctx)
 
 	return err == nil, ignoreNotExists(err)
 }
 
-func (o *gcpObject) Size(ctx context.Context) (int64, error) {
+func (o *gcpObject) Size(ctx context.Context) (uncompressed, compressed int64, err error) {
 	timer := googleReadTimerFactory.Begin(attribute.String(gcsOperationAttr, gcsOperationAttrSize))
 
 	ctx, cancel := context.WithTimeout(ctx, googleOperationTimeout)
@@ -221,15 +222,22 @@ func (o *gcpObject) Size(ctx context.Context) (int64, error) {
 
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			// use ours instead of theirs
-			return 0, fmt.Errorf("failed to get GCS object (%q) attributes: %w", o.path, ErrObjectNotExist)
+			return 0, 0, fmt.Errorf("failed to get GCS object (%q) attributes: %w", o.path, ErrObjectNotExist)
 		}
 
-		return 0, fmt.Errorf("failed to get GCS object (%q) attributes: %w", o.path, err)
+		return 0, 0, fmt.Errorf("failed to get GCS object (%q) attributes: %w", o.path, err)
 	}
 
 	timer.Success(ctx, 0)
 
-	return attrs.Size, nil
+	if v, ok := attrs.Metadata["uncompressed-size"]; ok {
+		parsed, parseErr := strconv.ParseInt(v, 10, 64)
+		if parseErr == nil {
+			return parsed, attrs.Size, nil
+		}
+	}
+
+	return attrs.Size, 0, nil
 }
 
 func (o *gcpObject) OpenRangeReader(ctx context.Context, off, length int64) (io.ReadCloser, error) {

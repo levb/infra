@@ -31,10 +31,11 @@ type ChunkerStorage interface {
 // of a build artifact. Non-zero size means the asset exists.
 // Compressed paths are derived from BasePath + compression suffix when needed.
 type AssetInfo struct {
-	BasePath string // uncompressed path (e.g., "build-123/memfile")
-	Size     int64  // uncompressed size (0 = doesn't exist)
-	LZ4Size  int64  // compressed .lz4 size (0 = doesn't exist)
-	ZstSize  int64  // compressed .zst size (0 = doesn't exist)
+	BasePath        string // uncompressed path (e.g., "build-123/memfile")
+	Size            int64  // uncompressed size (from either source)
+	HasUncompressed bool   // true if the uncompressed object exists in storage
+	LZ4Size         int64  // compressed .lz4 file size (0 = doesn't exist)
+	ZstSize         int64  // compressed .zst file size (0 = doesn't exist)
 }
 
 // HasCompressed returns whether a compressed asset matching the FT's

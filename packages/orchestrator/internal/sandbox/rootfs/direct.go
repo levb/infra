@@ -41,7 +41,7 @@ func NewDirectProvider(ctx context.Context, rootfs block.ReadonlyDevice, path st
 	}
 	defer f.Close()
 
-	size, err := rootfs.Size(ctx)
+	size, _, err := rootfs.Size(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("error getting size: %w", err)
 	}

@@ -26,7 +26,7 @@ func FormatMappingWithCompression(mapping *header.BuildMap, blockSize uint64) st
 
 	ratio := float64(totalU) / float64(totalC)
 
-	return fmt.Sprintf("%s [%s: %d frames, U=%d C=%d ratio=%.2fx]",
+	return fmt.Sprintf("%s [%s: %d frames, U=%#x C=%#x ratio=%.2fx]",
 		base, ft.CompressionType.String(), len(ft.Frames), totalU, totalC, ratio)
 }
 
@@ -89,8 +89,8 @@ func PrintCompressionSummary(h *header.Header) {
 		ratio := float64(totalUncompressedBytes) / float64(totalCompressedBytes)
 		savings := 100.0 * (1.0 - float64(totalCompressedBytes)/float64(totalUncompressedBytes))
 		fmt.Printf("Total frames:      %d\n", totalFrames)
-		fmt.Printf("Uncompressed size: %d B (%.2f MiB)\n", totalUncompressedBytes, float64(totalUncompressedBytes)/1024/1024)
-		fmt.Printf("Compressed size:   %d B (%.2f MiB)\n", totalCompressedBytes, float64(totalCompressedBytes)/1024/1024)
+		fmt.Printf("Uncompressed size: %#x (%.2f MiB)\n", totalUncompressedBytes, float64(totalUncompressedBytes)/1024/1024)
+		fmt.Printf("Compressed size:   %#x (%.2f MiB)\n", totalCompressedBytes, float64(totalCompressedBytes)/1024/1024)
 		fmt.Printf("Compression ratio: %.2fx (%.1f%% space savings)\n", ratio, savings)
 	} else {
 		fmt.Printf("All mappings are uncompressed\n")
@@ -117,10 +117,10 @@ func PrintCompressionSummary(h *header.Header) {
 
 			if stats.compressed {
 				ratio := float64(stats.uncompressedBytes) / float64(stats.compressedBytes)
-				fmt.Printf("  %s: %d frames, U=%d C=%d (%.2fx)\n",
+				fmt.Printf("  %s: %d frames, U=%#x C=%#x (%.2fx)\n",
 					label, stats.frames, stats.uncompressedBytes, stats.compressedBytes, ratio)
 			} else {
-				fmt.Printf("  %s: uncompressed, %d B\n", label, stats.uncompressedBytes)
+				fmt.Printf("  %s: uncompressed, %#x\n", label, stats.uncompressedBytes)
 			}
 		}
 	}

@@ -270,7 +270,7 @@ func (f *Factory) CreateSandbox(
 		return nil, fmt.Errorf("failed to get memfile: %w", err)
 	}
 
-	memfileSize, err := memfile.Size(ctx)
+	memfileSize, _, err := memfile.Size(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get memfile size: %w", err)
 	}

@@ -71,7 +71,7 @@ func (d *DirectPathMount) Open(ctx context.Context) (retDeviceIndex uint32, err 
 
 	telemetry.ReportEvent(ctx, "opening direct path mount")
 
-	size, err := d.Backend.Size(ctx)
+	size, _, err := d.Backend.Size(ctx)
 	if err != nil {
 		return math.MaxUint32, err
 	}

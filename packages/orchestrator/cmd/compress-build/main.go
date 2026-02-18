@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/cmd/internal/cmdutil"
@@ -59,8 +60,10 @@ type compressConfig struct {
 	compType    storage.CompressionType
 	level       int
 	frameSize   int
+	maxFrameU   int
 	dryRun      bool
 	recursive   bool
+	verbose     bool
 }
 
 func main() {
@@ -70,8 +73,10 @@ func main() {
 	compression := flag.String("compression", "lz4", "compression type: lz4 or zstd")
 	level := flag.Int("level", storage.DefaultCompressionOptions.Level, "compression level (0=default)")
 	frameSize := flag.Int("frame-size", storage.DefaultCompressionOptions.TargetFrameSize, "target compressed frame size in bytes")
+	maxFrameU := flag.Int("max-frame-u", storage.DefaultMaxFrameUncompressedSize, "max uncompressed bytes per frame")
 	dryRun := flag.Bool("dry-run", false, "show what would be done without making changes")
 	recursive := flag.Bool("recursive", false, "recursively compress dependencies (referenced builds)")
+	verbose := flag.Bool("v", false, "verbose: print per-frame info during compression")
 
 	flag.Parse()
 
@@ -109,8 +114,10 @@ func main() {
 		compType:    compType,
 		level:       *level,
 		frameSize:   *frameSize,
+		maxFrameU:   *maxFrameU,
 		dryRun:      *dryRun,
 		recursive:   *recursive,
+		verbose:     *verbose,
 	}
 
 	ctx := context.Background()
@@ -250,14 +257,14 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 	if err != nil {
 		return fmt.Errorf("deserialize header: %w", err)
 	}
-	fmt.Printf("  Header: version=%d, mappings=%d, size=%d\n",
+	fmt.Printf("  Header: version=%d, mappings=%d, size=%#x\n",
 		h.Metadata.Version, len(h.Mapping), h.Metadata.Size)
 
 	// Check if compressed data already exists
 	compressedFile := file + cfg.compType.Suffix()
 	existing := cmdutil.ProbeFile(ctx, cfg.storagePath, buildID, compressedFile)
 	if existing.Exists {
-		fmt.Printf("  Compressed file already exists: %s (%d bytes), skipping\n", existing.Path, existing.Size)
+		fmt.Printf("  Compressed file already exists: %s (%#x), skipping\n", existing.Path, existing.Size)
 
 		return nil
 	}
@@ -266,7 +273,7 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 	compressedHeaderFile := file + storage.CompressedHeaderSuffix
 	existingHeader := cmdutil.ProbeFile(ctx, cfg.storagePath, buildID, compressedHeaderFile)
 	if existingHeader.Exists {
-		fmt.Printf("  Compressed header already exists: %s (%d bytes), skipping\n", existingHeader.Path, existingHeader.Size)
+		fmt.Printf("  Compressed header already exists: %s (%#x), skipping\n", existingHeader.Path, existingHeader.Size)
 
 		return nil
 	}
@@ -285,15 +292,28 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 	}
 	defer reader.Close()
 
-	fmt.Printf("  Data: %s (%d bytes, %.1f MiB)\n", dataSource, dataSize, float64(dataSize)/1024/1024)
+	fmt.Printf("  Data: %s (%#x, %.1f MiB)\n", dataSource, dataSize, float64(dataSize)/1024/1024)
 
 	// Set up compression options
 	opts := &storage.FramedUploadOptions{
-		CompressionType: cfg.compType,
-		Level:           cfg.level,
-		ChunkSize:       storage.MemoryChunkSize,
-		TargetFrameSize: cfg.frameSize,
-		TargetPartSize:  50 * 1024 * 1024,
+		CompressionType:          cfg.compType,
+		Level:                    cfg.level,
+		ChunkSize:                storage.MemoryChunkSize,
+		TargetFrameSize:          cfg.frameSize,
+		MaxUncompressedFrameSize: cfg.maxFrameU,
+		TargetPartSize:           50 * 1024 * 1024,
+	}
+
+	if cfg.verbose {
+		frameIdx := 0
+		opts.OnFrameReady = func(offset storage.FrameOffset, size storage.FrameSize, _ []byte) error {
+			fmt.Printf("    frame[%d] U=%#x+%#x C=%#x+%#x (ratio=%.2fx)\n",
+				frameIdx, offset.U, size.U, offset.C, size.C,
+				float64(size.U)/float64(size.C))
+			frameIdx++
+
+			return nil
+		}
 	}
 
 	// Compress to a temp file, then upload if GCS
@@ -309,7 +329,8 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 	// Create an io.Reader from the DataReader (which supports ReadAt)
 	sectionReader := io.NewSectionReader(reader, 0, dataSize)
 
-	fmt.Printf("  Compressing with %s (level=%d, frame-size=%d)...\n", cfg.compType, cfg.level, cfg.frameSize)
+	fmt.Printf("  Compressing with %s (level=%d, frame-size=%#x, max-frame-u=%#x)...\n",
+		cfg.compType, cfg.level, cfg.frameSize, cfg.maxFrameU)
 
 	// Compress
 	frameTable, err := storage.CompressStream(ctx, sectionReader, opts, uploader)
@@ -325,7 +346,7 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 	}
 	ratio := float64(totalU) / float64(totalC)
 	savings := 100.0 * (1.0 - float64(totalC)/float64(totalU))
-	fmt.Printf("  Compressed: %d frames, U=%d C=%d ratio=%.2fx savings=%.1f%%\n",
+	fmt.Printf("  Compressed: %d frames, U=%#x C=%#x ratio=%.2fx savings=%.1f%%\n",
 		len(frameTable.Frames), totalU, totalC, ratio, savings)
 
 	// Apply frame tables to header (current build's own data)
@@ -364,12 +385,14 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 		gcsBase := cmdutil.NormalizeGCSPath(cfg.storagePath) + "/" + buildID + "/"
 
 		fmt.Printf("  Uploading compressed data to %s%s...\n", gcsBase, compressedFile)
-		if err := gcloudCopy(ctx, tmpCompressedPath, gcsBase+compressedFile); err != nil {
+		if err := gcloudCopy(ctx, tmpCompressedPath, gcsBase+compressedFile, map[string]string{
+			"uncompressed-size": strconv.FormatInt(dataSize, 10),
+		}); err != nil {
 			return fmt.Errorf("upload compressed data: %w", err)
 		}
 
 		fmt.Printf("  Uploading compressed header to %s%s...\n", gcsBase, compressedHeaderFile)
-		if err := gcloudCopy(ctx, tmpHeaderPath, gcsBase+compressedHeaderFile); err != nil {
+		if err := gcloudCopy(ctx, tmpHeaderPath, gcsBase+compressedHeaderFile, nil); err != nil {
 			return fmt.Errorf("upload compressed header: %w", err)
 		}
 	} else {
@@ -385,6 +408,12 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 		}
 		fmt.Printf("  Output: %s\n", finalCompressed)
 
+		// Write uncompressed-size sidecar for local storage
+		sidecarPath := finalCompressed + ".uncompressed-size"
+		if err := os.WriteFile(sidecarPath, []byte(strconv.FormatInt(dataSize, 10)), 0o644); err != nil {
+			return fmt.Errorf("write uncompressed-size sidecar: %w", err)
+		}
+
 		finalHeader := filepath.Join(localBase, compressedHeaderFile)
 		if err := os.Rename(tmpHeaderPath, finalHeader); err != nil {
 			return fmt.Errorf("move compressed header: %w", err)
@@ -392,7 +421,7 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 		fmt.Printf("  Compressed header: %s\n", finalHeader)
 	}
 
-	fmt.Printf("  Compressed header: %d bytes (uncompressed: %d bytes)\n",
+	fmt.Printf("  Compressed header: %#x (uncompressed: %#x)\n",
 		len(compressedHeaderBytes), len(headerBytes))
 
 	return nil
@@ -524,11 +553,26 @@ func reconstructFullFrameTable(h *header.Header, buildID string) *storage.FrameT
 	return result
 }
 
-func gcloudCopy(ctx context.Context, localPath, gcsPath string) error {
+func gcloudCopy(ctx context.Context, localPath, gcsPath string, metadata map[string]string) error {
 	cmd := exec.CommandContext(ctx, "gcloud", "storage", "cp", "--verbosity", "error", localPath, gcsPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("gcloud storage cp failed: %w\n%s", err, string(output))
+	}
+
+	// Set custom metadata separately — gcloud storage cp --custom-metadata
+	// doesn't work with parallel composite uploads for large files.
+	if len(metadata) > 0 {
+		pairs := make([]string, 0, len(metadata))
+		for k, v := range metadata {
+			pairs = append(pairs, k+"="+v)
+		}
+		updateCmd := exec.CommandContext(ctx, "gcloud", "storage", "objects", "update",
+			"--custom-metadata="+strings.Join(pairs, ","), gcsPath)
+		updateOutput, updateErr := updateCmd.CombinedOutput()
+		if updateErr != nil {
+			return fmt.Errorf("gcloud storage objects update failed: %w\n%s", updateErr, string(updateOutput))
+		}
 	}
 
 	return nil

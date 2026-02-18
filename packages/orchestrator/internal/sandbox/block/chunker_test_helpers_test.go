@@ -29,9 +29,7 @@ type slowUpstream struct {
 	delay     time.Duration
 }
 
-var (
-	_ storage.Seekable = (*slowUpstream)(nil)
-)
+var _ storage.Seekable = (*slowUpstream)(nil)
 
 func (s *slowUpstream) StoreFile(_ context.Context, _ string) error {
 	return fmt.Errorf("slowUpstream: StoreFile not implemented")
@@ -44,8 +42,8 @@ func (s *slowUpstream) ReadAt(_ context.Context, buffer []byte, off int64) (int,
 	return n, nil
 }
 
-func (s *slowUpstream) Size(_ context.Context) (int64, error) {
-	return int64(len(s.data)), nil
+func (s *slowUpstream) Size(_ context.Context) (int64, int64, error) {
+	return int64(len(s.data)), 0, nil
 }
 
 func (s *slowUpstream) OpenRangeReader(_ context.Context, off, length int64) (io.ReadCloser, error) {

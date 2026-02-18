@@ -13,7 +13,12 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
-const metadataVersion = 4
+const (
+	// metadataVersion is used by template-manager for uncompressed builds (V3 headers).
+	metadataVersion = 3
+	// metadataVersionCompressed is used by compress-build for compressed builds (V4 headers with FrameTables).
+	metadataVersionCompressed = 4
+)
 
 type Metadata struct {
 	Version    uint64

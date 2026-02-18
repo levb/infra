@@ -123,8 +123,10 @@ func (b *localDiff) Slice(_ context.Context, off, length int64, _ *storage.Frame
 	return b.cache.Slice(off, length)
 }
 
-func (b *localDiff) Size(_ context.Context) (int64, error) {
-	return b.cache.Size()
+func (b *localDiff) Size(_ context.Context) (int64, int64, error) {
+	s, err := b.cache.Size()
+
+	return s, 0, err
 }
 
 func (b *localDiff) FileSize() (int64, error) {

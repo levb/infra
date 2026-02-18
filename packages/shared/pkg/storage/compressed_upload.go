@@ -84,7 +84,7 @@ func (e *encoder) uploadFramed(ctx context.Context, in io.Reader) (*FrameTable, 
 
 	err := e.uploader.Start(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to start multipart upload: %w", err)
+		return nil, fmt.Errorf("failed to start framed upload: %w", err)
 	}
 
 	// Start copying file to the compression encoder. Use a return channel
@@ -272,6 +272,17 @@ func (e *encoder) writeChunk(frame *frame, data []byte) error {
 		}
 		frame.lenU += written
 		data = data[written:]
+	}
+
+	// Enforce uncompressed frame size cap.
+	maxU := e.opts.MaxUncompressedFrameSize
+	if maxU == 0 {
+		maxU = DefaultMaxFrameUncompressedSize
+	}
+	if frame.lenU >= maxU {
+		e.mu.Lock()
+		frame.flushing = true
+		e.mu.Unlock()
 	}
 
 	return nil

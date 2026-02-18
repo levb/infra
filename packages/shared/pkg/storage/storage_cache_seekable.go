@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -210,7 +211,7 @@ func (r *cacheWriteThroughReader) Close() error {
 	return closeErr
 }
 
-func (c *cachedSeekable) Size(ctx context.Context) (n int64, e error) {
+func (c *cachedSeekable) Size(ctx context.Context) (uncompressed, compressed int64, e error) {
 	ctx, span := c.tracer.Start(ctx, "get size of object")
 	defer func() {
 		recordError(span, e)
@@ -219,27 +220,28 @@ func (c *cachedSeekable) Size(ctx context.Context) (n int64, e error) {
 
 	readTimer := cacheSlabReadTimerFactory.Begin(attribute.String(nfsCacheOperationAttr, nfsCacheOperationAttrSize))
 
-	size, err := c.readLocalSize(ctx)
+	u, comp, err := c.readLocalSize(ctx)
 	if err == nil {
 		recordCacheRead(ctx, true, 0, cacheTypeSeekable, cacheOpSize)
 		readTimer.Success(ctx, 0)
 
-		return size, nil
+		return u, comp, nil
 	}
 	readTimer.Failure(ctx, 0)
 
 	recordCacheReadError(ctx, cacheTypeSeekable, cacheOpSize, err)
 
-	size, err = c.inner.Size(ctx)
+	u, comp, err = c.inner.Size(ctx)
 	if err != nil {
-		return size, err
+		return u, comp, err
 	}
 
+	finalU, finalComp := u, comp
 	c.goCtx(ctx, func(ctx context.Context) {
 		ctx, span := c.tracer.Start(ctx, "write size of object to cache")
 		defer span.End()
 
-		if err := c.writeLocalSize(ctx, size); err != nil {
+		if err := c.writeLocalSize(ctx, finalU, finalComp); err != nil {
 			recordError(span, err)
 			recordCacheWriteError(ctx, cacheTypeSeekable, cacheOpSize, err)
 		}
@@ -247,7 +249,7 @@ func (c *cachedSeekable) Size(ctx context.Context) (n int64, e error) {
 
 	recordCacheRead(ctx, false, 0, cacheTypeSeekable, cacheOpSize)
 
-	return size, nil
+	return u, comp, nil
 }
 
 func (c *cachedSeekable) StoreFile(ctx context.Context, path string) (e error) {
@@ -278,7 +280,7 @@ func (c *cachedSeekable) StoreFile(ctx context.Context, path string) (e error) {
 
 			recordCacheWrite(ctx, size, cacheTypeSeekable, cacheOpWriteFromFileSystem)
 
-			if err := c.writeLocalSize(ctx, size); err != nil {
+			if err := c.writeLocalSize(ctx, size, 0); err != nil {
 				recordError(span, err)
 				recordCacheWriteError(ctx, cacheTypeSeekable, cacheOpWriteFromFileSystem, fmt.Errorf("failed to write local file size: %w", err))
 			}
@@ -330,19 +332,29 @@ func (c *cachedSeekable) sizeFilename() string {
 	return filepath.Join(c.path, "size.txt")
 }
 
-func (c *cachedSeekable) readLocalSize(context.Context) (int64, error) {
+func (c *cachedSeekable) readLocalSize(context.Context) (uncompressed, compressed int64, err error) {
 	filename := c.sizeFilename()
-	content, err := os.ReadFile(filename)
-	if err != nil {
-		return 0, fmt.Errorf("failed to read cached size: %w", err)
+	content, readErr := os.ReadFile(filename)
+	if readErr != nil {
+		return 0, 0, fmt.Errorf("failed to read cached size: %w", readErr)
 	}
 
-	size, err := strconv.ParseInt(string(content), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse cached size: %w", err)
+	parts := strings.Fields(string(content))
+	if len(parts) == 0 {
+		return 0, 0, fmt.Errorf("empty cached size file")
 	}
 
-	return size, nil
+	u, parseErr := strconv.ParseInt(parts[0], 10, 64)
+	if parseErr != nil {
+		return 0, 0, fmt.Errorf("failed to parse cached uncompressed size: %w", parseErr)
+	}
+
+	var comp int64
+	if len(parts) >= 2 {
+		comp, _ = strconv.ParseInt(parts[1], 10, 64)
+	}
+
+	return u, comp, nil
 }
 
 func (c *cachedSeekable) validateReadAtParams(buffSize, offset int64) error {
@@ -408,7 +420,7 @@ func (c *cachedSeekable) writeChunkToCache(ctx context.Context, offset int64, ch
 	return nil
 }
 
-func (c *cachedSeekable) writeLocalSize(ctx context.Context, size int64) error {
+func (c *cachedSeekable) writeLocalSize(ctx context.Context, uncompressed, compressed int64) error {
 	finalFilename := c.sizeFilename()
 
 	// Try to acquire lock for this chunk write to NFS cache
@@ -422,7 +434,8 @@ func (c *cachedSeekable) writeLocalSize(ctx context.Context, size int64) error {
 		err := lock.ReleaseLock(ctx, lockFile)
 		if err != nil {
 			logger.L().Warn(ctx, "failed to release lock after writing chunk to cache",
-				zap.Int64("size", size),
+				zap.Int64("uncompressed", uncompressed),
+				zap.Int64("compressed", compressed),
 				zap.String("path", finalFilename),
 				zap.Error(err))
 		}
@@ -430,7 +443,7 @@ func (c *cachedSeekable) writeLocalSize(ctx context.Context, size int64) error {
 
 	tempFilename := filepath.Join(c.path, fmt.Sprintf(".size.bin.%s", uuid.NewString()))
 
-	if err := os.WriteFile(tempFilename, fmt.Appendf(nil, "%d", size), cacheFilePermissions); err != nil {
+	if err := os.WriteFile(tempFilename, fmt.Appendf(nil, "%d %d", uncompressed, compressed), cacheFilePermissions); err != nil {
 		go safelyRemoveFile(ctx, tempFilename)
 
 		return fmt.Errorf("failed to write temp local size file: %w", err)

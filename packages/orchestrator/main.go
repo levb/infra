@@ -1,4 +1,4 @@
-package main
+package main // compressed-read-path-v2
 
 import (
 	"context"

@@ -37,6 +37,6 @@ func (m *BuildDevice) Header() *header.Header {
 	return m.header
 }
 
-func (m *BuildDevice) Size(_ context.Context) (int64, error) {
-	return int64(m.header.Metadata.Size), nil
+func (m *BuildDevice) Size(_ context.Context) (int64, int64, error) {
+	return int64(m.header.Metadata.Size), 0, nil
 }

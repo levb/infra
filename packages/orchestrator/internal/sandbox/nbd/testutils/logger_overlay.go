@@ -49,7 +49,7 @@ func (l *LoggerOverlay) WriteAt(p []byte, off int64) (int, error) {
 	return n, err
 }
 
-func (l *LoggerOverlay) Size(ctx context.Context) (int64, error) {
+func (l *LoggerOverlay) Size(ctx context.Context) (int64, int64, error) {
 	return l.overlay.Size(ctx)
 }
 

@@ -99,7 +99,7 @@ func (b *StorageDiff) Init(ctx context.Context) error {
 func (b *StorageDiff) createChunker(ctx context.Context) (block.Chunker, error) {
 	assets := b.probeAssets(ctx)
 	if assets.Size == 0 {
-		return nil, fmt.Errorf("uncompressed asset not found: %s", b.storagePath)
+		return nil, fmt.Errorf("no asset found for %s (no uncompressed or compressed with metadata)", b.storagePath)
 	}
 
 	b.metrics.ChunkerCreations.Add(ctx, 1, metric.WithAttributes(
@@ -110,10 +110,17 @@ func (b *StorageDiff) createChunker(ctx context.Context) (block.Chunker, error) 
 }
 
 // probeAssets probes for uncompressed and compressed asset variants in parallel.
+// For compressed objects, Size() returns (uncompressedSize, compressedSize, err)
+// via GCS/S3 metadata, allowing us to derive the mmap allocation size even
+// when the uncompressed object doesn't exist.
 func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 	assets := block.AssetInfo{BasePath: b.storagePath}
 
-	var wg sync.WaitGroup
+	var (
+		wg            sync.WaitGroup
+		lz4UncompSize int64
+		zstUncompSize int64
+	)
 
 	// Probe all 3 paths in parallel: uncompressed, .lz4, .zst
 	wg.Add(3)
@@ -126,12 +133,13 @@ func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 			return
 		}
 
-		size, err := obj.Size(ctx)
+		uncompSize, _, err := obj.Size(ctx)
 		if err != nil {
 			return
 		}
 
-		assets.Size = size
+		assets.Size = uncompSize
+		assets.HasUncompressed = true
 	}()
 
 	go func() {
@@ -143,12 +151,13 @@ func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 			return
 		}
 
-		size, err := obj.Size(ctx)
+		uncompSize, compSize, err := obj.Size(ctx)
 		if err != nil {
 			return
 		}
 
-		assets.LZ4Size = size
+		assets.LZ4Size = compSize
+		lz4UncompSize = uncompSize
 	}()
 
 	go func() {
@@ -160,15 +169,26 @@ func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 			return
 		}
 
-		size, err := obj.Size(ctx)
+		uncompSize, compSize, err := obj.Size(ctx)
 		if err != nil {
 			return
 		}
 
-		assets.ZstSize = size
+		assets.ZstSize = compSize
+		zstUncompSize = uncompSize
 	}()
 
 	wg.Wait()
+
+	// If no uncompressed object exists, derive the mmap allocation size
+	// from the compressed object's uncompressed-size metadata.
+	if assets.Size == 0 {
+		if lz4UncompSize > 0 {
+			assets.Size = lz4UncompSize
+		} else if zstUncompSize > 0 {
+			assets.Size = zstUncompSize
+		}
+	}
 
 	return assets
 }
@@ -214,8 +234,10 @@ func (b *StorageDiff) FileSize() (int64, error) {
 	return c.FileSize()
 }
 
-func (b *StorageDiff) Size(_ context.Context) (int64, error) {
-	return b.FileSize()
+func (b *StorageDiff) Size(_ context.Context) (int64, int64, error) {
+	s, err := b.FileSize()
+
+	return s, 0, err
 }
 
 func (b *StorageDiff) BlockSize() int64 {

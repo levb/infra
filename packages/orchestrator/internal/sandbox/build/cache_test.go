@@ -514,6 +514,7 @@ var _ Diff = (*concurrentTestDiff)(nil)
 func (d *concurrentTestDiff) Init(_ context.Context) error {
 	d.initCount.Add(1)
 	time.Sleep(50 * time.Millisecond) // simulate slow probe + chunker creation
+
 	return d.data.SetValue(d.testData)
 }
 
@@ -522,6 +523,7 @@ func (d *concurrentTestDiff) ReadAt(_ context.Context, p []byte, off int64, _ *s
 	if err != nil {
 		return 0, err
 	}
+
 	return copy(p, data[off:]), nil
 }
 
@@ -530,14 +532,15 @@ func (d *concurrentTestDiff) Slice(_ context.Context, off, length int64, _ *stor
 	if err != nil {
 		return nil, err
 	}
+
 	return data[off : off+length], nil
 }
 
-func (d *concurrentTestDiff) CacheKey() DiffStoreKey      { return d.key }
-func (d *concurrentTestDiff) CachePath() (string, error)   { return "", nil }
-func (d *concurrentTestDiff) FileSize() (int64, error)     { return int64(len(d.testData)), nil }
-func (d *concurrentTestDiff) BlockSize() int64             { return 4096 }
-func (d *concurrentTestDiff) Close() error                 { return nil }
+func (d *concurrentTestDiff) CacheKey() DiffStoreKey     { return d.key }
+func (d *concurrentTestDiff) CachePath() (string, error) { return "", nil }
+func (d *concurrentTestDiff) FileSize() (int64, error)   { return int64(len(d.testData)), nil }
+func (d *concurrentTestDiff) BlockSize() int64           { return 4096 }
+func (d *concurrentTestDiff) Close() error               { return nil }
 
 // TestDiffStoreConcurrentInitAndAccess simulates multiple UFFD handlers
 // concurrently calling getBuild → DiffStore.Get for the same build.
@@ -568,10 +571,7 @@ func TestDiffStoreConcurrentInitAndAccess(t *testing.T) {
 	var wg sync.WaitGroup
 
 	for range numGoroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
+		wg.Go(func() {
 			// Each goroutine creates its own diff instance (mimicking getBuild),
 			// but all share the same cache key. GetOrSet stores only the first.
 			diff := &concurrentTestDiff{
@@ -590,7 +590,7 @@ func TestDiffStoreConcurrentInitAndAccess(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, 256, n)
 			assert.Equal(t, testData[:256], buf)
-		}()
+		})
 	}
 
 	wg.Wait()

@@ -179,8 +179,8 @@ func printHeader(h *header.Header, source string, summaryOnly bool) {
 	fmt.Printf("Generation         %d\n", h.Metadata.Generation)
 	fmt.Printf("Build ID           %s\n", h.Metadata.BuildId)
 	fmt.Printf("Base build ID      %s\n", h.Metadata.BaseBuildId)
-	fmt.Printf("Size               %d B (%d MiB)\n", h.Metadata.Size, h.Metadata.Size/1024/1024)
-	fmt.Printf("Block size         %d B\n", h.Metadata.BlockSize)
+	fmt.Printf("Size               %#x (%d MiB)\n", h.Metadata.Size, h.Metadata.Size/1024/1024)
+	fmt.Printf("Block size         %#x\n", h.Metadata.BlockSize)
 	fmt.Printf("Blocks             %d\n", (h.Metadata.Size+h.Metadata.BlockSize-1)/h.Metadata.BlockSize)
 
 	if !summaryOnly {
@@ -250,7 +250,11 @@ func printFileList(ctx context.Context, storagePath, buildID string) {
 
 func printFileInfo(info cmdutil.FileInfo) {
 	if info.Exists {
-		fmt.Printf("%-45s  %6s  %12s\n", info.Name, "yes", formatSize(info.Size))
+		extra := ""
+		if uSize, ok := info.Metadata["uncompressed-size"]; ok {
+			extra = fmt.Sprintf("  (uncompressed-size=%s)", uSize)
+		}
+		fmt.Printf("%-45s  %6s  %12s%s\n", info.Name, "yes", formatSize(info.Size), extra)
 	} else {
 		fmt.Printf("%-45s  %6s  %12s\n", info.Name, "no", "-")
 	}
@@ -298,7 +302,7 @@ func inspectData(ctx context.Context, storagePath, buildID, dataFile string, h *
 	fmt.Printf("\nDATA\n")
 	fmt.Printf("====\n")
 	fmt.Printf("Source             %s\n", source)
-	fmt.Printf("Size               %d B (%d MiB)\n", size, size/1024/1024)
+	fmt.Printf("Size               %#x (%d MiB)\n", size, size/1024/1024)
 
 	b := make([]byte, blockSize)
 	emptyCount := 0
@@ -318,10 +322,10 @@ func inspectData(ctx context.Context, storagePath, buildID, dataFile string, h *
 
 		if nonZeroCount > 0 {
 			nonEmptyCount++
-			fmt.Printf("%-10d [%11d,%11d) %d non-zero bytes\n", i/blockSize, i, i+blockSize, nonZeroCount)
+			fmt.Printf("%-10d [%#x,%#x) %#x non-zero bytes\n", i/blockSize, i, i+blockSize, nonZeroCount)
 		} else {
 			emptyCount++
-			fmt.Printf("%-10d [%11d,%11d) EMPTY\n", i/blockSize, i, i+blockSize)
+			fmt.Printf("%-10d [%#x,%#x) EMPTY\n", i/blockSize, i, i+blockSize)
 		}
 	}
 
@@ -330,8 +334,8 @@ func inspectData(ctx context.Context, storagePath, buildID, dataFile string, h *
 	fmt.Printf("Empty blocks: %d\n", emptyCount)
 	fmt.Printf("Non-empty blocks: %d\n", nonEmptyCount)
 	fmt.Printf("Total blocks inspected: %d\n", emptyCount+nonEmptyCount)
-	fmt.Printf("Total size inspected: %d B (%d MiB)\n", int64(emptyCount+nonEmptyCount)*blockSize, int64(emptyCount+nonEmptyCount)*blockSize/1024/1024)
-	fmt.Printf("Empty size: %d B (%d MiB)\n", int64(emptyCount)*blockSize, int64(emptyCount)*blockSize/1024/1024)
+	fmt.Printf("Total size inspected: %#x (%d MiB)\n", int64(emptyCount+nonEmptyCount)*blockSize, int64(emptyCount+nonEmptyCount)*blockSize/1024/1024)
+	fmt.Printf("Empty size: %#x (%d MiB)\n", int64(emptyCount)*blockSize, int64(emptyCount)*blockSize/1024/1024)
 
 	reader.Close()
 }
@@ -351,7 +355,7 @@ func validateArtifact(ctx context.Context, storagePath, buildID, artifactName st
 	if err != nil {
 		return fmt.Errorf("failed to deserialize header: %w", err)
 	}
-	fmt.Printf("  Header: version=%d size=%d blockSize=%d mappings=%d\n",
+	fmt.Printf("  Header: version=%d size=%#x blockSize=%#x mappings=%d\n",
 		h.Metadata.Version, h.Metadata.Size, h.Metadata.BlockSize, len(h.Mapping))
 
 	// 2. Validate mappings cover entire file
@@ -367,7 +371,7 @@ func validateArtifact(ctx context.Context, storagePath, buildID, artifactName st
 	}
 	defer reader.Close()
 
-	fmt.Printf("  Data file: size=%d\n", dataSize)
+	fmt.Printf("  Data file: size=%#x\n", dataSize)
 
 	// 4. Validate mappings for the current build only
 	currentBuildID := h.Metadata.BuildId.String()
@@ -455,7 +459,7 @@ func validateMapping(ctx context.Context, storagePath, artifactName string, h *h
 	}
 
 	if totalU < int64(mapping.Length) {
-		return fmt.Errorf("frame table covers %d bytes but mapping length is %d", totalU, mapping.Length)
+		return fmt.Errorf("frame table covers %#x bytes but mapping length is %#x", totalU, mapping.Length)
 	}
 
 	reader, fileSize, _, err := cmdutil.OpenDataFile(ctx, storagePath, mapping.BuildId.String(), artifactName)
@@ -471,14 +475,14 @@ func validateMapping(ctx context.Context, storagePath, artifactName string, h *h
 	expectedSize := ft.StartAt.C + totalC
 
 	if fileSize < expectedSize {
-		return fmt.Errorf("compressed file size %d is less than expected %d (startC=%d + framesC=%d)",
+		return fmt.Errorf("compressed file size %#x is less than expected %#x (startC=%#x + framesC=%#x)",
 			fileSize, expectedSize, ft.StartAt.C, totalC)
 	}
 
 	firstFrameBuf := make([]byte, ft.Frames[0].C)
 	_, err = reader.ReadAt(firstFrameBuf, ft.StartAt.C)
 	if err != nil {
-		return fmt.Errorf("failed to read first compressed frame at C=%d: %w", ft.StartAt.C, err)
+		return fmt.Errorf("failed to read first compressed frame at C=%#x: %w", ft.StartAt.C, err)
 	}
 
 	if len(ft.Frames) > 1 {
@@ -487,7 +491,7 @@ func validateMapping(ctx context.Context, storagePath, artifactName string, h *h
 		lastFrameBuf := make([]byte, ft.Frames[lastIdx].C)
 		_, err = reader.ReadAt(lastFrameBuf, lastOffset)
 		if err != nil {
-			return fmt.Errorf("failed to read last compressed frame at C=%d: %w", lastOffset, err)
+			return fmt.Errorf("failed to read last compressed frame at C=%#x: %w", lastOffset, err)
 		}
 	}
 
@@ -565,7 +569,7 @@ func validateCompressedFrames(ctx context.Context, storagePath, artifactName str
 			return fmt.Errorf("build %s: failed to open %s: %w", bid, artifactName, err)
 		}
 
-		fmt.Printf("  Build %s: %d frames, compressed=%d uncompressed=%d\n", bid, len(frames), compSize, uncSize)
+		fmt.Printf("  Build %s: %d frames, compressed=%#x uncompressed=%#x\n", bid, len(frames), compSize, uncSize)
 
 		for i, frame := range frames {
 			// Read compressed bytes from .lz4 at C offset
@@ -575,7 +579,7 @@ func validateCompressedFrames(ctx context.Context, storagePath, artifactName str
 				compReader.Close()
 				uncReader.Close()
 
-				return fmt.Errorf("build %s frame[%d]: read compressed at C=%d size=%d: %w",
+				return fmt.Errorf("build %s frame[%d]: read compressed at C=%#x size=%#x: %w",
 					bid, i, frame.offset.C, frame.size.C, err)
 			}
 
@@ -586,7 +590,7 @@ func validateCompressedFrames(ctx context.Context, storagePath, artifactName str
 				compReader.Close()
 				uncReader.Close()
 
-				return fmt.Errorf("build %s frame[%d]: decompress at C=%d (first %d bytes: %x): %w",
+				return fmt.Errorf("build %s frame[%d]: decompress at C=%#x (first %d bytes: %x): %w",
 					bid, i, frame.offset.C, previewLen, compBuf[:previewLen], err)
 			}
 
@@ -597,7 +601,7 @@ func validateCompressedFrames(ctx context.Context, storagePath, artifactName str
 				compReader.Close()
 				uncReader.Close()
 
-				return fmt.Errorf("build %s frame[%d]: read uncompressed at U=%#x size=%d: %w",
+				return fmt.Errorf("build %s frame[%d]: read uncompressed at U=%#x size=%#x: %w",
 					bid, i, frame.offset.U, frame.size.U, err)
 			}
 
@@ -614,7 +618,7 @@ func validateCompressedFrames(ctx context.Context, storagePath, artifactName str
 				}
 			}
 
-			fmt.Printf("    frame[%d] U=%#x C=%d OK (%d→%d bytes)\n",
+			fmt.Printf("    frame[%d] U=%#x C=%#x OK (%#x→%#x)\n",
 				i, frame.offset.U, frame.offset.C, frame.size.C, frame.size.U)
 		}
 

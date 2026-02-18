@@ -257,10 +257,11 @@ func ReadCompressedHeader(ctx context.Context, storagePath, buildID, artifactNam
 
 // FileInfo contains existence and size information about a file.
 type FileInfo struct {
-	Name   string
-	Path   string
-	Exists bool
-	Size   int64
+	Name     string
+	Path     string
+	Exists   bool
+	Size     int64
+	Metadata map[string]string // GCS custom metadata (nil for local files)
 }
 
 // ProbeFile checks if a file exists and returns its info.
@@ -290,6 +291,7 @@ func ProbeFile(ctx context.Context, storagePath, buildID, filename string) FileI
 
 		info.Exists = true
 		info.Size = attrs.Size
+		info.Metadata = attrs.Metadata
 	} else {
 		localPath := filepath.Join(storagePath, "templates", buildID, filename)
 		info.Path = localPath

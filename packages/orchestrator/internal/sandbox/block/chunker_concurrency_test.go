@@ -83,7 +83,7 @@ func (g *testFrameGetter) GetFrame(_ context.Context, _ string, offsetU int64, f
 // makeCompressedTestData creates test data, LZ4-compresses it into frames,
 // and returns the FrameTable and a testFrameGetter ready for use.
 //
-//nolint:unparam // frameSize is always testFrameSize in current tests but kept as parameter for flexibility
+
 func makeCompressedTestData(t *testing.T, dataSize, frameSize int, delay time.Duration) ([]byte, *storage.FrameTable, *testFrameGetter) {
 	t.Helper()
 

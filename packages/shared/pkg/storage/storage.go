@@ -36,6 +36,11 @@ const (
 	defaultLZ4CompressionLevel    = 3            // lz4 compression level (0=fast, higher=better ratio)
 	defaultCompressionConcurrency = 0            // use default compression concurrency settings
 	defaultUploadPartSize         = 50 * megabyte
+
+	// DefaultMaxFrameUncompressedSize caps the uncompressed bytes in a single frame.
+	// When a frame's uncompressed size reaches this limit it is flushed regardless
+	// of the compressed size.  4× MemoryChunkSize = 16 MiB.
+	DefaultMaxFrameUncompressedSize = 4 * MemoryChunkSize
 )
 
 // PartUploader is the interface for uploading data in parts.
@@ -55,17 +60,22 @@ type FramedUploadOptions struct {
 	TargetFrameSize        int // frames may be bigger than this due to chunk alignment and async compression.
 	TargetPartSize         int
 
+	// MaxUncompressedFrameSize caps uncompressed bytes per frame.
+	// 0 = use DefaultMaxFrameUncompressedSize.
+	MaxUncompressedFrameSize int
+
 	OnFrameReady func(offset FrameOffset, size FrameSize, data []byte) error
 }
 
 // DefaultCompressionOptions is the default compression configuration (LZ4).
 var DefaultCompressionOptions = &FramedUploadOptions{
-	CompressionType:        CompressionLZ4,
-	ChunkSize:              defaultChunkSizeU,
-	TargetFrameSize:        defaultTargetFrameSizeC,
-	Level:                  defaultLZ4CompressionLevel,
-	CompressionConcurrency: defaultCompressionConcurrency,
-	TargetPartSize:         defaultUploadPartSize,
+	CompressionType:          CompressionLZ4,
+	ChunkSize:                defaultChunkSizeU,
+	TargetFrameSize:          defaultTargetFrameSizeC,
+	Level:                    defaultLZ4CompressionLevel,
+	CompressionConcurrency:   defaultCompressionConcurrency,
+	TargetPartSize:           defaultUploadPartSize,
+	MaxUncompressedFrameSize: DefaultMaxFrameUncompressedSize,
 }
 
 // NoCompression indicates no compression should be applied.
@@ -148,7 +158,10 @@ type Blob interface {
 type SeekableReader interface {
 	// Random slice access, off and buffer length must be aligned to block size
 	ReadAt(ctx context.Context, buffer []byte, off int64) (int, error)
-	Size(ctx context.Context) (int64, error)
+	// Size returns the uncompressed and compressed sizes.
+	// For uncompressed objects: (fileSize, 0, nil).
+	// For compressed objects with metadata: (uncompressedSize, compressedFileSize, nil).
+	Size(ctx context.Context) (uncompressed, compressed int64, err error)
 }
 
 // StreamingReader supports progressive reads via a streaming range reader.
