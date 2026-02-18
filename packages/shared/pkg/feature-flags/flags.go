@@ -92,9 +92,12 @@ var (
 	BestOfKTooManyStartingFlag          = newBoolFlag("best-of-k-too-many-starting", false)
 	EdgeProvidedSandboxMetricsFlag      = newBoolFlag("edge-provided-sandbox-metrics", false)
 	CreateStorageCacheSpansFlag         = newBoolFlag("create-storage-cache-spans", env.IsDevelopment())
-	UseStreamingChunkerFlag             = newBoolFlag("use-streaming-chunker", false)
-	SandboxAutoResumeFlag               = newBoolFlag("sandbox-auto-resume", env.IsDevelopment())
-	PersistentVolumesFlag               = newBoolFlag("can-use-persistent-volumes", env.IsDevelopment())
+	// NOTE: Flipping this flag has no effect on chunkers already created for
+	// cached templates. A service restart (redeploy) is required for the
+	// change to take effect.
+	UseStreamingChunkerFlag = newBoolFlag("use-streaming-chunker", false)
+	SandboxAutoResumeFlag   = newBoolFlag("sandbox-auto-resume", env.IsDevelopment())
+	PersistentVolumesFlag   = newBoolFlag("can-use-persistent-volumes", env.IsDevelopment())
 )
 
 type IntFlag struct {

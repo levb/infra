@@ -8,6 +8,7 @@ import (
 	"io"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -23,14 +24,9 @@ const (
 	// Acts as a safety net: if the upstream hangs, the goroutine won't live forever.
 	defaultFetchTimeout = 60 * time.Second
 
-	// readBatchSize is the maximum number of bytes read from the upstream
-	// socket in a single Read call. Larger batches reduce syscall overhead
-	// (a 4KB read-cap on a 4MB chunk = 1024 syscalls). The notification
-	// granularity remains blockSize — after each Read we mark all newly
-	// completed blocks and wake their waiters. Read is allowed to return
-	// fewer bytes than requested, so we still wake promptly when the kernel
-	// buffer has less than a full batch.
-	readBatchSize = 256 * 1024 // 256 KB
+	// minReadBatchSize is the floor for the read batch size when blockSize
+	// is very small (e.g. 4KB rootfs). The actual batch is max(blockSize, minReadBatchSize).
+	minReadBatchSize = 16 * 1024 // 16 KB
 )
 
 type rangeWaiter struct {
@@ -41,28 +37,29 @@ type rangeWaiter struct {
 	ch      chan error // buffered cap 1
 }
 
-type fetchState int
-
-const (
-	fetchStateRunning = fetchState(iota)
-	fetchStateDone
-	fetchStateErrored
-)
-
 type fetchSession struct {
 	mu       sync.Mutex
 	chunkOff int64
 	chunkLen int64
 	cache    *Cache
 	waiters  []*rangeWaiter // sorted by endByte ascending
-	state    fetchState
 	fetchErr error
 
 	// bytesReady is the byte count (from chunkOff) up to which all blocks are
 	// fully written to mmap and marked cached. Always a multiple of blockSize
 	// during progressive reads. Used to cheaply determine which sorted waiters
 	// are satisfied without calling isCached.
-	bytesReady int64
+	//
+	// Atomic so registerAndWait can do a lock-free fast-path check:
+	// bytesReady only increases, so a Load() >= endByte guarantees data
+	// availability without taking the mutex.
+	bytesReady atomic.Int64
+}
+
+// terminated reports whether the fetch session has reached a terminal state
+// (done or errored). Must be called with s.mu held.
+func (s *fetchSession) terminated() bool {
+	return s.fetchErr != nil || s.bytesReady.Load() == s.chunkLen
 }
 
 // registerAndWait adds a waiter for the given range and blocks until the range
@@ -70,48 +67,46 @@ type fetchSession struct {
 // cached before registering.
 func (s *fetchSession) registerAndWait(ctx context.Context, off, length int64) error {
 	blockSize := s.cache.BlockSize()
-	// endByte is the byte offset (relative to chunkOff) past which all blocks
-	// covering [off, off+length) are fully cached.
 	lastBlockIdx := (off + length - 1 - s.chunkOff) / blockSize
 	endByte := (lastBlockIdx + 1) * blockSize
 
-	// Fast path: already cached (handles pre-existing cache from prior sessions).
-	if s.cache.isCached(off, length) {
+	// Lock-free fast path: bytesReady only increases, so >= endByte
+	// guarantees data is available without taking the lock.
+	if s.bytesReady.Load() >= endByte {
 		return nil
 	}
 
 	s.mu.Lock()
-	if s.state == fetchStateDone {
-		s.mu.Unlock()
-		if s.cache.isCached(off, length) {
-			return nil
-		}
 
-		return fmt.Errorf("fetch completed but range %d-%d not cached", off, off+length)
+	// Re-check under lock.
+	if endByte <= s.bytesReady.Load() {
+		s.mu.Unlock()
+
+		return nil
 	}
 
-	// Session errored — partial data may still be usable.
-	if s.state == fetchStateErrored {
+	// Terminal but range not covered — only happens on error
+	// (Done sets bytesReady=chunkLen). Check cache for prior session data.
+	if s.terminated() {
 		fetchErr := s.fetchErr
 		s.mu.Unlock()
 		if s.cache.isCached(off, length) {
 			return nil
 		}
 
-		return fmt.Errorf("fetch failed: %w", fetchErr)
+		if fetchErr != nil {
+			return fmt.Errorf("fetch failed: %w", fetchErr)
+		}
+
+		return fmt.Errorf("fetch completed but range %d-%d not cached", off, off+length)
 	}
 
-	w := &rangeWaiter{
-		endByte: endByte,
-		ch:      make(chan error, 1),
-	}
-
-	// Insert in sorted order so notifyWaiters can iterate front-to-back.
+	// Fetch in progress — register waiter.
+	w := &rangeWaiter{endByte: endByte, ch: make(chan error, 1)}
 	idx, _ := slices.BinarySearchFunc(s.waiters, endByte, func(w *rangeWaiter, target int64) int {
 		return cmp.Compare(w.endByte, target)
 	})
 	s.waiters = slices.Insert(s.waiters, idx, w)
-
 	s.mu.Unlock()
 
 	select {
@@ -131,10 +126,12 @@ func (s *fetchSession) registerAndWait(ctx context.Context, off, length int64) e
 // In terminal states (done/errored) all remaining waiters are notified.
 // Must be called with s.mu held.
 func (s *fetchSession) notifyWaiters(sendErr error) {
+	ready := s.bytesReady.Load()
+
 	// Terminal: notify every remaining waiter.
-	if s.state != fetchStateRunning {
+	if s.terminated() {
 		for _, w := range s.waiters {
-			if sendErr != nil && w.endByte > s.bytesReady {
+			if sendErr != nil && w.endByte > ready {
 				w.ch <- sendErr
 			}
 			close(w.ch)
@@ -146,7 +143,7 @@ func (s *fetchSession) notifyWaiters(sendErr error) {
 
 	// Progress: pop satisfied waiters from the sorted front.
 	i := 0
-	for i < len(s.waiters) && s.waiters[i].endByte <= s.bytesReady {
+	for i < len(s.waiters) && s.waiters[i].endByte <= ready {
 		close(s.waiters[i].ch)
 		i++
 	}
@@ -285,7 +282,6 @@ func (c *StreamingChunker) getOrCreateSession(ctx context.Context, fetchOff int6
 		chunkOff: fetchOff,
 		chunkLen: min(int64(storage.MemoryChunkSize), c.size-fetchOff),
 		cache:    c.cache,
-		state:    fetchStateRunning,
 	}
 
 	c.fetchMu.Lock()
@@ -305,15 +301,24 @@ func (c *StreamingChunker) getOrCreateSession(ctx context.Context, fetchOff int6
 	return s
 }
 
-func (s *fetchSession) setState(state fetchState, err error, onlyIfRunning bool) {
+func (s *fetchSession) setDone() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !onlyIfRunning || s.state == fetchStateRunning {
-		s.state = state
-		s.fetchErr = err
-		s.notifyWaiters(err)
+	s.bytesReady.Store(s.chunkLen)
+	s.notifyWaiters(nil)
+}
+
+func (s *fetchSession) setError(err error, onlyIfRunning bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if onlyIfRunning && s.terminated() {
+		return
 	}
+
+	s.fetchErr = err
+	s.notifyWaiters(err)
 }
 
 func (c *StreamingChunker) runFetch(ctx context.Context, s *fetchSession) {
@@ -332,13 +337,13 @@ func (c *StreamingChunker) runFetch(ctx context.Context, s *fetchSession) {
 	defer func() {
 		if r := recover(); r != nil {
 			err := fmt.Errorf("fetch panicked: %v", r)
-			s.setState(fetchStateErrored, err, true)
+			s.setError(err, true)
 		}
 	}()
 
 	mmapSlice, releaseLock, err := c.cache.addressBytes(s.chunkOff, s.chunkLen)
 	if err != nil {
-		s.setState(fetchStateErrored, err, false)
+		s.setError(err, false)
 
 		return
 	}
@@ -351,13 +356,13 @@ func (c *StreamingChunker) runFetch(ctx context.Context, s *fetchSession) {
 		fetchTimer.Failure(ctx, s.chunkLen,
 			attribute.String(failureReason, failureTypeRemoteRead))
 
-		s.setState(fetchStateErrored, err, false)
+		s.setError(err, false)
 
 		return
 	}
 
 	fetchTimer.Success(ctx, s.chunkLen)
-	s.setState(fetchStateDone, nil, false)
+	s.setDone()
 }
 
 func (c *StreamingChunker) progressiveRead(ctx context.Context, s *fetchSession, mmapSlice []byte) error {
@@ -368,13 +373,14 @@ func (c *StreamingChunker) progressiveRead(ctx context.Context, s *fetchSession,
 	defer reader.Close()
 
 	blockSize := c.cache.BlockSize()
+	readBatch := max(blockSize, minReadBatchSize)
 	var totalRead int64
 	var prevCompleted int64
 
 	for totalRead < s.chunkLen {
-		// Read in large batches to reduce syscall overhead, but still
-		// track and notify waiters at blockSize granularity below.
-		readEnd := min(totalRead+readBatchSize, s.chunkLen)
+		// Read in batches of max(blockSize, 16KB) to align notification
+		// granularity with the read size and minimize lock/notify overhead.
+		readEnd := min(totalRead+readBatch, s.chunkLen)
 		n, readErr := reader.Read(mmapSlice[totalRead:readEnd])
 		totalRead += int64(n)
 
@@ -385,7 +391,7 @@ func (c *StreamingChunker) progressiveRead(ctx context.Context, s *fetchSession,
 			prevCompleted = completedBlocks
 
 			s.mu.Lock()
-			s.bytesReady = completedBlocks * blockSize
+			s.bytesReady.Store(completedBlocks * blockSize)
 			s.notifyWaiters(nil)
 			s.mu.Unlock()
 		}
