@@ -113,6 +113,11 @@ func (c cache) GetDetails() string {
 		c.rootPath, c.inner.GetDetails())
 }
 
+func (c cache) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error) {
+	// For now, delegate directly to inner. NFS frame caching is added in storage_cache_frame.go.
+	return c.inner.GetFrame(ctx, objectPath, offsetU, frameTable, decompress, buf, readSize, onRead)
+}
+
 func (c cache) deleteCachedObjectsWithPrefix(ctx context.Context, prefix string) {
 	fullPrefix := filepath.Join(c.rootPath, prefix)
 	if err := os.RemoveAll(fullPrefix); err != nil {

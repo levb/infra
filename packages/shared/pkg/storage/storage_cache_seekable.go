@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -132,6 +133,8 @@ func (c *cachedSeekable) ReadAt(ctx context.Context, buff []byte, offset int64) 
 	return readCount, err
 }
 
+// OpenRangeReader returns a reader for uncompressed data only.
+// Compressed reads go through GetFrame which handles frame translation and decompression.
 func (c *cachedSeekable) OpenRangeReader(ctx context.Context, off, length int64) (io.ReadCloser, error) {
 	// Try NFS cache file first
 	chunkPath := c.makeChunkFilename(off)
@@ -210,7 +213,7 @@ func (r *cacheWriteThroughReader) Close() error {
 	return closeErr
 }
 
-func (c *cachedSeekable) Size(ctx context.Context) (n int64, e error) {
+func (c *cachedSeekable) Size(ctx context.Context) (size int64, e error) {
 	ctx, span := c.tracer.Start(ctx, "get size of object")
 	defer func() {
 		recordError(span, e)
@@ -219,27 +222,28 @@ func (c *cachedSeekable) Size(ctx context.Context) (n int64, e error) {
 
 	readTimer := cacheSlabReadTimerFactory.Begin(attribute.String(nfsCacheOperationAttr, nfsCacheOperationAttrSize))
 
-	size, err := c.readLocalSize(ctx)
+	u, err := c.readLocalSize(ctx)
 	if err == nil {
 		recordCacheRead(ctx, true, 0, cacheTypeSeekable, cacheOpSize)
 		readTimer.Success(ctx, 0)
 
-		return size, nil
+		return u, nil
 	}
 	readTimer.Failure(ctx, 0)
 
 	recordCacheReadError(ctx, cacheTypeSeekable, cacheOpSize, err)
 
-	size, err = c.inner.Size(ctx)
+	u, err = c.inner.Size(ctx)
 	if err != nil {
-		return size, err
+		return 0, err
 	}
 
+	finalU := u
 	c.goCtx(ctx, func(ctx context.Context) {
 		ctx, span := c.tracer.Start(ctx, "write size of object to cache")
 		defer span.End()
 
-		if err := c.writeLocalSize(ctx, size); err != nil {
+		if err := c.writeLocalSize(ctx, finalU); err != nil {
 			recordError(span, err)
 			recordCacheWriteError(ctx, cacheTypeSeekable, cacheOpSize, err)
 		}
@@ -247,7 +251,7 @@ func (c *cachedSeekable) Size(ctx context.Context) (n int64, e error) {
 
 	recordCacheRead(ctx, false, 0, cacheTypeSeekable, cacheOpSize)
 
-	return size, nil
+	return u, nil
 }
 
 func (c *cachedSeekable) StoreFile(ctx context.Context, path string) (e error) {
@@ -332,17 +336,22 @@ func (c *cachedSeekable) sizeFilename() string {
 
 func (c *cachedSeekable) readLocalSize(context.Context) (int64, error) {
 	filename := c.sizeFilename()
-	content, err := os.ReadFile(filename)
-	if err != nil {
-		return 0, fmt.Errorf("failed to read cached size: %w", err)
+	content, readErr := os.ReadFile(filename)
+	if readErr != nil {
+		return 0, fmt.Errorf("failed to read cached size: %w", readErr)
 	}
 
-	size, err := strconv.ParseInt(string(content), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse cached size: %w", err)
+	parts := strings.Fields(string(content))
+	if len(parts) == 0 {
+		return 0, fmt.Errorf("empty cached size file")
 	}
 
-	return size, nil
+	u, parseErr := strconv.ParseInt(parts[0], 10, 64)
+	if parseErr != nil {
+		return 0, fmt.Errorf("failed to parse cached uncompressed size: %w", parseErr)
+	}
+
+	return u, nil
 }
 
 func (c *cachedSeekable) validateReadAtParams(buffSize, offset int64) error {

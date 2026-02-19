@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -228,6 +229,13 @@ func (o *gcpObject) Size(ctx context.Context) (int64, error) {
 	}
 
 	timer.Success(ctx, 0)
+
+	if v, ok := attrs.Metadata["uncompressed-size"]; ok {
+		parsed, parseErr := strconv.ParseInt(v, 10, 64)
+		if parseErr == nil {
+			return parsed, nil
+		}
+	}
 
 	return attrs.Size, nil
 }
@@ -463,4 +471,23 @@ func parseServiceAccountBase64(serviceAccount string) (*gcpServiceToken, error) 
 	}
 
 	return &sa, nil
+}
+
+func (s *gcpStorage) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error) {
+	return getFrame(ctx, s.rangeRead, s.GetDetails(), objectPath, offsetU, frameTable, decompress, buf, readSize, onRead)
+}
+
+func (s *gcpStorage) rangeRead(ctx context.Context, objectPath string, offset int64, length int) (io.ReadCloser, error) {
+	ctx, cancel := context.WithTimeout(ctx, googleReadTimeout)
+	// cancel will be called by the caller when the reader is closed
+
+	handle := s.bucket.Object(objectPath)
+	reader, err := handle.NewRangeReader(ctx, offset, int64(length))
+	if err != nil {
+		cancel()
+
+		return nil, fmt.Errorf("failed to create GCS range reader for %q at offset %d length %d: %w", objectPath, offset, length, err)
+	}
+
+	return &cancelOnCloseReader{ReadCloser: reader, cancel: cancel}, nil
 }

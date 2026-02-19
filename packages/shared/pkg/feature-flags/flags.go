@@ -241,13 +241,14 @@ func GetTrackedTemplatesSet(ctx context.Context, ff *Client) map[string]struct{}
 
 // ChunkerConfigFlag is a JSON flag controlling the chunker implementation and tuning.
 //
-// NOTE: Changing useStreaming has no effect on chunkers already created for
-// cached templates. A service restart (redeploy) is required for that change
-// to take effect. minReadBatchSizeKB is checked just-in-time on each fetch,
-// so it takes effect immediately.
+// Fields:
+//   - useCompressedAssets (bool): Try loading v4 compressed headers and use
+//     the compressed read path. Restart required — no effect on already-cached templates.
+//   - minReadBatchSizeKB (int): Floor for uncompressed read batch size in KB.
+//     Applied at chunker creation time; restart required for existing chunkers.
 //
-// JSON format: {"useStreaming": false, "minReadBatchSizeKB": 16}
+// JSON format: {"useCompressedAssets": false, "minReadBatchSizeKB": 16}
 var ChunkerConfigFlag = newJSONFlag("chunker-config", ldvalue.FromJSONMarshal(map[string]any{
-	"useStreaming":       false,
-	"minReadBatchSizeKB": 16,
+	"useCompressedAssets": false,
+	"minReadBatchSizeKB":  16,
 }))
