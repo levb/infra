@@ -16,8 +16,8 @@ import (
 const (
 	// metadataVersion is used by template-manager for uncompressed builds (V3 headers).
 	metadataVersion = 3
-	// metadataVersionCompressed is used by compress-build for compressed builds (V4 headers with FrameTables).
-	metadataVersionCompressed = 4
+	// MetadataVersionCompressed is used by compress-build for compressed builds (V4 headers with FrameTables).
+	MetadataVersionCompressed = 4
 )
 
 type Metadata struct {

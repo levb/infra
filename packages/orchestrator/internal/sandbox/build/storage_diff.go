@@ -122,12 +122,12 @@ func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 	eg.Go(func() error {
 		obj, err := b.persistence.OpenSeekable(ctx, b.storagePath, b.storageObjectType)
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // missing asset is expected
 		}
 
 		uncompSize, err := obj.Size(ctx)
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // missing asset is expected
 		}
 
 		assets.Size = uncompSize
@@ -140,12 +140,12 @@ func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 		lz4Path := storage.V4DataPath(b.storagePath, storage.CompressionLZ4)
 		obj, err := b.persistence.OpenSeekable(ctx, lz4Path, b.storageObjectType)
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // missing asset is expected
 		}
 
 		uncompSize, err := obj.Size(ctx)
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // missing asset is expected
 		}
 
 		assets.HasLZ4 = true
@@ -158,12 +158,12 @@ func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 		zstPath := storage.V4DataPath(b.storagePath, storage.CompressionZstd)
 		obj, err := b.persistence.OpenSeekable(ctx, zstPath, b.storageObjectType)
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // missing asset is expected
 		}
 
 		uncompSize, err := obj.Size(ctx)
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // missing asset is expected
 		}
 
 		assets.HasZst = true

@@ -370,8 +370,7 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 		fmt.Printf("  Warning: could not propagate dependency frames: %s\n", err)
 	}
 
-	// Ensure header version is 4 for v4 serialization
-	h.Metadata.Version = 4
+	h.Metadata.Version = header.MetadataVersionCompressed
 
 	// Serialize as v4
 	headerBytes, err := header.Serialize(h.Metadata, h.Mapping)
