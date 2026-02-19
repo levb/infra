@@ -10,8 +10,6 @@ import (
 	lz4 "github.com/pierrec/lz4/v4"
 )
 
-// Compression types and frame-based access for compressed assets.
-
 type CompressionType byte
 
 const (
@@ -80,8 +78,7 @@ type FrameTable struct {
 	Frames          []FrameSize
 }
 
-// CompressionTypeSuffix returns the object-path suffix for this frame table's
-// compression type. Returns "" when ft is nil.
+// CompressionTypeSuffix returns ".lz4", ".zst", or "" (nil-safe).
 func (ft *FrameTable) CompressionTypeSuffix() string {
 	if ft == nil {
 		return ""
@@ -105,31 +102,27 @@ type FrameGetter interface {
 	GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error)
 }
 
-// IsCompressed returns true if the frame table represents compressed data.
-// Safe to call with nil - returns false.
+// IsCompressed reports whether ft is non-nil and has a compression type set.
 func IsCompressed(ft *FrameTable) bool {
 	return ft != nil && ft.CompressionType != CompressionNone
 }
 
-// Range iterates over frames that overlap with the given range and calls fn for each frame.
+// Range calls fn for each frame overlapping [start, start+length).
 func (ft *FrameTable) Range(start, length int64, fn func(offset FrameOffset, frame FrameSize) error) error {
 	var currentOffset FrameOffset
 	for _, frame := range ft.Frames {
 		frameEnd := currentOffset.U + int64(frame.U)
 		requestEnd := start + length
 		if frameEnd <= start {
-			// frame is before the requested range
 			currentOffset.U += int64(frame.U)
 			currentOffset.C += int64(frame.C)
 
 			continue
 		}
 		if currentOffset.U >= requestEnd {
-			// frame is after the requested range
 			break
 		}
 
-		// frame overlaps with the requested range
 		if err := fn(currentOffset, frame); err != nil {
 			return err
 		}
@@ -149,11 +142,8 @@ func (ft *FrameTable) Size() (uncompressed, compressed int64) {
 	return uncompressed, compressed
 }
 
-// Subset returns a new FrameTable that represents the minimal set of frames
-// that cover the start(length) range. Only entire frames are included (since
-// they are compressed and can not be sliced). All offsets and sizes are in
-// memory/uncompressed bytes. If the requested range extends beyond the total
-// uncompressed size, the subset silently stops at the end of the frameset.
+// Subset returns frames covering r. Whole frames only (can't split compressed).
+// Stops silently at the end of the frameset if r extends beyond.
 func (ft *FrameTable) Subset(r Range) (*FrameTable, error) {
 	if ft == nil || r.Length == 0 {
 		return nil, nil
@@ -212,7 +202,7 @@ func (ft *FrameTable) FrameFor(offset int64) (starts FrameOffset, size FrameSize
 	return FrameOffset{}, FrameSize{}, fmt.Errorf("offset %#x is beyond the end of the frame table", offset)
 }
 
-// GetFetchRange translates an uncompressed range to a compressed range using the frame table.
+// GetFetchRange translates a U-space range to C-space using the frame table.
 func (ft *FrameTable) GetFetchRange(rangeU Range) (Range, error) {
 	fetchRange := rangeU
 	if ft != nil && ft.CompressionType != CompressionNone {
@@ -234,8 +224,7 @@ func (ft *FrameTable) GetFetchRange(rangeU Range) (Range, error) {
 	return fetchRange, nil
 }
 
-// DecompressReader streams compressed data from r through the appropriate decoder
-// and returns a decompressed buffer of uncompressedSize bytes.
+// DecompressReader decompresses from r into a new buffer of uncompressedSize.
 func DecompressReader(ct CompressionType, r io.Reader, uncompressedSize int) ([]byte, error) {
 	buf := make([]byte, uncompressedSize)
 

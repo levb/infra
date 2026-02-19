@@ -9,11 +9,8 @@ import (
 	"sync/atomic"
 )
 
-// rangeWaiter represents a goroutine waiting for a byte range to become available.
 type rangeWaiter struct {
-	// endByte is the byte offset (relative to session start) at which this
-	// waiter's entire requested range is cached. Always aligned to blockSize
-	// (unless it's the tail of the chunk).
+	// endByte: relative to session start, block-aligned (except at tail).
 	endByte int64
 	ch      chan error // buffered cap 1
 }
@@ -27,19 +24,8 @@ const (
 )
 
 // fetchSession coordinates concurrent waiters for a single fetch unit
-// (a 4MB chunk for uncompressed data, or a compressed frame for the
-// compressed chunkers). Waiters are progressively released as data
-// becomes available.
-//
-// Usage from the fetch goroutine:
-//   - Call advance(bytesReady) as blocks of data become available.
-//   - Call complete() when all data is ready.
-//   - Call fail(err) on errors. Waiters whose range is already within
-//     bytesReady still succeed; others receive the error.
-//
-// Usage from callers:
-//   - Call registerAndWait(ctx, off, length) to block until the range
-//     is available. Returns nil immediately if already satisfied.
+// (a 4 MB chunk or a compressed frame). The fetch goroutine calls
+// advance/complete/fail; callers block on registerAndWait.
 type fetchSession struct {
 	mu        sync.Mutex
 	chunkOff  int64 // absolute start offset in U-space
@@ -56,9 +42,7 @@ type fetchSession struct {
 	// Load() >= endByte guarantees data availability without taking the mutex.
 	bytesReady atomic.Int64
 
-	// isCachedFn optionally checks if a range is already available from a
-	// persistent cache (e.g., mmap). This handles data cached by previous
-	// sessions that have since been cleaned up. May be nil.
+	// isCachedFn checks persistent cache for data from previous sessions.
 	isCachedFn func(off, length int64) bool
 }
 
@@ -72,11 +56,8 @@ func newFetchSession(chunkOff, chunkLen, blockSize int64, isCachedFn func(off, l
 	}
 }
 
-// registerAndWait blocks until the requested range is available or the
-// context is cancelled. Returns nil immediately if the range is already
-// within bytesReady or isCachedFn reports it as cached.
+// registerAndWait blocks until [off, off+length) is cached or ctx is cancelled.
 func (s *fetchSession) registerAndWait(ctx context.Context, off, length int64) error {
-	// Compute the endByte threshold for this waiter (relative to chunkOff).
 	relEnd := off + length - s.chunkOff
 	var endByte int64
 	if s.blockSize > 0 {
@@ -102,7 +83,7 @@ func (s *fetchSession) registerAndWait(ctx context.Context, off, length int64) e
 	if s.state == fetchStateDone {
 		s.mu.Unlock()
 
-		return nil // done means all data is available
+		return nil
 	}
 
 	// Session errored — partial data may still be usable.
@@ -150,8 +131,7 @@ func (s *fetchSession) registerAndWait(ctx context.Context, off, length int64) e
 	}
 }
 
-// advance updates bytesReady and releases waiters whose ranges are now satisfied.
-// Must be called from the fetch goroutine as data becomes available.
+// advance updates progress and wakes satisfied waiters.
 func (s *fetchSession) advance(bytesReady int64) {
 	s.mu.Lock()
 	s.bytesReady.Store(bytesReady)
@@ -159,7 +139,7 @@ func (s *fetchSession) advance(bytesReady int64) {
 	s.mu.Unlock()
 }
 
-// complete marks the session as done and releases all remaining waiters.
+// complete wakes all remaining waiters with success.
 func (s *fetchSession) complete() {
 	s.mu.Lock()
 	s.state = fetchStateDone
@@ -168,8 +148,7 @@ func (s *fetchSession) complete() {
 	s.mu.Unlock()
 }
 
-// fail marks the session as errored and releases remaining waiters with the error.
-// Waiters whose ranges were already satisfied receive nil (success).
+// fail wakes remaining waiters. Already-satisfied waiters still get nil.
 func (s *fetchSession) fail(err error) {
 	s.mu.Lock()
 	if s.state == fetchStateRunning {
@@ -180,9 +159,7 @@ func (s *fetchSession) fail(err error) {
 	s.mu.Unlock()
 }
 
-// notifyWaiters releases waiters whose ranges are satisfied.
-// In terminal states all remaining waiters are notified.
-// Must be called with s.mu held.
+// notifyWaiters releases satisfied waiters. Must be called with s.mu held.
 func (s *fetchSession) notifyWaiters(sendErr error) {
 	ready := s.bytesReady.Load()
 

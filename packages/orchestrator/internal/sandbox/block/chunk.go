@@ -37,9 +37,7 @@ const (
 	defaultMinReadBatchSize = 16 * 1024 // 16 KB
 )
 
-// AssetInfo describes the availability of uncompressed and compressed variants
-// of a build artifact.
-// Compressed paths are derived from BasePath + compression suffix when needed.
+// AssetInfo describes which storage variants exist for a build artifact.
 type AssetInfo struct {
 	BasePath        string // uncompressed path (e.g., "build-123/memfile")
 	Size            int64  // uncompressed size (from either source)
@@ -48,8 +46,7 @@ type AssetInfo struct {
 	HasZst          bool   // true if a .zst compressed variant exists
 }
 
-// HasCompressed returns whether a compressed asset matching the FT's
-// compression type exists.
+// HasCompressed reports whether a compressed asset matching ft's type exists.
 func (a *AssetInfo) HasCompressed(ft *storage.FrameTable) bool {
 	if ft == nil {
 		return false
@@ -100,9 +97,7 @@ type fetchKey struct {
 
 var _ Reader = (*Chunker)(nil)
 
-// NewChunker creates a chunker that stores decompressed/fetched data
-// in an mmap cache. Works for both compressed and uncompressed data.
-// The AssetInfo describes which variants (uncompressed, .lz4, .zst) are available.
+// NewChunker creates a Chunker backed by a new mmap cache at cachePath.
 func NewChunker(
 	assets AssetInfo,
 	blockSize int64,
@@ -155,7 +150,8 @@ func (c *Chunker) GetBlock(ctx context.Context, off, length int64, ft *storage.F
 	// Fast path: already in mmap cache.
 	b, err := c.cache.Slice(off, length)
 	if err == nil {
-		timer.Success(ctx, length, attribute.String(pullType, pullTypeLocal))
+		timer.Success(ctx, length,
+			attribute.String(pullType, pullTypeLocal))
 
 		return b, nil
 	}
@@ -194,7 +190,8 @@ func (c *Chunker) GetBlock(ctx context.Context, off, length int64, ft *storage.F
 		return nil, fmt.Errorf("failed to read from cache after fetch at %d-%d: %w", off, off+length, cacheErr)
 	}
 
-	timer.Success(ctx, length, attribute.String(pullType, pullTypeRemote))
+	timer.Success(ctx, length,
+		attribute.String(pullType, pullTypeRemote))
 
 	return b, nil
 }
