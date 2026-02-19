@@ -99,8 +99,13 @@ func Serialize(metadata *Metadata, mappings []*BuildMap) ([]byte, error) {
 			}
 			if mapping.FrameTable != nil {
 				v4.CompressionTypeNumFrames = uint64(mapping.FrameTable.CompressionType)<<24 | uint64(len(mapping.FrameTable.Frames))
-				offset = &mapping.FrameTable.StartAt
-				frames = mapping.FrameTable.Frames
+				// Only write offset/frames when the packed value is non-zero,
+				// matching the deserializer's condition. A FrameTable with
+				// CompressionNone and zero frames produces a packed value of 0.
+				if v4.CompressionTypeNumFrames != 0 {
+					offset = &mapping.FrameTable.StartAt
+					frames = mapping.FrameTable.Frames
+				}
 			}
 			v = v4
 		}

@@ -1,6 +1,7 @@
 package header
 
 import (
+	"crypto/rand"
 	"testing"
 
 	"github.com/google/uuid"
@@ -186,4 +187,172 @@ func TestSerializeDeserialize_V4_WithFrameTable(t *testing.T) {
 	assert.Equal(t, uint64(4096), m1.Length)
 	assert.Equal(t, baseID, m1.BuildId)
 	assert.Nil(t, m1.FrameTable)
+}
+
+func TestSerializeDeserialize_V4_Zstd_NonZeroStartAt(t *testing.T) {
+	t.Parallel()
+
+	buildID := uuid.New()
+	metadata := &Metadata{
+		Version:     4,
+		BlockSize:   4096,
+		Size:        4096,
+		Generation:  0,
+		BuildId:     buildID,
+		BaseBuildId: buildID,
+	}
+
+	mappings := []*BuildMap{
+		{
+			Offset:             0,
+			Length:             4096,
+			BuildId:            buildID,
+			BuildStorageOffset: 8192,
+			FrameTable: &storage.FrameTable{
+				CompressionType: storage.CompressionZstd,
+				StartAt:         storage.FrameOffset{U: 8192, C: 4000},
+				Frames: []storage.FrameSize{
+					{U: 4096, C: 3500},
+				},
+			},
+		},
+	}
+
+	data, err := Serialize(metadata, mappings)
+	require.NoError(t, err)
+
+	got, err := DeserializeV4(compressLZ4Block(t, data))
+	require.NoError(t, err)
+
+	require.Len(t, got.Mapping, 1)
+	m := got.Mapping[0]
+	require.NotNil(t, m.FrameTable)
+	assert.Equal(t, storage.CompressionZstd, m.FrameTable.CompressionType)
+	assert.Equal(t, int64(8192), m.FrameTable.StartAt.U)
+	assert.Equal(t, int64(4000), m.FrameTable.StartAt.C)
+	require.Len(t, m.FrameTable.Frames, 1)
+	assert.Equal(t, int32(4096), m.FrameTable.Frames[0].U)
+	assert.Equal(t, int32(3500), m.FrameTable.Frames[0].C)
+}
+
+// TestSerializeDeserialize_V4_CompressionNone_EmptyFrames verifies that a
+// FrameTable with CompressionNone and zero frames does not corrupt the stream.
+// Before the fix, the serializer wrote a StartAt offset (16 bytes) but the
+// deserializer skipped it because the packed value was 0.
+func TestSerializeDeserialize_V4_CompressionNone_EmptyFrames(t *testing.T) {
+	t.Parallel()
+
+	buildID := uuid.New()
+	baseID := uuid.New()
+	metadata := &Metadata{
+		Version:     4,
+		BlockSize:   4096,
+		Size:        8192,
+		Generation:  0,
+		BuildId:     buildID,
+		BaseBuildId: buildID,
+	}
+
+	mappings := []*BuildMap{
+		{
+			Offset:             0,
+			Length:             4096,
+			BuildId:            buildID,
+			BuildStorageOffset: 0,
+			// FrameTable with CompressionNone and no frames — packed value is 0.
+			FrameTable: &storage.FrameTable{
+				CompressionType: storage.CompressionNone,
+				StartAt:         storage.FrameOffset{U: 100, C: 50},
+				Frames:          nil,
+			},
+		},
+		{
+			Offset:             4096,
+			Length:             4096,
+			BuildId:            baseID,
+			BuildStorageOffset: 0,
+		},
+	}
+
+	data, err := Serialize(metadata, mappings)
+	require.NoError(t, err)
+
+	got, err := DeserializeV4(compressLZ4Block(t, data))
+	require.NoError(t, err)
+
+	require.Len(t, got.Mapping, 2)
+
+	// First mapping: FrameTable was effectively empty, deserializer should treat as nil.
+	assert.Nil(t, got.Mapping[0].FrameTable)
+
+	// Second mapping must not be corrupted by stray StartAt bytes.
+	assert.Equal(t, uint64(4096), got.Mapping[1].Offset)
+	assert.Equal(t, uint64(4096), got.Mapping[1].Length)
+	assert.Equal(t, baseID, got.Mapping[1].BuildId)
+}
+
+func TestCompressDecompressLZ4_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	// Random data should round-trip through LZ4 compress/decompress.
+	data := make([]byte, 4096)
+	_, err := rand.Read(data)
+	require.NoError(t, err)
+
+	compressed, err := storage.CompressLZ4(data)
+	require.NoError(t, err)
+
+	decompressed, err := storage.DecompressLZ4(compressed, storage.MaxCompressedHeaderSize)
+	require.NoError(t, err)
+	assert.Equal(t, data, decompressed)
+}
+
+func TestSerializeDeserialize_V4_ManyFrames(t *testing.T) {
+	t.Parallel()
+
+	buildID := uuid.New()
+	const numFrames = 1000
+	frames := make([]storage.FrameSize, numFrames)
+	for i := range frames {
+		frames[i] = storage.FrameSize{U: 4096, C: int32(2000 + i)}
+	}
+
+	metadata := &Metadata{
+		Version:     4,
+		BlockSize:   4096,
+		Size:        4096 * numFrames,
+		Generation:  0,
+		BuildId:     buildID,
+		BaseBuildId: buildID,
+	}
+
+	mappings := []*BuildMap{
+		{
+			Offset:             0,
+			Length:             4096 * numFrames,
+			BuildId:            buildID,
+			BuildStorageOffset: 0,
+			FrameTable: &storage.FrameTable{
+				CompressionType: storage.CompressionLZ4,
+				StartAt:         storage.FrameOffset{U: 0, C: 0},
+				Frames:          frames,
+			},
+		},
+	}
+
+	data, err := Serialize(metadata, mappings)
+	require.NoError(t, err)
+
+	got, err := DeserializeV4(compressLZ4Block(t, data))
+	require.NoError(t, err)
+
+	require.Len(t, got.Mapping, 1)
+	require.NotNil(t, got.Mapping[0].FrameTable)
+	require.Len(t, got.Mapping[0].FrameTable.Frames, numFrames)
+
+	// Spot-check first and last frame
+	assert.Equal(t, int32(4096), got.Mapping[0].FrameTable.Frames[0].U)
+	assert.Equal(t, int32(2000), got.Mapping[0].FrameTable.Frames[0].C)
+	assert.Equal(t, int32(4096), got.Mapping[0].FrameTable.Frames[numFrames-1].U)
+	assert.Equal(t, int32(2000+numFrames-1), got.Mapping[0].FrameTable.Frames[numFrames-1].C)
 }

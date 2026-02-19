@@ -11,6 +11,8 @@ import (
 const MaxCompressedHeaderSize = 64 << 20
 
 // CompressLZ4 compresses data using LZ4 block compression.
+// Returns an error if the data is incompressible (CompressBlock returns 0),
+// since callers store the result as ".lz4" and DecompressLZ4 would fail on raw data.
 func CompressLZ4(data []byte) ([]byte, error) {
 	bound := lz4.CompressBlockBound(len(data))
 	dst := make([]byte, bound)
@@ -21,8 +23,7 @@ func CompressLZ4(data []byte) ([]byte, error) {
 	}
 
 	if n == 0 {
-		// Data is incompressible; store original.
-		return data, nil
+		return nil, fmt.Errorf("lz4 compress: data is incompressible (%d bytes)", len(data))
 	}
 
 	return dst[:n], nil
