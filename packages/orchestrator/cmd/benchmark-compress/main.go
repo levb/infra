@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -55,12 +54,11 @@ func main() {
 	storagePath := flag.String("storage", ".local-build", "storage: local path or gs://bucket")
 	doMemfile := flag.Bool("memfile", false, "benchmark memfile only")
 	doRootfs := flag.Bool("rootfs", false, "benchmark rootfs only")
-	levelsStr := flag.String("levels", "1,2,3,4", "comma-separated compression levels to test")
 	iterations := flag.Int("iterations", 1, "number of iterations for timing (results averaged)")
 
 	flag.Parse()
 
-	cmdutil.SuppressNoisyLogs()
+	cmdutil.SuppressNoisyLogsKeepStdLog()
 
 	// Resolve build ID
 	if *template != "" && *build != "" {
@@ -80,12 +78,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Benchmarks raw vs framed compression to measure framing overhead.\n\n")
 		flag.PrintDefaults()
 		os.Exit(1)
-	}
-
-	// Parse levels
-	levels, err := parseLevels(*levelsStr)
-	if err != nil {
-		log.Fatalf("invalid -levels: %s", err)
 	}
 
 	// Determine which artifacts to benchmark
@@ -118,32 +110,13 @@ func main() {
 		}
 
 		printHeader(a.name, int64(len(data)))
-		benchmarkArtifact(data, levels, *iterations, func(r benchResult) {
+		benchmarkArtifact(data, *iterations, func(r benchResult) {
 			printRow(r)
 		})
 		fmt.Println()
 	}
 }
 
-func parseLevels(s string) ([]int, error) {
-	parts := strings.Split(s, ",")
-	levels := make([]int, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		l, err := strconv.Atoi(p)
-		if err != nil {
-			return nil, fmt.Errorf("invalid level %q: %w", p, err)
-		}
-		levels = append(levels, l)
-	}
-	if len(levels) == 0 {
-		return nil, fmt.Errorf("no levels specified")
-	}
-	return levels, nil
-}
 
 func loadArtifact(ctx context.Context, storagePath, buildID, file string) ([]byte, error) {
 	reader, dataSize, source, err := cmdutil.OpenDataFile(ctx, storagePath, buildID, file)
@@ -164,17 +137,24 @@ func loadArtifact(ctx context.Context, storagePath, buildID, file string) ([]byt
 	return data, nil
 }
 
-func benchmarkArtifact(data []byte, levels []int, iterations int, emit func(benchResult)) {
-	codecs := []struct {
-		name string
-		ct   storage.CompressionType
-	}{
-		{"lz4", storage.CompressionLZ4},
-		{"zstd", storage.CompressionZstd},
+func benchmarkArtifact(data []byte, iterations int, emit func(benchResult)) {
+	type codecConfig struct {
+		name   string
+		ct     storage.CompressionType
+		levels []int
+	}
+	codecs := []codecConfig{
+		{"lz4", storage.CompressionLZ4, []int{0, 9}},
+		{"zstd", storage.CompressionZstd, []int{
+			int(zstd.SpeedFastest),          // 1
+			int(zstd.SpeedDefault),          // 2
+			int(zstd.SpeedBetterCompression), // 3
+			int(zstd.SpeedBestCompression),  // 4
+		}},
 	}
 
 	for _, codec := range codecs {
-		for _, level := range levels {
+		for _, level := range codec.levels {
 			r := benchResult{
 				codec:    codec.name,
 				level:    level,
@@ -243,7 +223,16 @@ func rawEncode(data []byte, ct storage.CompressionType, level int) ([]byte, time
 		_ = w.Close()
 
 	case storage.CompressionZstd:
-		w, _ := zstd.NewWriter(&buf, zstd.WithEncoderLevel(zstd.EncoderLevel(level)))
+		// Match the framed encoder: CompressStream passes TargetFrameSize as
+		// windowSize to newZstdEncoder, so we must use the same window here
+		// for an apples-to-apples comparison.
+		w, err := zstd.NewWriter(&buf,
+			zstd.WithEncoderLevel(zstd.EncoderLevel(level)),
+			zstd.WithEncoderConcurrency(1),
+			zstd.WithWindowSize(2*1024*1024))
+		if err != nil {
+			log.Fatalf("zstd raw encoder (level %d): %s", level, err)
+		}
 		_, _ = w.Write(data)
 		_ = w.Close()
 	}
@@ -258,6 +247,7 @@ func framedEncode(data []byte, ct storage.CompressionType, level int) ([]byte, *
 	opts := &storage.FramedUploadOptions{
 		CompressionType:          ct,
 		Level:                    level,
+		CompressionConcurrency:   1,
 		ChunkSize:                storage.MemoryChunkSize,
 		TargetFrameSize:          2 * 1024 * 1024, // 2 MiB
 		MaxUncompressedFrameSize: storage.DefaultMaxFrameUncompressedSize,
@@ -413,18 +403,18 @@ func fmtMiB(b int64) string {
 func printHeader(artifact string, origSize int64) {
 	fmt.Printf("\n=== %s (%.1f MiB) ===\n\n", artifact, float64(origSize)/1024/1024)
 
-	hdr := fmt.Sprintf("%-4s  %3s  %9s  %9s  %-7s  %9s  %9s  %-7s  %9s  %9s  %-7s  %-5s  %6s",
+	hdr := fmt.Sprintf("%-4s  %3s  %9s  %9s  %-7s  %9s  %9s  %-7s  %9s  %9s  %-7s  %-5s  %6s  %8s",
 		"Codec", "Lvl",
 		"Raw Enc", "Frm Enc", "Enc OH",
 		"Raw Dec", "Frm Dec", "Dec OH",
 		"Raw Size", "Frm Size", "Size OH",
-		"Ratio", "Frames")
-	sep := fmt.Sprintf("%-4s  %3s  %9s  %9s  %-7s  %9s  %9s  %-7s  %9s  %9s  %-7s  %-5s  %6s",
+		"Ratio", "Frames", "Dec/Frm")
+	sep := fmt.Sprintf("%-4s  %3s  %9s  %9s  %-7s  %9s  %9s  %-7s  %9s  %9s  %-7s  %-5s  %6s  %8s",
 		"----", "---",
 		"---------", "---------", "-------",
 		"---------", "---------", "-------",
 		"---------", "---------", "-------",
-		"-----", "------")
+		"-----", "------", "--------")
 	fmt.Println(hdr)
 	fmt.Println(sep)
 }
@@ -437,7 +427,15 @@ func printRow(r benchResult) {
 		ratioText = fmt.Sprintf("%.0fx", ratio)
 	}
 
-	fmt.Printf("%-4s  %3d  %s  %s  %s  %s  %s  %s  %s  %s  %s  %s  %6d\n",
+	var decPerFrame string
+	if r.numFrames > 0 {
+		usPerFrame := r.frmDecTime.Microseconds() / int64(r.numFrames)
+		decPerFrame = rpad(fmt.Sprintf("%d us", usPerFrame), 8)
+	} else {
+		decPerFrame = rpad("N/A", 8)
+	}
+
+	fmt.Printf("%-4s  %3d  %s  %s  %s  %s  %s  %s  %s  %s  %s  %s  %6d  %s\n",
 		r.codec,
 		r.level,
 		fmtSpeed(r.origSize, r.rawEncTime),
@@ -451,6 +449,7 @@ func printRow(r benchResult) {
 		fmtSizeOH(r.rawSize, r.frmSize),
 		colorWrap(ratioColor, ratioText, 5),
 		r.numFrames,
+		decPerFrame,
 	)
 }
 
