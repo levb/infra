@@ -3,7 +3,8 @@ package build
 import (
 	"context"
 	"fmt"
-	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block"
 	blockmetrics "github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
@@ -110,68 +111,68 @@ func (b *StorageDiff) probeAssets(ctx context.Context) block.AssetInfo {
 	assets := block.AssetInfo{BasePath: b.storagePath}
 
 	var (
-		wg            sync.WaitGroup
 		lz4UncompSize int64
 		zstUncompSize int64
 	)
 
-	// Probe all 3 paths in parallel: uncompressed, v4.*.lz4, v4.*.zst
-	wg.Add(3)
+	// Probe all 3 paths in parallel: uncompressed, v4.*.lz4, v4.*.zst.
+	// Errors are swallowed (missing assets are expected).
+	eg, ctx := errgroup.WithContext(ctx)
 
-	go func() {
-		defer wg.Done()
-
+	eg.Go(func() error {
 		obj, err := b.persistence.OpenSeekable(ctx, b.storagePath, b.storageObjectType)
 		if err != nil {
-			return
+			return nil
 		}
 
 		uncompSize, err := obj.Size(ctx)
 		if err != nil {
-			return
+			return nil
 		}
 
 		assets.Size = uncompSize
 		assets.HasUncompressed = true
-	}()
 
-	go func() {
-		defer wg.Done()
+		return nil
+	})
 
+	eg.Go(func() error {
 		lz4Path := storage.V4DataPath(b.storagePath, storage.CompressionLZ4)
 		obj, err := b.persistence.OpenSeekable(ctx, lz4Path, b.storageObjectType)
 		if err != nil {
-			return
+			return nil
 		}
 
 		uncompSize, err := obj.Size(ctx)
 		if err != nil {
-			return
+			return nil
 		}
 
 		assets.HasLZ4 = true
 		lz4UncompSize = uncompSize
-	}()
 
-	go func() {
-		defer wg.Done()
+		return nil
+	})
 
+	eg.Go(func() error {
 		zstPath := storage.V4DataPath(b.storagePath, storage.CompressionZstd)
 		obj, err := b.persistence.OpenSeekable(ctx, zstPath, b.storageObjectType)
 		if err != nil {
-			return
+			return nil
 		}
 
 		uncompSize, err := obj.Size(ctx)
 		if err != nil {
-			return
+			return nil
 		}
 
 		assets.HasZst = true
 		zstUncompSize = uncompSize
-	}()
 
-	wg.Wait()
+		return nil
+	})
+
+	_ = eg.Wait()
 
 	// If no uncompressed object exists, derive the mmap allocation size
 	// from the compressed object's uncompressed-size metadata.

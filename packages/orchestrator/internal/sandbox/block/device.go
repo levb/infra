@@ -2,13 +2,12 @@ package block
 
 import (
 	"context"
+	"io"
 
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
 )
 
-// BytesNotAvailableError is returned when the requested bytes are not
-// yet available in the mmap cache.
 type BytesNotAvailableError struct{}
 
 func (BytesNotAvailableError) Error() string {
@@ -29,7 +28,7 @@ type Slicer interface {
 
 type ReadonlyDevice interface {
 	storage.SeekableReader
-	Close() error
+	io.Closer
 	Slicer
 	BlockSize() int64
 	Header() *header.Header
@@ -37,5 +36,5 @@ type ReadonlyDevice interface {
 
 type Device interface {
 	ReadonlyDevice
-	WriteAt(p []byte, off int64) (n int, err error)
+	io.WriterAt
 }
