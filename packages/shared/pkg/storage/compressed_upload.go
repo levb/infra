@@ -13,6 +13,78 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// Each compressed frame contains 1+ chunks.
+const (
+	// defaultChunkSizeU is the uncompressed chunk size for compression.
+	// Must be a multiple of MemoryChunkSize to ensure aligned block/prefetch
+	// requests do not cross compression frame boundaries.
+	defaultChunkSizeU             = MemoryChunkSize
+	defaultTargetFrameSizeC       = 2 * megabyte // target compressed frame size
+	defaultLZ4CompressionLevel    = 3            // lz4 compression level (0=fast, higher=better ratio)
+	defaultCompressionConcurrency = 0            // use default compression concurrency settings
+	defaultUploadPartSize         = 50 * megabyte
+
+	// DefaultMaxFrameUncompressedSize caps the uncompressed bytes in a single frame.
+	// When a frame's uncompressed size reaches this limit it is flushed regardless
+	// of the compressed size.  4× MemoryChunkSize = 16 MiB.
+	DefaultMaxFrameUncompressedSize = 4 * MemoryChunkSize
+)
+
+// PartUploader is the interface for uploading data in parts.
+// Implementations exist for GCS multipart uploads and local file writes.
+type PartUploader interface {
+	Start(ctx context.Context) error
+	UploadPart(ctx context.Context, partIndex int, data ...[]byte) error
+	Complete(ctx context.Context) error
+}
+
+// FramedUploadOptions configures compression for framed uploads.
+type FramedUploadOptions struct {
+	CompressionType        CompressionType
+	Level                  int
+	CompressionConcurrency int
+	ChunkSize              int // frames are made of whole chunks
+	TargetFrameSize        int // frames may be bigger than this due to chunk alignment and async compression.
+	TargetPartSize         int
+
+	// MaxUncompressedFrameSize caps uncompressed bytes per frame.
+	// 0 = use DefaultMaxFrameUncompressedSize.
+	MaxUncompressedFrameSize int
+
+	OnFrameReady func(offset FrameOffset, size FrameSize, data []byte) error
+}
+
+// DefaultCompressionOptions is the default compression configuration (LZ4).
+var DefaultCompressionOptions = &FramedUploadOptions{
+	CompressionType:          CompressionLZ4,
+	ChunkSize:                defaultChunkSizeU,
+	TargetFrameSize:          defaultTargetFrameSizeC,
+	Level:                    defaultLZ4CompressionLevel,
+	CompressionConcurrency:   defaultCompressionConcurrency,
+	TargetPartSize:           defaultUploadPartSize,
+	MaxUncompressedFrameSize: DefaultMaxFrameUncompressedSize,
+}
+
+// NoCompression indicates no compression should be applied.
+var NoCompression = (*FramedUploadOptions)(nil)
+
+// ValidateCompressionOptions checks that compression options are valid.
+// ChunkSize must be a multiple of MemoryChunkSize to ensure alignment.
+func ValidateCompressionOptions(opts *FramedUploadOptions) error {
+	if opts == nil || opts.CompressionType == CompressionNone {
+		return nil
+	}
+	chunkSize := opts.ChunkSize
+	if chunkSize == 0 {
+		chunkSize = defaultChunkSizeU
+	}
+	if chunkSize%MemoryChunkSize != 0 {
+		return fmt.Errorf("compression ChunkSize (%d) must be a multiple of MemoryChunkSize (%d)", chunkSize, MemoryChunkSize)
+	}
+
+	return nil
+}
+
 // CompressStream reads from in, compresses using opts, and writes parts through uploader.
 // Returns the resulting FrameTable describing the compressed frames.
 func CompressStream(ctx context.Context, in io.Reader, opts *FramedUploadOptions, uploader PartUploader) (*FrameTable, error) {

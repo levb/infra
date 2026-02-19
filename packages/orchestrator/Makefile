@@ -121,10 +121,6 @@ build-template:
 	-kernel $(KERNEL_VERSION) \
 	-firecracker $(FIRECRACKER_VERSION)
 
-.PHONY: compress-build
-compress-build:
-	go run ./cmd/compress-build $(ARGS)
-
 .PHONY: migrate
 migrate:
 	./scripts/upload-envs.sh /mnt/disks/fc-envs/v1 $(TEMPLATE_BUCKET_NAME)

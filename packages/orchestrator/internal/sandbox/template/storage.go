@@ -50,8 +50,9 @@ func objectType(diffType build.DiffType) (storage.SeekableObjectType, bool) {
 	}
 }
 
-// loadHeader loads and deserializes a header blob. Returns (nil, nil) if not found.
-func loadHeader(ctx context.Context, persistence storage.StorageProvider, path string, objType storage.ObjectType) (*header.Header, error) {
+// loadV3Header loads a v3 header from the standard (uncompressed) path.
+// Returns (nil, nil) if not found.
+func loadV3Header(ctx context.Context, persistence storage.StorageProvider, path string, objType storage.ObjectType) (*header.Header, error) {
 	blob, err := persistence.OpenBlob(ctx, path, objType)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
@@ -61,12 +62,7 @@ func loadHeader(ctx context.Context, persistence storage.StorageProvider, path s
 		return nil, err
 	}
 
-	h, err := header.Deserialize(ctx, blob)
-	if err != nil {
-		return nil, err
-	}
-
-	return h, nil
+	return header.Deserialize(ctx, blob)
 }
 
 // loadV4Header loads a v4 header (LZ4 compressed), decompresses, and deserializes it.
@@ -84,48 +80,40 @@ func loadV4Header(ctx context.Context, persistence storage.StorageProvider, path
 	return header.DeserializeV4(data)
 }
 
-// loadV3Header loads a header from the standard (uncompressed) path.
-func loadV3Header(ctx context.Context, persistence storage.StorageProvider, buildId string, fileType build.DiffType, objType storage.ObjectType) (*header.Header, error) {
+// loadHeaderPreferV4 fetches both v3 and v4 headers in parallel,
+// preferring the v4 (compressed) header if available.
+func loadHeaderPreferV4(ctx context.Context, persistence storage.StorageProvider, buildId string, fileType build.DiffType, objType storage.ObjectType) (*header.Header, error) {
 	files := storage.TemplateFiles{BuildID: buildId}
-	path := files.HeaderPath(string(fileType))
-
-	return loadHeader(ctx, persistence, path, objType)
-}
-
-// loadV4orV3Header fetches both compressed and default headers in parallel,
-// preferring the compressed one if available.
-func loadV4orV3Header(ctx context.Context, persistence storage.StorageProvider, buildId string, fileType build.DiffType, objType storage.ObjectType) (*header.Header, error) {
-	files := storage.TemplateFiles{BuildID: buildId}
-	defaultPath := files.HeaderPath(string(fileType))
+	v3Path := files.HeaderPath(string(fileType))
 	v4Path := files.CompressedHeaderPath(string(fileType))
 
-	var defaultHeader, compressedHeader *header.Header
-	var defaultErr, compressedErr error
+	var v3Header, v4Header *header.Header
+	var v3Err, v4Err error
 
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
-		defaultHeader, defaultErr = loadHeader(egCtx, persistence, defaultPath, objType)
+		v3Header, v3Err = loadV3Header(egCtx, persistence, v3Path, objType)
 
 		return nil
 	})
 	eg.Go(func() error {
-		compressedHeader, compressedErr = loadV4Header(egCtx, persistence, v4Path, objType)
+		v4Header, v4Err = loadV4Header(egCtx, persistence, v4Path, objType)
 
 		return nil
 	})
 	_ = eg.Wait()
 
-	if compressedErr == nil && compressedHeader != nil {
-		return compressedHeader, nil
+	if v4Err == nil && v4Header != nil {
+		return v4Header, nil
 	}
-	if defaultErr == nil && defaultHeader != nil {
-		return defaultHeader, nil
+	if v3Err == nil && v3Header != nil {
+		return v3Header, nil
 	}
-	if compressedErr != nil {
-		return nil, compressedErr
+	if v4Err != nil {
+		return nil, v4Err
 	}
-	if defaultErr != nil {
-		return nil, defaultErr
+	if v3Err != nil {
+		return nil, v3Err
 	}
 
 	return nil, nil
@@ -148,9 +136,10 @@ func NewStorage(
 
 		var err error
 		if useCompressedAssets {
-			h, err = loadV4orV3Header(ctx, persistence, buildId, fileType, headerObjectType)
+			h, err = loadHeaderPreferV4(ctx, persistence, buildId, fileType, headerObjectType)
 		} else {
-			h, err = loadV3Header(ctx, persistence, buildId, fileType, headerObjectType)
+			files := storage.TemplateFiles{BuildID: buildId}
+			h, err = loadV3Header(ctx, persistence, files.HeaderPath(string(fileType)), headerObjectType)
 		}
 		if err != nil {
 			return nil, err

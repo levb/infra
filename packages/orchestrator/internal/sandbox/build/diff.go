@@ -26,7 +26,7 @@ const (
 
 type Diff interface {
 	io.Closer
-	block.Reader // ReadBlock(ctx, p, off, ft) + GetBlock(ctx, off, length, ft)
+	block.Reader
 	CacheKey() DiffStoreKey
 	CachePath() (string, error)
 	FileSize() (int64, error)
