@@ -250,27 +250,29 @@ func (c *Chunker) runFetch(ctx context.Context, s *fetchSession, key fetchKey, o
 	defer cancel()
 
 	defer func() {
-		if r := recover(); r != nil {
-			c.removeFetchSession(key)
-			s.fail(fmt.Errorf("fetch panicked: %v", r))
-		}
+		c.fetchMu.Lock()
+		delete(c.fetchMap, key)
+		c.fetchMu.Unlock()
 	}()
 
-	fetchSW := c.metrics.RemoteReadsTimerFactory.Begin(
-		attribute.Bool(compressedAttr, decompress),
-	)
+	defer func() {
+		if r := recover(); r != nil {
+			s.setError(fmt.Errorf("fetch panicked: %v", r), true)
+		}
+	}()
 
 	// Get mmap region for the fetch target.
 	mmapSlice, releaseLock, err := c.cache.addressBytes(s.chunkOff, s.chunkLen)
 	if err != nil {
-		fetchSW.Failure(ctx, s.chunkLen,
-			attribute.String(failureReason, "mmap_address"))
-		c.removeFetchSession(key)
-		s.fail(err)
+		s.setError(err, false)
 
 		return
 	}
 	defer releaseLock()
+
+	fetchSW := c.metrics.RemoteReadsTimerFactory.Begin(
+		attribute.Bool(compressedAttr, decompress),
+	)
 
 	// Compute read batch size from FF + block size.
 	blockSize := c.cache.BlockSize()
@@ -294,25 +296,13 @@ func (c *Chunker) runFetch(ctx context.Context, s *fetchSession, key fetchKey, o
 	if err != nil {
 		fetchSW.Failure(ctx, s.chunkLen,
 			attribute.String(failureReason, failureTypeRemoteRead))
-		c.removeFetchSession(key)
-		s.fail(fmt.Errorf("failed to fetch data at %#x from %s: %w", offsetU, objectPath, err))
+		s.setError(fmt.Errorf("failed to fetch data at %#x from %s: %w", offsetU, objectPath, err), false)
 
 		return
 	}
 
 	fetchSW.Success(ctx, s.chunkLen)
-	// Remove from fetchMap BEFORE notifying waiters, so new requests
-	// arriving after wakeup don't find the stale session.
-	c.removeFetchSession(key)
-	s.complete()
-}
-
-// removeFetchSession removes a session from the fetchMap.
-// Must be called BEFORE complete()/fail() to prevent stale session reuse.
-func (c *Chunker) removeFetchSession(key fetchKey) {
-	c.fetchMu.Lock()
-	delete(c.fetchMap, key)
-	c.fetchMu.Unlock()
+	s.setDone()
 }
 
 func (c *Chunker) Close() error {

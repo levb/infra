@@ -15,17 +15,9 @@ type rangeWaiter struct {
 	ch      chan error // buffered cap 1
 }
 
-type fetchState int
-
-const (
-	fetchStateRunning = fetchState(iota)
-	fetchStateDone
-	fetchStateErrored
-)
-
 // fetchSession coordinates concurrent waiters for a single fetch unit
 // (a 4 MB chunk or a compressed frame). The fetch goroutine calls
-// advance/complete/fail; callers block on registerAndWait.
+// advance/setDone/setError; callers block on registerAndWait.
 type fetchSession struct {
 	mu        sync.Mutex
 	chunkOff  int64 // absolute start offset in U-space
@@ -33,7 +25,6 @@ type fetchSession struct {
 	blockSize int64 // progress tracking granularity
 
 	waiters  []*rangeWaiter // sorted by endByte ascending
-	state    fetchState
 	fetchErr error
 
 	// bytesReady is the byte count (from chunkOff) up to which all blocks
@@ -46,12 +37,17 @@ type fetchSession struct {
 	isCachedFn func(off, length int64) bool
 }
 
+// terminated reports whether the session reached a terminal state
+// (done or errored). Must be called with mu held.
+func (s *fetchSession) terminated() bool {
+	return s.fetchErr != nil || s.bytesReady.Load() == s.chunkLen
+}
+
 func newFetchSession(chunkOff, chunkLen, blockSize int64, isCachedFn func(off, length int64) bool) *fetchSession {
 	return &fetchSession{
 		chunkOff:   chunkOff,
 		chunkLen:   chunkLen,
 		blockSize:  blockSize,
-		state:      fetchStateRunning,
 		isCachedFn: isCachedFn,
 	}
 }
@@ -73,49 +69,34 @@ func (s *fetchSession) registerAndWait(ctx context.Context, off, length int64) e
 		return nil
 	}
 
-	// Fast path: persistent cache from a previous session.
-	if s.isCachedFn != nil && s.isCachedFn(off, length) {
-		return nil
-	}
-
 	s.mu.Lock()
 
-	if s.state == fetchStateDone {
-		s.mu.Unlock()
-
-		return nil
-	}
-
-	// Session errored — partial data may still be usable.
-	if s.state == fetchStateErrored {
-		fetchErr := s.fetchErr
-		ready := s.bytesReady.Load()
-		s.mu.Unlock()
-
-		if ready >= endByte {
-			return nil
-		}
-
-		if s.isCachedFn != nil && s.isCachedFn(off, length) {
-			return nil
-		}
-
-		return fmt.Errorf("fetch failed: %w", fetchErr)
-	}
-
-	// Re-check under lock (another goroutine may have advanced).
+	// Re-check under lock.
 	if s.bytesReady.Load() >= endByte {
 		s.mu.Unlock()
 
 		return nil
 	}
 
-	w := &rangeWaiter{
-		endByte: endByte,
-		ch:      make(chan error, 1),
+	// Terminal but range not covered — only happens on error
+	// (setDone sets bytesReady=chunkLen). Check cache for prior session data.
+	if s.terminated() {
+		fetchErr := s.fetchErr
+		s.mu.Unlock()
+
+		if s.isCachedFn != nil && s.isCachedFn(off, length) {
+			return nil
+		}
+
+		if fetchErr != nil {
+			return fmt.Errorf("fetch failed: %w", fetchErr)
+		}
+
+		return nil
 	}
 
-	// Insert in sorted order so notifyWaiters can iterate front-to-back.
+	// Fetch in progress — register waiter.
+	w := &rangeWaiter{endByte: endByte, ch: make(chan error, 1)}
 	idx, _ := slices.BinarySearchFunc(s.waiters, endByte, func(w *rangeWaiter, target int64) int {
 		return cmp.Compare(w.endByte, target)
 	})
@@ -139,39 +120,44 @@ func (s *fetchSession) advance(bytesReady int64) {
 	s.mu.Unlock()
 }
 
-// complete wakes all remaining waiters with success.
-func (s *fetchSession) complete() {
+// setDone marks the session as successfully completed.
+func (s *fetchSession) setDone() {
 	s.mu.Lock()
-	s.state = fetchStateDone
 	s.bytesReady.Store(s.chunkLen)
 	s.notifyWaiters(nil)
 	s.mu.Unlock()
 }
 
-// fail wakes remaining waiters. Already-satisfied waiters still get nil.
-func (s *fetchSession) fail(err error) {
+// setError records the error and wakes remaining waiters.
+// When onlyIfRunning is true, a no-op if the session already terminated
+// (used for panic recovery to avoid overriding a successful completion).
+func (s *fetchSession) setError(err error, onlyIfRunning bool) {
 	s.mu.Lock()
-	if s.state == fetchStateRunning {
-		s.state = fetchStateErrored
-		s.fetchErr = err
-		s.notifyWaiters(err)
+	if onlyIfRunning && s.terminated() {
+		s.mu.Unlock()
+
+		return
 	}
+
+	s.fetchErr = err
+	s.notifyWaiters(err)
 	s.mu.Unlock()
 }
 
-// notifyWaiters releases satisfied waiters. Must be called with s.mu held.
+// notifyWaiters releases satisfied waiters. Must be called with mu held.
 func (s *fetchSession) notifyWaiters(sendErr error) {
 	ready := s.bytesReady.Load()
 
 	// Terminal: notify every remaining waiter.
-	if s.state != fetchStateRunning {
+	if s.terminated() {
 		for _, w := range s.waiters {
 			if sendErr != nil && w.endByte > ready {
 				w.ch <- sendErr
-			} else {
-				w.ch <- nil
 			}
+
+			close(w.ch)
 		}
+
 		s.waiters = nil
 
 		return
@@ -180,8 +166,9 @@ func (s *fetchSession) notifyWaiters(sendErr error) {
 	// Progress: pop satisfied waiters from the sorted front.
 	i := 0
 	for i < len(s.waiters) && s.waiters[i].endByte <= ready {
-		s.waiters[i].ch <- nil
+		close(s.waiters[i].ch)
 		i++
 	}
+
 	s.waiters = s.waiters[i:]
 }
