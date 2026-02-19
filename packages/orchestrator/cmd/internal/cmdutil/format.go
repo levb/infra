@@ -180,10 +180,7 @@ func PrintCompressionSummary(h *header.Header) {
 				const cols = 16
 				fmt.Printf("\n    Ratio matrix (%d per row):\n", cols)
 				for row := 0; row < len(stats.frames); row += cols {
-					end := row + cols
-					if end > len(stats.frames) {
-						end = len(stats.frames)
-					}
+					end := min(row+cols, len(stats.frames))
 					fmt.Printf("    %4d: ", row)
 					for _, f := range stats.frames[row:end] {
 						r := float64(f.U) / float64(f.C)

@@ -78,6 +78,7 @@ func V4HeaderName(fileName string) string {
 // the v4 compressed data path (e.g. "buildId/v4.memfile.lz4").
 func V4DataPath(basePath string, ct CompressionType) string {
 	dir, file := splitPath(basePath)
+
 	return dir + V4DataName(file, ct)
 }
 

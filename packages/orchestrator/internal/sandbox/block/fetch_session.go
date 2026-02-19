@@ -46,9 +46,9 @@ type fetchSession struct {
 	chunkLen  int64 // total length of this chunk/frame
 	blockSize int64 // progress tracking granularity
 
-	waiters    []*rangeWaiter // sorted by endByte ascending
-	state      fetchState
-	fetchErr   error
+	waiters  []*rangeWaiter // sorted by endByte ascending
+	state    fetchState
+	fetchErr error
 
 	// bytesReady is the byte count (from chunkOff) up to which all blocks
 	// are fully written and marked cached. Atomic so registerAndWait can do

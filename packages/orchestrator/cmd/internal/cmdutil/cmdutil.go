@@ -82,6 +82,7 @@ type ArtifactInfo struct {
 // MainArtifacts returns the list of main artifacts (rootfs, memfile).
 func MainArtifacts() []ArtifactInfo {
 	ct := storage.DefaultCompressionOptions.CompressionType
+
 	return []ArtifactInfo{
 		{
 			Name:                 "Rootfs",
