@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -276,6 +277,13 @@ func (o *awsObject) Size(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 
+	if v, ok := resp.Metadata["uncompressed-size"]; ok {
+		parsed, parseErr := strconv.ParseInt(v, 10, 64)
+		if parseErr == nil {
+			return parsed, nil
+		}
+	}
+
 	return *resp.ContentLength, nil
 }
 
@@ -303,6 +311,41 @@ func ignoreNotExists(err error) error {
 	if errors.Is(err, ErrObjectNotExist) {
 		return nil
 	}
+
+	return err
+}
+
+func (s *awsStorage) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error) {
+	return getFrame(ctx, s.rangeRead, s.GetDetails(), objectPath, offsetU, frameTable, decompress, buf, readSize, onRead)
+}
+
+func (s *awsStorage) rangeRead(ctx context.Context, objectPath string, offset int64, length int) (io.ReadCloser, error) {
+	ctx, cancel := context.WithTimeout(ctx, awsReadTimeout)
+
+	rangeStr := fmt.Sprintf("bytes=%d-%d", offset, offset+int64(length)-1)
+	output, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucketName),
+		Key:    aws.String(objectPath),
+		Range:  aws.String(rangeStr),
+	})
+	if err != nil {
+		cancel()
+
+		return nil, fmt.Errorf("failed to get object range %q: %w", objectPath, err)
+	}
+
+	return &cancelOnCloseReaderAWS{ReadCloser: output.Body, cancel: cancel}, nil
+}
+
+type cancelOnCloseReaderAWS struct {
+	io.ReadCloser
+
+	cancel context.CancelFunc
+}
+
+func (r *cancelOnCloseReaderAWS) Close() error {
+	err := r.ReadCloser.Close()
+	r.cancel()
 
 	return err
 }

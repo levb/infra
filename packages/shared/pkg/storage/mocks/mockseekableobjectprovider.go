@@ -234,8 +234,8 @@ func (_c *MockSeekable_Size_Call) Run(run func(ctx context.Context)) *MockSeekab
 	return _c
 }
 
-func (_c *MockSeekable_Size_Call) Return(n int64, err error) *MockSeekable_Size_Call {
-	_c.Call.Return(n, err)
+func (_c *MockSeekable_Size_Call) Return(size int64, err error) *MockSeekable_Size_Call {
+	_c.Call.Return(size, err)
 	return _c
 }
 
