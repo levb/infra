@@ -104,7 +104,7 @@ func (b *StorageDiff) createChunker(ctx context.Context) (*block.Chunker, error)
 		return nil, fmt.Errorf("no asset found for %s (no uncompressed or compressed with metadata)", b.storagePath)
 	}
 
-	return block.NewChunker(assets, b.blockSize, b.persistence, b.storageObjectType, b.cachePath, b.metrics, b.flags)
+	return block.NewChunker(assets, b.blockSize, b.persistence, b.cachePath, b.metrics, b.flags)
 }
 
 // probeAssets probes for uncompressed and compressed asset variants in parallel.

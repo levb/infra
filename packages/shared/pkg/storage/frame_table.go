@@ -92,14 +92,17 @@ func (ft *FrameTable) CompressionTypeSuffix() string {
 
 // FrameGetter reads a single compressed or uncompressed frame from storage.
 //
-// When onProgress is non-nil, data is written to buf in blockSize-aligned
-// chunks and onProgress is called after each chunk with the cumulative byte
-// count written so far. This enables pipelined fetch+decompress where the
-// caller (e.g. mmap cache) can publish partial results while the network
-// transfer is still in progress. When onProgress is nil, buf is filled in
-// one shot (original behaviour).
+// When onRead is non-nil, data is written to buf in readSize-aligned chunks
+// and onRead is called after each chunk with the cumulative byte count
+// written so far. This enables pipelined fetch+decompress where the caller
+// (e.g. mmap cache) can publish partial results while the network transfer
+// is still in progress. When onRead is nil, buf is filled in one shot
+// (original behaviour).
+//
+// readSize controls the granularity of progressive reads. When readSize <= 0,
+// MemoryChunkSize is used as the default.
 type FrameGetter interface {
-	GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, onProgress func(totalWritten int64)) (Range, error)
+	GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error)
 }
 
 // IsCompressed returns true if the frame table represents compressed data.

@@ -315,8 +315,8 @@ func ignoreNotExists(err error) error {
 	return err
 }
 
-func (s *awsStorage) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, onProgress func(totalWritten int64)) (Range, error) {
-	return getFrame(ctx, s.rangeRead, s.GetDetails(), objectPath, offsetU, frameTable, decompress, buf, onProgress)
+func (s *awsStorage) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error) {
+	return getFrame(ctx, s.rangeRead, s.GetDetails(), objectPath, offsetU, frameTable, decompress, buf, readSize, onRead)
 }
 
 func (s *awsStorage) rangeRead(ctx context.Context, objectPath string, offset int64, length int) (io.ReadCloser, error) {

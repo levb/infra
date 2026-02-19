@@ -22,33 +22,46 @@ const (
 	testFileSize  = testFrameSize * 4
 )
 
-// testFrameGetter implements ChunkerStorage for testing.
-// It serves both compressed frames (via GetFrame) and uncompressed data (via OpenSeekable).
+// testFrameGetter implements storage.FrameGetter for testing.
+// It serves both compressed frames (via GetFrame with ft!=nil) and
+// uncompressed data (via GetFrame with ft==nil).
 type testFrameGetter struct {
 	uncompressed []byte
 	compressed   map[int64][]byte // keyed by C-space offset
 	frameTable   *storage.FrameTable
 	delay        time.Duration
 	fetchCount   atomic.Int64
-
-	// uncompressedFetchCount tracks OpenSeekable/Read calls separately for dual-mode tests.
-	uncompressedFetchCount atomic.Int64
 }
 
-// OpenSeekable implements ChunkerStorage for testing. Returns a slowUpstream for uncompressed reads.
-func (g *testFrameGetter) OpenSeekable(_ context.Context, _ string, _ storage.SeekableObjectType) (storage.Seekable, error) {
-	g.uncompressedFetchCount.Add(1)
-
-	return &slowUpstream{data: g.uncompressed, blockSize: testBlockSize, delay: g.delay}, nil
-}
-
-func (g *testFrameGetter) GetFrame(_ context.Context, _ string, offsetU int64, ft *storage.FrameTable, decompress bool, buf []byte, onProgress func(int64)) (storage.Range, error) {
+func (g *testFrameGetter) GetFrame(_ context.Context, _ string, offsetU int64, ft *storage.FrameTable, decompress bool, buf []byte, readSize int64, onRead func(int64)) (storage.Range, error) {
 	g.fetchCount.Add(1)
 
 	if g.delay > 0 {
 		time.Sleep(g.delay)
 	}
 
+	// Uncompressed path: ft is nil, serve raw data directly.
+	if ft == nil {
+		end := min(offsetU+int64(len(buf)), int64(len(g.uncompressed)))
+		n := copy(buf, g.uncompressed[offsetU:end])
+
+		if onRead != nil {
+			batchSize := int64(testBlockSize)
+			if readSize > 0 {
+				batchSize = readSize
+			}
+			for written := batchSize; written <= int64(n); written += batchSize {
+				onRead(written)
+			}
+			if int64(n)%batchSize != 0 {
+				onRead(int64(n))
+			}
+		}
+
+		return storage.Range{Start: offsetU, Length: n}, nil
+	}
+
+	// Compressed path: use frame table.
 	starts, size, err := ft.FrameFor(offsetU)
 	if err != nil {
 		return storage.Range{}, fmt.Errorf("testFrameGetter: %w", err)
@@ -58,13 +71,17 @@ func (g *testFrameGetter) GetFrame(_ context.Context, _ string, offsetU int64, f
 		uEnd := min(starts.U+int64(size.U), int64(len(g.uncompressed)))
 		n := copy(buf, g.uncompressed[starts.U:uEnd])
 
-		if onProgress != nil {
-			// Simulate progressive delivery in blockSize chunks.
-			for written := int64(testBlockSize); written <= int64(n); written += int64(testBlockSize) {
-				onProgress(written)
+		if onRead != nil {
+			batchSize := int64(testBlockSize)
+			if readSize > 0 {
+				batchSize = readSize
 			}
-			if int64(n)%int64(testBlockSize) != 0 {
-				onProgress(int64(n))
+			// Simulate progressive delivery in readSize chunks.
+			for written := batchSize; written <= int64(n); written += batchSize {
+				onRead(written)
+			}
+			if int64(n)%batchSize != 0 {
+				onRead(int64(n))
 			}
 		}
 
@@ -82,8 +99,6 @@ func (g *testFrameGetter) GetFrame(_ context.Context, _ string, offsetU int64, f
 
 // makeCompressedTestData creates test data, LZ4-compresses it into frames,
 // and returns the FrameTable and a testFrameGetter ready for use.
-//
-
 func makeCompressedTestData(t *testing.T, dataSize, frameSize int, delay time.Duration) ([]byte, *storage.FrameTable, *testFrameGetter) {
 	t.Helper()
 
@@ -150,7 +165,6 @@ func allChunkerTestCases() []chunkerTestCase {
 					},
 					testBlockSize,
 					getter,
-					storage.UnknownSeekableObjectType,
 					t.TempDir()+"/cache",
 					newTestMetrics(t),
 					newTestFlags(t),
@@ -164,15 +178,14 @@ func allChunkerTestCases() []chunkerTestCase {
 			name: "Chunker_Uncompressed",
 			newChunker: func(t *testing.T, data []byte, delay time.Duration) (*Chunker, *storage.FrameTable) {
 				t.Helper()
-				upstream := &slowUpstream{data: data, blockSize: testBlockSize, delay: delay}
+				getter := &testUncompressedStorage{data: data, delay: delay}
 				c, err := NewChunker(
 					AssetInfo{
 						BasePath: "test-object",
 						Size:     int64(len(data)),
 					},
 					testBlockSize,
-					&testUncompressedStorage{upstream: upstream},
-					storage.UnknownSeekableObjectType,
+					getter,
 					t.TempDir()+"/cache",
 					newTestMetrics(t),
 					newTestFlags(t),
@@ -430,7 +443,6 @@ func TestChunker_FetchDedup(t *testing.T) {
 			},
 			testBlockSize,
 			getter,
-			storage.UnknownSeekableObjectType,
 			t.TempDir()+"/cache",
 			newTestMetrics(t),
 			newTestFlags(t),
@@ -457,21 +469,45 @@ func TestChunker_FetchDedup(t *testing.T) {
 	})
 }
 
-// testUncompressedStorage implements ChunkerStorage for uncompressed-only tests.
-// GetFrame always fails; only OpenSeekable is supported.
+// testUncompressedStorage implements storage.FrameGetter for uncompressed-only tests.
+// GetFrame serves raw uncompressed data when ft is nil.
 type testUncompressedStorage struct {
-	upstream *slowUpstream
+	data       []byte
+	delay      time.Duration
+	fetchCount atomic.Int64
 }
 
-func (t *testUncompressedStorage) GetFrame(context.Context, string, int64, *storage.FrameTable, bool, []byte, func(int64)) (storage.Range, error) {
-	return storage.Range{}, fmt.Errorf("testUncompressedStorage: GetFrame not supported")
+func (t *testUncompressedStorage) GetFrame(_ context.Context, _ string, offsetU int64, ft *storage.FrameTable, _ bool, buf []byte, readSize int64, onRead func(int64)) (storage.Range, error) {
+	t.fetchCount.Add(1)
+
+	if t.delay > 0 {
+		time.Sleep(t.delay)
+	}
+
+	if ft != nil {
+		return storage.Range{}, fmt.Errorf("testUncompressedStorage: compressed GetFrame not supported")
+	}
+
+	end := min(offsetU+int64(len(buf)), int64(len(t.data)))
+	n := copy(buf, t.data[offsetU:end])
+
+	if onRead != nil {
+		batchSize := int64(testBlockSize)
+		if readSize > 0 {
+			batchSize = readSize
+		}
+		for written := batchSize; written <= int64(n); written += batchSize {
+			onRead(written)
+		}
+		if int64(n)%batchSize != 0 {
+			onRead(int64(n))
+		}
+	}
+
+	return storage.Range{Start: offsetU, Length: n}, nil
 }
 
-func (t *testUncompressedStorage) OpenSeekable(_ context.Context, _ string, _ storage.SeekableObjectType) (storage.Seekable, error) {
-	return t.upstream, nil
-}
-
-// TestDecompressMMapChunker_DualMode_SharedCache verifies that a single chunker
+// TestChunker_DualMode_SharedCache verifies that a single chunker
 // instance correctly serves both compressed and uncompressed callers, sharing
 // the mmap cache across modes. If region X is fetched via compressed path,
 // a subsequent uncompressed request for region X is served from cache (no fetch).
@@ -489,7 +525,6 @@ func TestChunker_DualMode_SharedCache(t *testing.T) {
 		},
 		testBlockSize,
 		getter,
-		storage.UnknownSeekableObjectType,
 		t.TempDir()+"/cache",
 		newTestMetrics(t),
 		newTestFlags(t),
@@ -504,9 +539,8 @@ func TestChunker_DualMode_SharedCache(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, data[0:readLen], slice1, "compressed read: data mismatch at offset 0")
 
-	compressedFetches := getter.fetchCount.Load()
-	uncompressedFetches := getter.uncompressedFetchCount.Load()
-	assert.Equal(t, int64(1), compressedFetches, "expected 1 compressed fetch for frame 0")
+	fetchesAfterPhase1 := getter.fetchCount.Load()
+	assert.Equal(t, int64(1), fetchesAfterPhase1, "expected 1 fetch for frame 0")
 
 	// --- Phase 2: Uncompressed caller reads offset 0 — should be served from cache ---
 	slice2, err := chunker.GetBlock(t.Context(), 0, readLen, nil)
@@ -514,10 +548,8 @@ func TestChunker_DualMode_SharedCache(t *testing.T) {
 	assert.Equal(t, data[0:readLen], slice2, "uncompressed read from cache: data mismatch at offset 0")
 
 	// No new fetches should have occurred.
-	assert.Equal(t, compressedFetches, getter.fetchCount.Load(),
-		"uncompressed read of cached region should not trigger compressed fetch")
-	assert.Equal(t, uncompressedFetches, getter.uncompressedFetchCount.Load(),
-		"uncompressed read of cached region should not trigger uncompressed fetch")
+	assert.Equal(t, fetchesAfterPhase1, getter.fetchCount.Load(),
+		"uncompressed read of cached region should not trigger any fetch")
 
 	// --- Phase 3: Uncompressed caller reads a new region (frame 1) ---
 	frame1Off := int64(testFrameSize) // start of frame 1
@@ -526,10 +558,10 @@ func TestChunker_DualMode_SharedCache(t *testing.T) {
 	assert.Equal(t, data[frame1Off:frame1Off+readLen], slice3,
 		"uncompressed read: data mismatch at frame 1")
 
-	// This should have triggered an uncompressed fetch (OpenSeekable).
-	assert.Greater(t, getter.uncompressedFetchCount.Load(), uncompressedFetches,
-		"new region should trigger uncompressed fetch")
-	uncompressedFetches = getter.uncompressedFetchCount.Load()
+	// This should have triggered a new fetch via GetFrame (uncompressed path).
+	assert.Greater(t, getter.fetchCount.Load(), fetchesAfterPhase1,
+		"new region should trigger a fetch")
+	fetchesAfterPhase3 := getter.fetchCount.Load()
 
 	// --- Phase 4: Compressed caller reads frame 1 — should be served from cache ---
 	slice4, err := chunker.GetBlock(t.Context(), frame1Off, readLen, ft)
@@ -538,8 +570,6 @@ func TestChunker_DualMode_SharedCache(t *testing.T) {
 		"compressed read from cache: data mismatch at frame 1")
 
 	// No new fetches for frame 1.
-	assert.Equal(t, compressedFetches, getter.fetchCount.Load(),
-		"compressed read of cached region should not trigger new compressed fetch")
-	assert.Equal(t, uncompressedFetches, getter.uncompressedFetchCount.Load(),
-		"compressed read of cached region should not trigger new uncompressed fetch")
+	assert.Equal(t, fetchesAfterPhase3, getter.fetchCount.Load(),
+		"compressed read of cached region should not trigger new fetch")
 }
