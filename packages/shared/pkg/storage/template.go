@@ -94,6 +94,12 @@ func splitPath(p string) (dir, file string) {
 	return "", p
 }
 
+// CompressedDataPath returns the v4 compressed data path for a given file name.
+// Example: "{buildId}/v4.memfile.lz4"
+func (t TemplateFiles) CompressedDataPath(fileName string, ct CompressionType) string {
+	return fmt.Sprintf("%s/%s", t.StorageDir(), V4DataName(fileName, ct))
+}
+
 // CompressedHeaderPath returns the v4 header path: "{buildId}/v4.{fileName}.header.lz4".
 func (t TemplateFiles) CompressedHeaderPath(fileName string) string {
 	return fmt.Sprintf("%s/%s", t.StorageDir(), V4HeaderName(fileName))

@@ -315,6 +315,10 @@ func ignoreNotExists(err error) error {
 	return err
 }
 
+func (s *awsStorage) StoreFileCompressed(_ context.Context, _, _ string, _ *FramedUploadOptions) (*FrameTable, error) {
+	return nil, fmt.Errorf("StoreFileCompressed is not supported on AWS (builds target GCP only)")
+}
+
 func (s *awsStorage) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error) {
 	return getFrame(ctx, s.rangeRead, s.GetDetails(), objectPath, offsetU, frameTable, decompress, buf, readSize, onRead)
 }

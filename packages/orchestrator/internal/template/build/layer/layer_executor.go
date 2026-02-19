@@ -16,6 +16,7 @@ import (
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/template/build/sandboxtools"
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/template/build/storage/cache"
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/template/metadata"
+	featureflags "github.com/e2b-dev/infra/packages/shared/pkg/feature-flags"
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
@@ -34,6 +35,7 @@ type LayerExecutor struct {
 	buildStorage    storage.StorageProvider
 	index           cache.Index
 	uploadTracker   *UploadTracker
+	featureFlags    *featureflags.Client
 }
 
 func NewLayerExecutor(
@@ -46,6 +48,7 @@ func NewLayerExecutor(
 	buildStorage storage.StorageProvider,
 	index cache.Index,
 	uploadTracker *UploadTracker,
+	featureFlags *featureflags.Client,
 ) *LayerExecutor {
 	return &LayerExecutor{
 		BuildContext: buildContext,
@@ -59,6 +62,7 @@ func NewLayerExecutor(
 		buildStorage:    buildStorage,
 		index:           index,
 		uploadTracker:   uploadTracker,
+		featureFlags:    featureFlags,
 	}
 }
 
@@ -280,7 +284,24 @@ func (lb *LayerExecutor) PauseAndUpload(
 	// Upload snapshot async, it's added to the template cache immediately
 	userLogger.Debug(ctx, fmt.Sprintf("Saving: %s", meta.Template.BuildID))
 
-	// Register this upload and get functions to signal completion and wait for previous uploads
+	compressCfg := featureflags.GetCompressConfig(ctx, lb.featureFlags)
+	if compressCfg.CompressBuilds {
+		lb.twoPhaseUpload(ctx, userLogger, snapshot, hash, meta, compressCfg)
+	} else {
+		lb.singlePhaseUpload(ctx, userLogger, snapshot, hash, meta)
+	}
+
+	return nil
+}
+
+// singlePhaseUpload is the original upload path (uncompressed only).
+func (lb *LayerExecutor) singlePhaseUpload(
+	ctx context.Context,
+	userLogger logger.Logger,
+	snapshot *sandbox.Snapshot,
+	hash string,
+	meta metadata.Template,
+) {
 	completeUpload, waitForPreviousUploads := lb.uploadTracker.StartUpload()
 
 	lb.UploadErrGroup.Go(func() error {
@@ -288,9 +309,6 @@ func (lb *LayerExecutor) PauseAndUpload(
 		ctx, span := tracer.Start(ctx, "upload snapshot")
 		defer span.End()
 
-		// Always signal completion to unblock waiting goroutines, even on error.
-		// This prevents deadlocks when an earlier layer fails - later layers can
-		// still unblock and the errgroup can properly collect all errors.
 		defer completeUpload()
 
 		err := snapshot.Upload(
@@ -302,9 +320,6 @@ func (lb *LayerExecutor) PauseAndUpload(
 			return fmt.Errorf("error uploading snapshot: %w", err)
 		}
 
-		// Wait for all previous layer uploads to complete before saving the cache entry.
-		// This prevents race conditions where another build hits this cache entry
-		// before its dependencies (previous layers) are available in storage.
 		err = waitForPreviousUploads(ctx)
 		if err != nil {
 			return fmt.Errorf("error waiting for previous uploads: %w", err)
@@ -323,6 +338,93 @@ func (lb *LayerExecutor) PauseAndUpload(
 
 		return nil
 	})
+}
 
-	return nil
+// twoPhaseUpload implements the compressed write path:
+// Phase 1: Upload data files (uncompressed + compressed) in parallel
+// Phase 2: Wait for ALL data uploads across ALL layers, then finalize compressed headers
+// Phase 3: Wait for previous layer uploads, save cache index
+func (lb *LayerExecutor) twoPhaseUpload(
+	ctx context.Context,
+	userLogger logger.Logger,
+	snapshot *sandbox.Snapshot,
+	hash string,
+	meta metadata.Template,
+	compressCfg featureflags.CompressConfig,
+) {
+	completeDataFileUpload := lb.uploadTracker.StartDataFileUpload()
+	completeUpload, waitForPreviousUploads := lb.uploadTracker.StartUpload()
+	pending := lb.uploadTracker.Pending()
+	buildID := meta.Template.BuildID
+
+	megabyte := 1024 * 1024
+	compressOpts := &storage.FramedUploadOptions{
+		CompressionType:          storage.ParseCompressionType(compressCfg.CompressionType),
+		Level:                    compressCfg.Level,
+		ChunkSize:                compressCfg.ChunkSizeMB * megabyte,
+		TargetFrameSize:          compressCfg.TargetFrameSizeMB * megabyte,
+		TargetPartSize:           compressCfg.TargetPartSizeMB * megabyte,
+		MaxUncompressedFrameSize: compressCfg.MaxFrameUncompressedMB * megabyte,
+	}
+
+	lb.UploadErrGroup.Go(func() error {
+		ctx := context.WithoutCancel(ctx)
+		ctx, span := tracer.Start(ctx, "upload snapshot (two-phase)")
+		defer span.End()
+
+		defer completeUpload()
+
+		// Phase 1: Upload data files (uncompressed + compressed)
+		result, err := snapshot.UploadDataFiles(
+			ctx,
+			lb.templateStorage,
+			storage.TemplateFiles{BuildID: buildID},
+			compressOpts,
+		)
+
+		// Register frame tables before signaling data complete
+		if result != nil {
+			if result.MemfileFrameTable != nil {
+				pending.Add(sandbox.PendingFrameTableKey(buildID, storage.MemfileName), result.MemfileFrameTable)
+			}
+
+			if result.RootfsFrameTable != nil {
+				pending.Add(sandbox.PendingFrameTableKey(buildID, storage.RootfsName), result.RootfsFrameTable)
+			}
+		}
+
+		// Always signal data file completion to avoid deadlocking the WaitGroup
+		completeDataFileUpload()
+
+		if err != nil {
+			return fmt.Errorf("error uploading data files: %w", err)
+		}
+
+		// Phase 2: Wait for ALL data uploads across ALL layers
+		if err := lb.uploadTracker.WaitForAllDataFileUploads(ctx); err != nil {
+			return fmt.Errorf("error waiting for data file uploads: %w", err)
+		}
+
+		// Finalize compressed headers with frame tables from all layers
+		if err := result.TemplateBuild.UploadCompressedHeaders(ctx, pending); err != nil {
+			return fmt.Errorf("error uploading compressed headers: %w", err)
+		}
+
+		// Phase 3: Wait for previous layer uploads, save cache index
+		if err := waitForPreviousUploads(ctx); err != nil {
+			return fmt.Errorf("error waiting for previous uploads: %w", err)
+		}
+
+		if err := lb.index.SaveLayerMeta(ctx, hash, cache.LayerMetadata{
+			Template: cache.Template{
+				BuildID: buildID,
+			},
+		}); err != nil {
+			return fmt.Errorf("error saving UUID to hash mapping: %w", err)
+		}
+
+		userLogger.Debug(ctx, fmt.Sprintf("Saved: %s", buildID))
+
+		return nil
+	})
 }

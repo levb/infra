@@ -473,6 +473,45 @@ func parseServiceAccountBase64(serviceAccount string) (*gcpServiceToken, error) 
 	return &sa, nil
 }
 
+func (s *gcpStorage) StoreFileCompressed(ctx context.Context, localPath, objectPath string, opts *FramedUploadOptions) (*FrameTable, error) {
+	if opts == nil || opts.CompressionType == CompressionNone {
+		// Fall back to simple upload via OpenSeekable
+		obj, err := s.OpenSeekable(ctx, objectPath, UnknownSeekableObjectType)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open seekable for uncompressed upload: %w", err)
+		}
+
+		if err := obj.StoreFile(ctx, localPath); err != nil {
+			return nil, fmt.Errorf("failed to store file uncompressed: %w", err)
+		}
+
+		return nil, nil
+	}
+
+	file, err := os.Open(localPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open local file %s: %w", localPath, err)
+	}
+	defer file.Close()
+
+	uploader, err := NewMultipartUploaderWithRetryConfig(
+		ctx,
+		s.bucket.BucketName(),
+		objectPath,
+		DefaultRetryConfig(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create multipart uploader: %w", err)
+	}
+
+	ft, err := CompressStream(ctx, file, opts, uploader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compress and upload %s: %w", localPath, err)
+	}
+
+	return ft, nil
+}
+
 func (s *gcpStorage) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error) {
 	return getFrame(ctx, s.rangeRead, s.GetDetails(), objectPath, offsetU, frameTable, decompress, buf, readSize, onRead)
 }

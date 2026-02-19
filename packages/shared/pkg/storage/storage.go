@@ -76,6 +76,10 @@ type StorageProvider interface {
 	// is called after each chunk with the cumulative byte count written so far.
 	// When readSize <= 0, MemoryChunkSize is used as the default.
 	GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error)
+	// StoreFileCompressed reads localPath, compresses it using opts, and uploads to objectPath.
+	// Returns the FrameTable describing the compressed frames.
+	// When opts is nil, falls back to a simple uncompressed upload (returns nil FrameTable).
+	StoreFileCompressed(ctx context.Context, localPath, objectPath string, opts *FramedUploadOptions) (*FrameTable, error)
 }
 
 type Blob interface {

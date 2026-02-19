@@ -252,3 +252,71 @@ var ChunkerConfigFlag = newJSONFlag("chunker-config", ldvalue.FromJSONMarshal(ma
 	"useCompressedAssets": false,
 	"minReadBatchSizeKB":  16,
 }))
+
+// CompressConfigFlag is a JSON flag controlling compression behaviour.
+//
+// Fields:
+//   - compressBuilds (bool): Enable compressed (dual-write) uploads during
+//     template builds. Default false.
+//   - compressionType (string): "lz4" or "zstd". Default "lz4".
+//   - level (int): Compression level. For LZ4 0=fast, higher=better ratio. Default 3.
+//   - chunkSizeMB (int): Uncompressed chunk size in MiB. Must be a multiple of 4.
+//     Default 4 (= MemoryChunkSize).
+//   - targetFrameSizeMB (int): Target compressed frame size in MiB. Default 2.
+//   - targetPartSizeMB (int): Target upload part size in MiB. Default 50.
+//   - maxFrameUncompressedMB (int): Cap on uncompressed bytes per frame in MiB.
+//     Default 16 (= 4 × MemoryChunkSize).
+//
+// JSON format: {"compressBuilds": false, "compressionType": "lz4", "level": 3, ...}
+var CompressConfigFlag = newJSONFlag("compress-config", ldvalue.FromJSONMarshal(map[string]any{
+	"compressBuilds":        false,
+	"compressionType":       "lz4",
+	"level":                 3,
+	"chunkSizeMB":           4,
+	"targetFrameSizeMB":     2,
+	"targetPartSizeMB":      50,
+	"maxFrameUncompressedMB": 16,
+}))
+
+// CompressConfig holds the parsed compress-config flag values.
+type CompressConfig struct {
+	CompressBuilds        bool
+	CompressionType       string // "lz4" or "zstd"
+	Level                 int
+	ChunkSizeMB           int
+	TargetFrameSizeMB     int
+	TargetPartSizeMB      int
+	MaxFrameUncompressedMB int
+}
+
+// GetCompressConfig reads the compress-config flag and returns a typed struct.
+// Zero/missing JSON fields fall back to the defaults baked into the flag.
+func GetCompressConfig(ctx context.Context, ff *Client) CompressConfig {
+	v := ff.JSONFlag(ctx, CompressConfigFlag).AsValueMap()
+
+	return CompressConfig{
+		CompressBuilds:        v.Get("compressBuilds").BoolValue(),
+		CompressionType:       stringOrDefault(v.Get("compressionType"), "lz4"),
+		Level:                 intOrDefault(v.Get("level"), 3),
+		ChunkSizeMB:           intOrDefault(v.Get("chunkSizeMB"), 4),
+		TargetFrameSizeMB:     intOrDefault(v.Get("targetFrameSizeMB"), 2),
+		TargetPartSizeMB:      intOrDefault(v.Get("targetPartSizeMB"), 50),
+		MaxFrameUncompressedMB: intOrDefault(v.Get("maxFrameUncompressedMB"), 16),
+	}
+}
+
+func stringOrDefault(v ldvalue.Value, fallback string) string {
+	if s := v.StringValue(); s != "" {
+		return s
+	}
+
+	return fallback
+}
+
+func intOrDefault(v ldvalue.Value, fallback int) int {
+	if n := v.IntValue(); n != 0 {
+		return n
+	}
+
+	return fallback
+}

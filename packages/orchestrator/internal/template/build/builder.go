@@ -269,6 +269,7 @@ func runBuild(
 		builder.buildStorage,
 		index,
 		uploadTracker,
+		builder.featureFlags,
 	)
 
 	baseBuilder := base.New(

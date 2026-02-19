@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	"golang.org/x/sync/errgroup"
 
@@ -148,6 +149,182 @@ func uploadFileAsBlob(ctx context.Context, b storage.Blob, path string) error {
 	err = b.Put(ctx, data)
 	if err != nil {
 		return fmt.Errorf("failed to write data to object: %w", err)
+	}
+
+	return nil
+}
+
+// DataUploadResult holds the frame tables from compressed data uploads.
+type DataUploadResult struct {
+	MemfileFrameTable *storage.FrameTable
+	RootfsFrameTable  *storage.FrameTable
+}
+
+// UploadData uploads all template build files, optionally including compressed data.
+// When compressOpts is non-nil, compressed data is uploaded in parallel with uncompressed
+// data (dual-write). Returns the frame tables from compressed uploads for later use
+// in header serialization.
+func (t *TemplateBuild) UploadData(
+	ctx context.Context,
+	metadataPath string,
+	fcSnapfilePath string,
+	memfilePath *string,
+	rootfsPath *string,
+	compressOpts *storage.FramedUploadOptions,
+) (*DataUploadResult, error) {
+	eg, ctx := errgroup.WithContext(ctx)
+	result := &DataUploadResult{}
+
+	// Uncompressed headers (always)
+	eg.Go(func() error {
+		if t.rootfsHeader == nil {
+			return nil
+		}
+
+		return t.uploadRootfsHeader(ctx, t.rootfsHeader)
+	})
+
+	eg.Go(func() error {
+		if t.memfileHeader == nil {
+			return nil
+		}
+
+		return t.uploadMemfileHeader(ctx, t.memfileHeader)
+	})
+
+	// Uncompressed data (always, for rollback safety)
+	eg.Go(func() error {
+		if rootfsPath == nil {
+			return nil
+		}
+
+		return t.uploadRootfs(ctx, *rootfsPath)
+	})
+
+	eg.Go(func() error {
+		if memfilePath == nil {
+			return nil
+		}
+
+		return t.uploadMemfile(ctx, *memfilePath)
+	})
+
+	// Compressed data (when enabled)
+	if compressOpts != nil {
+		var memFTMu, rootFTMu sync.Mutex
+
+		if memfilePath != nil {
+			eg.Go(func() error {
+				ft, err := t.uploadCompressed(ctx, *memfilePath, storage.MemfileName, compressOpts)
+				if err != nil {
+					return fmt.Errorf("compressed memfile upload: %w", err)
+				}
+
+				memFTMu.Lock()
+				result.MemfileFrameTable = ft
+				memFTMu.Unlock()
+
+				return nil
+			})
+		}
+
+		if rootfsPath != nil {
+			eg.Go(func() error {
+				ft, err := t.uploadCompressed(ctx, *rootfsPath, storage.RootfsName, compressOpts)
+				if err != nil {
+					return fmt.Errorf("compressed rootfs upload: %w", err)
+				}
+
+				rootFTMu.Lock()
+				result.RootfsFrameTable = ft
+				rootFTMu.Unlock()
+
+				return nil
+			})
+		}
+	}
+
+	// Snapfile + metadata
+	eg.Go(func() error {
+		return t.uploadSnapfile(ctx, fcSnapfilePath)
+	})
+
+	eg.Go(func() error {
+		return t.uploadMetadata(ctx, metadataPath)
+	})
+
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// uploadCompressed compresses and uploads a file to the compressed data path.
+func (t *TemplateBuild) uploadCompressed(ctx context.Context, localPath, fileName string, opts *storage.FramedUploadOptions) (*storage.FrameTable, error) {
+	objectPath := t.files.CompressedDataPath(fileName, opts.CompressionType)
+
+	ft, err := t.persistence.StoreFileCompressed(ctx, localPath, objectPath, opts)
+	if err != nil {
+		return nil, fmt.Errorf("error compressing %s to %s: %w", fileName, objectPath, err)
+	}
+
+	return ft, nil
+}
+
+// UploadCompressedHeaders serializes the v4 compressed headers (with frame tables)
+// and uploads them. The pending frame tables must be applied to the headers before calling this.
+func (t *TemplateBuild) UploadCompressedHeaders(ctx context.Context, pending *PendingFrameTables) error {
+	eg, ctx := errgroup.WithContext(ctx)
+
+	if t.memfileHeader != nil {
+		eg.Go(func() error {
+			return t.uploadCompressedHeader(ctx, pending, t.memfileHeader, storage.MemfileName)
+		})
+	}
+
+	if t.rootfsHeader != nil {
+		eg.Go(func() error {
+			return t.uploadCompressedHeader(ctx, pending, t.rootfsHeader, storage.RootfsName)
+		})
+	}
+
+	return eg.Wait()
+}
+
+func (t *TemplateBuild) uploadCompressedHeader(
+	ctx context.Context,
+	pending *PendingFrameTables,
+	h *headers.Header,
+	fileType string,
+) error {
+	// Apply frame tables to header mappings
+	if err := pending.ApplyToHeader(h, fileType); err != nil {
+		return fmt.Errorf("apply frames to %s header: %w", fileType, err)
+	}
+
+	// Set version to compressed so Serialize writes v4 format
+	meta := *h.Metadata
+	meta.Version = headers.MetadataVersionCompressed
+
+	serialized, err := headers.Serialize(&meta, h.Mapping)
+	if err != nil {
+		return fmt.Errorf("serialize compressed %s header: %w", fileType, err)
+	}
+
+	compressed, err := storage.CompressLZ4(serialized)
+	if err != nil {
+		return fmt.Errorf("compress %s header: %w", fileType, err)
+	}
+
+	objectPath := t.files.CompressedHeaderPath(fileType)
+	blob, err := t.persistence.OpenBlob(ctx, objectPath, storage.MemfileHeaderObjectType)
+	if err != nil {
+		return fmt.Errorf("open blob for compressed %s header: %w", fileType, err)
+	}
+
+	if err := blob.Put(ctx, compressed); err != nil {
+		return fmt.Errorf("upload compressed %s header: %w", fileType, err)
 	}
 
 	return nil

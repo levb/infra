@@ -212,6 +212,73 @@ func (o *fsObject) getHandle(checkExistence bool) (*os.File, error) {
 	return handle, nil
 }
 
+func (s *fsStorage) StoreFileCompressed(ctx context.Context, localPath, objectPath string, opts *FramedUploadOptions) (*FrameTable, error) {
+	if opts == nil || opts.CompressionType == CompressionNone {
+		obj, err := s.OpenSeekable(ctx, objectPath, UnknownSeekableObjectType)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open seekable for uncompressed upload: %w", err)
+		}
+
+		if err := obj.StoreFile(ctx, localPath); err != nil {
+			return nil, fmt.Errorf("failed to store file uncompressed: %w", err)
+		}
+
+		return nil, nil
+	}
+
+	file, err := os.Open(localPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open local file %s: %w", localPath, err)
+	}
+	defer file.Close()
+
+	uploader := &fsPartUploader{basePath: s.basePath, objectPath: objectPath}
+
+	ft, err := CompressStream(ctx, file, opts, uploader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compress and upload %s: %w", localPath, err)
+	}
+
+	return ft, nil
+}
+
+// fsPartUploader implements PartUploader for local filesystem.
+type fsPartUploader struct {
+	basePath   string
+	objectPath string
+	file       *os.File
+}
+
+func (u *fsPartUploader) Start(_ context.Context) error {
+	fullPath := filepath.Join(u.basePath, u.objectPath)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	f, err := os.OpenFile(fullPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+
+	u.file = f
+
+	return nil
+}
+
+func (u *fsPartUploader) UploadPart(_ context.Context, _ int, data ...[]byte) error {
+	for _, d := range data {
+		if _, err := u.file.Write(d); err != nil {
+			return fmt.Errorf("failed to write part: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (u *fsPartUploader) Complete(_ context.Context) error {
+	return u.file.Close()
+}
+
 func (s *fsStorage) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error) {
 	return getFrame(ctx, s.rangeRead, s.GetDetails(), objectPath, offsetU, frameTable, decompress, buf, readSize, onRead)
 }
