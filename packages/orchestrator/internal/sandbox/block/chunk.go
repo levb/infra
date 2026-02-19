@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
+	featureflags "github.com/e2b-dev/infra/packages/shared/pkg/feature-flags"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
@@ -96,6 +97,7 @@ type Chunker struct {
 
 	cache   *Cache
 	metrics metrics.Metrics
+	flags   *featureflags.Client
 
 	fetchMu  sync.Mutex
 	fetchMap map[fetchKey]*fetchSession
@@ -120,6 +122,7 @@ func NewChunker(
 	objectType storage.SeekableObjectType,
 	cachePath string,
 	m metrics.Metrics,
+	flags *featureflags.Client,
 ) (*Chunker, error) {
 	cache, err := NewCache(assets.Size, blockSize, cachePath, false)
 	if err != nil {
@@ -132,6 +135,7 @@ func NewChunker(
 		objectType: objectType,
 		cache:      cache,
 		metrics:    m,
+		flags:      flags,
 		fetchMap:   make(map[fetchKey]*fetchSession),
 	}, nil
 }
@@ -373,7 +377,11 @@ func (c *Chunker) runUncompressedFetch(ctx context.Context, s *fetchSession, key
 	defer reader.Close()
 
 	blockSize := c.cache.BlockSize()
-	readBatch := max(blockSize, defaultMinReadBatchSize)
+	minBatch := int64(defaultMinReadBatchSize)
+	if v := c.flags.JSONFlag(ctx, featureflags.ChunkerConfigFlag).AsValueMap().Get("minReadBatchSizeKB"); v.IsNumber() {
+		minBatch = int64(v.IntValue()) * 1024
+	}
+	readBatch := max(blockSize, minBatch)
 	var totalRead int64
 	var prevCompleted int64
 

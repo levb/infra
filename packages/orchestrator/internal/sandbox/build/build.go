@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	blockmetrics "github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
+	featureflags "github.com/e2b-dev/infra/packages/shared/pkg/feature-flags"
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
@@ -19,6 +20,7 @@ type File struct {
 	fileType    DiffType
 	persistence storage.StorageProvider
 	metrics     blockmetrics.Metrics
+	flags       *featureflags.Client
 }
 
 func NewFile(
@@ -27,6 +29,7 @@ func NewFile(
 	fileType DiffType,
 	persistence storage.StorageProvider,
 	metrics blockmetrics.Metrics,
+	flags *featureflags.Client,
 ) *File {
 	return &File{
 		header:      header,
@@ -34,6 +37,7 @@ func NewFile(
 		fileType:    fileType,
 		persistence: persistence,
 		metrics:     metrics,
+		flags:       flags,
 	}
 }
 
@@ -125,6 +129,7 @@ func (b *File) getBuild(ctx context.Context, buildID uuid.UUID) (Diff, error) {
 		int64(b.header.Metadata.BlockSize),
 		b.metrics,
 		b.persistence,
+		b.flags,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage diff: %w", err)

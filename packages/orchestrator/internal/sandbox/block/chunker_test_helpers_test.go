@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
+	featureflags "github.com/e2b-dev/infra/packages/shared/pkg/feature-flags"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
 )
@@ -146,6 +147,16 @@ func newTestMetrics(t *testing.T) metrics.Metrics {
 	require.NoError(t, err)
 
 	return m
+}
+
+func newTestFlags(t *testing.T) *featureflags.Client {
+	t.Helper()
+
+	flags, err := featureflags.NewClient()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = flags.Close(t.Context()) })
+
+	return flags
 }
 
 //nolint:unparam // size is always testFileSize in current tests but kept as parameter for flexibility

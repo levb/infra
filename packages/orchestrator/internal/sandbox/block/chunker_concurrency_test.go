@@ -153,6 +153,7 @@ func allChunkerTestCases() []chunkerTestCase {
 					storage.UnknownSeekableObjectType,
 					t.TempDir()+"/cache",
 					newTestMetrics(t),
+					newTestFlags(t),
 				)
 				require.NoError(t, err)
 
@@ -174,6 +175,7 @@ func allChunkerTestCases() []chunkerTestCase {
 					storage.UnknownSeekableObjectType,
 					t.TempDir()+"/cache",
 					newTestMetrics(t),
+					newTestFlags(t),
 				)
 				require.NoError(t, err)
 
@@ -431,6 +433,7 @@ func TestChunker_FetchDedup(t *testing.T) {
 			storage.UnknownSeekableObjectType,
 			t.TempDir()+"/cache",
 			newTestMetrics(t),
+			newTestFlags(t),
 		)
 		require.NoError(t, err)
 		defer chunker.Close()
@@ -489,6 +492,7 @@ func TestChunker_DualMode_SharedCache(t *testing.T) {
 		storage.UnknownSeekableObjectType,
 		t.TempDir()+"/cache",
 		newTestMetrics(t),
+		newTestFlags(t),
 	)
 	require.NoError(t, err)
 	defer chunker.Close()

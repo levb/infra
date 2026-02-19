@@ -10,6 +10,7 @@ import (
 
 	blockmetrics "github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/build"
+	featureflags "github.com/e2b-dev/infra/packages/shared/pkg/feature-flags"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
 )
@@ -18,10 +19,6 @@ const (
 	oldMemfileHugePageSize = 2 << 20 // 2 MiB
 	oldRootfsBlockSize     = 2 << 11 // 4 KiB
 )
-
-// useCompressedAssets controls whether to try loading v4 (compressed) headers.
-// Will be replaced with a feature flag.
-var useCompressedAssets = true
 
 type Storage struct {
 	header *header.Header
@@ -125,9 +122,14 @@ func NewStorage(
 	buildId string,
 	fileType build.DiffType,
 	h *header.Header,
+	flags *featureflags.Client,
 	persistence storage.StorageProvider,
 	metrics blockmetrics.Metrics,
 ) (*Storage, error) {
+	// Read chunker config from feature flag.
+	chunkerCfg := flags.JSONFlag(ctx, featureflags.ChunkerConfigFlag).AsValueMap()
+	useCompressedAssets := chunkerCfg.Get("useCompressedAssets").BoolValue()
+
 	if h == nil {
 		headerObjectType, ok := storageHeaderObjectType(fileType)
 		if !ok {
@@ -194,7 +196,7 @@ func NewStorage(
 		}
 	}
 
-	b := build.NewFile(h, store, fileType, persistence, metrics)
+	b := build.NewFile(h, store, fileType, persistence, metrics, flags)
 
 	return &Storage{
 		source: b,

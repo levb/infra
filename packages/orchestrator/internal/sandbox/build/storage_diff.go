@@ -8,6 +8,7 @@ import (
 
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block"
 	blockmetrics "github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox/block/metrics"
+	featureflags "github.com/e2b-dev/infra/packages/shared/pkg/feature-flags"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
@@ -26,6 +27,7 @@ type StorageDiff struct {
 	blockSize   int64
 	metrics     blockmetrics.Metrics
 	persistence storage.StorageProvider
+	flags       *featureflags.Client
 }
 
 var _ Diff = (*StorageDiff)(nil)
@@ -45,6 +47,7 @@ func newStorageDiff(
 	blockSize int64,
 	metrics blockmetrics.Metrics,
 	persistence storage.StorageProvider,
+	flags *featureflags.Client,
 ) (*StorageDiff, error) {
 	storagePath := storagePath(buildId, diffType)
 	storageObjectType, ok := storageObjectType(diffType)
@@ -62,6 +65,7 @@ func newStorageDiff(
 		blockSize:         blockSize,
 		metrics:           metrics,
 		persistence:       persistence,
+		flags:             flags,
 		cacheKey:          GetDiffStoreKey(buildId, diffType),
 	}, nil
 }
@@ -100,7 +104,7 @@ func (b *StorageDiff) createChunker(ctx context.Context) (*block.Chunker, error)
 		return nil, fmt.Errorf("no asset found for %s (no uncompressed or compressed with metadata)", b.storagePath)
 	}
 
-	return block.NewChunker(assets, b.blockSize, b.persistence, b.storageObjectType, b.cachePath, b.metrics)
+	return block.NewChunker(assets, b.blockSize, b.persistence, b.storageObjectType, b.cachePath, b.metrics, b.flags)
 }
 
 // probeAssets probes for uncompressed and compressed asset variants in parallel.
