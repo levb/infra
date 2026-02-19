@@ -134,12 +134,12 @@ func (c *Chunker) ReadBlock(ctx context.Context, b []byte, off int64, ft *storag
 // If ft is non-nil and a matching compressed asset exists, fetches via compressed path.
 // Otherwise falls back to uncompressed streaming via GetFrame with nil frameTable.
 func (c *Chunker) GetBlock(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
-	if off < 0 || length < 0 {
-		return nil, fmt.Errorf("invalid slice params: off=%d length=%d", off, length)
-	}
-	if off+length > c.assets.Size {
-		return nil, fmt.Errorf("slice out of bounds: off=%#x length=%d size=%d", off, length, c.assets.Size)
-	}
+	// if off < 0 || length < 0 {
+	// 	return nil, fmt.Errorf("invalid slice params: off=%d length=%d", off, length)
+	// }
+	// if off+length > c.assets.Size {
+	// 	return nil, fmt.Errorf("slice out of bounds: off=%#x length=%d size=%d", off, length, c.assets.Size)
+	// }
 
 	useCompressed := c.assets.HasCompressed(ft)
 
