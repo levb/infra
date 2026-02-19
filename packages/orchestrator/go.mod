@@ -10,6 +10,8 @@ replace (
 // Fix non existent garyburd/redigo from Microsoft/hcsshim/test v0.0.0
 replace github.com/garyburd/redigo => github.com/gomodule/redigo v1.9.2
 
+replace github.com/willscott/go-nfs v0.0.3 => github.com/e2b-dev/go-nfs v0.0.0-20260219005151-377638440f63
+
 tool github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen
 
 require (
