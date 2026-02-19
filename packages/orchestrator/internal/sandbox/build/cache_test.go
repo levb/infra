@@ -587,7 +587,7 @@ func TestDiffStoreConcurrentInitAndAccess(t *testing.T) {
 			// Read — blocks until the winning goroutine's Init completes.
 			buf := make([]byte, 256)
 			n, err := result.ReadBlock(t.Context(), buf, 0, nil)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, 256, n)
 			assert.Equal(t, testData[:256], buf)
 		})

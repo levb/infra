@@ -366,9 +366,7 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 	// Propagate FrameTables from compressed dependencies into this header.
 	// Without this, mappings referencing parent builds would have nil FrameTable,
 	// forcing uncompressed chunkers for those layers even though compressed data exists.
-	if err := propagateDependencyFrames(ctx, cfg.storagePath, h, file); err != nil {
-		fmt.Printf("  Warning: could not propagate dependency frames: %s\n", err)
-	}
+	propagateDependencyFrames(ctx, cfg.storagePath, h, file)
 
 	h.Metadata.Version = header.MetadataVersionCompressed
 
@@ -445,7 +443,7 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 // previously compressed (has a v4 header), we read its FrameTable
 // and apply it to the matching mappings in this header. This ensures the
 // orchestrator creates compressed chunkers for ALL layers, not just the current build.
-func propagateDependencyFrames(ctx context.Context, storagePath string, h *header.Header, artifactFile string) error {
+func propagateDependencyFrames(ctx context.Context, storagePath string, h *header.Header, artifactFile string) {
 	currentBuildID := h.Metadata.BuildId.String()
 
 	// Collect unique dependency build IDs that have nil FrameTable.
@@ -461,7 +459,7 @@ func propagateDependencyFrames(ctx context.Context, storagePath string, h *heade
 	}
 
 	if len(depBuilds) == 0 {
-		return nil
+		return
 	}
 
 	for depBuild := range depBuilds {
@@ -505,8 +503,6 @@ func propagateDependencyFrames(ctx context.Context, storagePath string, h *heade
 				applied, depBuild, len(fullFT.Frames), fullFT.CompressionType)
 		}
 	}
-
-	return nil
 }
 
 // reconstructFullFrameTable merges all per-mapping FrameTables for a given
@@ -667,43 +663,4 @@ func resolveTemplateID(input string) (string, error) {
 	}
 
 	return match.BuildID, nil
-}
-
-// fetchAllTemplates returns all templates from the E2B API.
-func fetchAllTemplates() ([]templateInfo, error) {
-	apiKey := os.Getenv("E2B_API_KEY")
-	if apiKey == "" {
-		return nil, fmt.Errorf("E2B_API_KEY environment variable required")
-	}
-
-	apiURL := "https://api.e2b.dev/templates"
-	if domain := os.Getenv("E2B_DOMAIN"); domain != "" {
-		apiURL = fmt.Sprintf("https://api.%s/templates", domain)
-	}
-
-	ctx := context.Background()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("X-API-Key", apiKey)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch templates: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-
-		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var templates []templateInfo
-	if err := json.NewDecoder(resp.Body).Decode(&templates); err != nil {
-		return nil, fmt.Errorf("failed to parse API response: %w", err)
-	}
-
-	return templates, nil
 }
