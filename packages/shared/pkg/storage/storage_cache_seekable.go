@@ -133,6 +133,8 @@ func (c *cachedSeekable) ReadAt(ctx context.Context, buff []byte, offset int64) 
 	return readCount, err
 }
 
+// OpenRangeReader returns a reader for uncompressed data only.
+// Compressed reads go through GetFrame which handles frame translation and decompression.
 func (c *cachedSeekable) OpenRangeReader(ctx context.Context, off, length int64) (io.ReadCloser, error) {
 	// Try NFS cache file first
 	chunkPath := c.makeChunkFilename(off)
