@@ -12,6 +12,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -22,18 +23,43 @@ import (
 )
 
 // bufferPartUploader implements storage.PartUploader for in-memory writes.
+// Parts are collected by index and assembled in order on Complete, since
+// CompressStream uploads parts concurrently and they may arrive out of order.
 type bufferPartUploader struct {
-	buf bytes.Buffer
+	mu    sync.Mutex
+	parts map[int][]byte
+	buf   bytes.Buffer
 }
 
-func (b *bufferPartUploader) Start(_ context.Context) error { return nil }
-func (b *bufferPartUploader) UploadPart(_ context.Context, _ int, data ...[]byte) error {
-	for _, d := range data {
-		b.buf.Write(d)
-	}
+func (b *bufferPartUploader) Start(_ context.Context) error {
+	b.parts = make(map[int][]byte)
 	return nil
 }
-func (b *bufferPartUploader) Complete(_ context.Context) error { return nil }
+
+func (b *bufferPartUploader) UploadPart(_ context.Context, partIndex int, data ...[]byte) error {
+	var combined bytes.Buffer
+	for _, d := range data {
+		combined.Write(d)
+	}
+	b.mu.Lock()
+	b.parts[partIndex] = combined.Bytes()
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *bufferPartUploader) Complete(_ context.Context) error {
+	// Assemble parts in order
+	keys := make([]int, 0, len(b.parts))
+	for k := range b.parts {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		b.buf.Write(b.parts[k])
+	}
+	b.parts = nil
+	return nil
+}
 
 type benchResult struct {
 	codec      string
@@ -144,7 +170,7 @@ func benchmarkArtifact(data []byte, iterations int, emit func(benchResult)) {
 		levels []int
 	}
 	codecs := []codecConfig{
-		{"lz4", storage.CompressionLZ4, []int{0, 9}},
+		{"lz4", storage.CompressionLZ4, []int{0, 1}},
 		{"zstd", storage.CompressionZstd, []int{
 			int(zstd.SpeedFastest),          // 1
 			int(zstd.SpeedDefault),          // 2
