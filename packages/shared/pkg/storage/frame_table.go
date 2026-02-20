@@ -2,12 +2,8 @@ package storage
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
-
-	"github.com/klauspost/compress/zstd"
-	lz4 "github.com/pierrec/lz4/v4"
 )
 
 type CompressionType byte
@@ -21,7 +17,7 @@ const (
 func (ct CompressionType) Suffix() string {
 	switch ct {
 	case CompressionZstd:
-		return ".zst"
+		return ".zstd"
 	case CompressionLZ4:
 		return ".lz4"
 	default:
@@ -40,9 +36,9 @@ func (ct CompressionType) String() string {
 	}
 }
 
-// ParseCompressionType converts a string to CompressionType.
+// parseCompressionType converts a string to CompressionType.
 // Returns CompressionNone for unrecognised values.
-func ParseCompressionType(s string) CompressionType {
+func parseCompressionType(s string) CompressionType {
 	switch s {
 	case "lz4":
 		return CompressionLZ4
@@ -91,28 +87,13 @@ type FrameTable struct {
 	Frames          []FrameSize
 }
 
-// CompressionTypeSuffix returns ".lz4", ".zst", or "" (nil-safe).
+// CompressionTypeSuffix returns ".lz4", ".zstd", or "" (nil-safe).
 func (ft *FrameTable) CompressionTypeSuffix() string {
 	if ft == nil {
 		return ""
 	}
 
 	return ft.CompressionType.Suffix()
-}
-
-// FrameGetter reads a single compressed or uncompressed frame from storage.
-//
-// When onRead is non-nil, data is written to buf in readSize-aligned chunks
-// and onRead is called after each chunk with the cumulative byte count
-// written so far. This enables pipelined fetch+decompress where the caller
-// (e.g. mmap cache) can publish partial results while the network transfer
-// is still in progress. When onRead is nil, buf is filled in one shot
-// (original behaviour).
-//
-// readSize controls the granularity of progressive reads. When readSize <= 0,
-// MemoryChunkSize is used as the default.
-type FrameGetter interface {
-	GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error)
 }
 
 // IsCompressed reports whether ft is non-nil and has a compression type set.
@@ -243,11 +224,11 @@ func DecompressReader(ct CompressionType, r io.Reader, uncompressedSize int) ([]
 
 	switch ct {
 	case CompressionZstd:
-		dec, err := zstd.NewReader(r)
+		dec, err := getZstdDecoder(r)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create zstd reader: %w", err)
 		}
-		defer dec.Close()
+		defer putZstdDecoder(dec)
 
 		n, err := io.ReadFull(dec, buf)
 		if err != nil {
@@ -257,7 +238,10 @@ func DecompressReader(ct CompressionType, r io.Reader, uncompressedSize int) ([]
 		return buf[:n], nil
 
 	case CompressionLZ4:
-		n, err := io.ReadFull(lz4.NewReader(r), buf)
+		rd := getLZ4Reader(r)
+		defer putLZ4Reader(rd)
+
+		n, err := io.ReadFull(rd, buf)
 		if err != nil {
 			return nil, fmt.Errorf("lz4 decompress: %w", err)
 		}

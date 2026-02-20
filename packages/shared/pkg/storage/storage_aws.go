@@ -42,8 +42,8 @@ type awsObject struct {
 }
 
 var (
-	_ Seekable = (*awsObject)(nil)
-	_ Blob     = (*awsObject)(nil)
+	_ FramedFile = (*awsObject)(nil)
+	_ Blob       = (*awsObject)(nil)
 )
 
 func newAWSStorage(ctx context.Context, bucketName string) (*awsStorage, error) {
@@ -128,7 +128,7 @@ func (s *awsStorage) UploadSignedURL(ctx context.Context, path string, ttl time.
 	return resp.URL, nil
 }
 
-func (s *awsStorage) OpenSeekable(_ context.Context, path string, _ SeekableObjectType) (Seekable, error) {
+func (s *awsStorage) OpenFramedFile(_ context.Context, path string) (FramedFile, error) {
 	return &awsObject{
 		client:     s.client,
 		bucketName: s.bucketName,
@@ -136,7 +136,7 @@ func (s *awsStorage) OpenSeekable(_ context.Context, path string, _ SeekableObje
 	}, nil
 }
 
-func (s *awsStorage) OpenBlob(_ context.Context, path string, _ ObjectType) (Blob, error) {
+func (s *awsStorage) OpenBlob(_ context.Context, path string) (Blob, error) {
 	return &awsObject{
 		client:     s.client,
 		bucketName: s.bucketName,
@@ -163,13 +163,17 @@ func (o *awsObject) WriteTo(ctx context.Context, dst io.Writer) (int64, error) {
 	return io.Copy(dst, resp.Body)
 }
 
-func (o *awsObject) StoreFile(ctx context.Context, path string) error {
+func (o *awsObject) StoreFile(ctx context.Context, path string, opts *FramedUploadOptions) (*FrameTable, error) {
+	if opts != nil && opts.CompressionType != CompressionNone {
+		return nil, fmt.Errorf("compressed uploads are not supported on AWS (builds target GCP only)")
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, awsWriteTimeout)
 	defer cancel()
 
 	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("failed to open file %s: %w", path, err)
+		return nil, fmt.Errorf("failed to open file %s: %w", path, err)
 	}
 	defer f.Close()
 
@@ -190,7 +194,7 @@ func (o *awsObject) StoreFile(ctx context.Context, path string) error {
 		},
 	)
 
-	return err
+	return nil, err
 }
 
 func (o *awsObject) Put(ctx context.Context, data []byte) error {
@@ -212,8 +216,8 @@ func (o *awsObject) Put(ctx context.Context, data []byte) error {
 	return nil
 }
 
-func (o *awsObject) OpenRangeReader(ctx context.Context, off, length int64) (io.ReadCloser, error) {
-	readRange := aws.String(fmt.Sprintf("bytes=%d-%d", off, off+length-1))
+func (o *awsObject) openRangeReader(ctx context.Context, off int64, length int) (io.ReadCloser, error) {
+	readRange := aws.String(fmt.Sprintf("bytes=%d-%d", off, off+int64(length)-1))
 	resp, err := o.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(o.bucketName),
 		Key:    aws.String(o.path),
@@ -229,37 +233,6 @@ func (o *awsObject) OpenRangeReader(ctx context.Context, off, length int64) (io.
 	}
 
 	return resp.Body, nil
-}
-
-func (o *awsObject) ReadAt(ctx context.Context, buff []byte, off int64) (n int, err error) {
-	ctx, cancel := context.WithTimeout(ctx, awsReadTimeout)
-	defer cancel()
-
-	readRange := aws.String(fmt.Sprintf("bytes=%d-%d", off, off+int64(len(buff))-1))
-	resp, err := o.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(o.bucketName),
-		Key:    aws.String(o.path),
-		Range:  readRange,
-	})
-	if err != nil {
-		var nsk *types.NoSuchKey
-		if errors.As(err, &nsk) {
-			return 0, ErrObjectNotExist
-		}
-
-		return 0, err
-	}
-
-	defer resp.Body.Close()
-
-	// When the object is smaller than requested range there will be unexpected EOF,
-	// but backend expects to return EOF in this case.
-	n, err = io.ReadFull(resp.Body, buff)
-	if errors.Is(err, io.ErrUnexpectedEOF) {
-		err = io.EOF
-	}
-
-	return n, err
 }
 
 func (o *awsObject) Size(ctx context.Context) (int64, error) {
@@ -315,41 +288,6 @@ func ignoreNotExists(err error) error {
 	return err
 }
 
-func (s *awsStorage) StoreFileCompressed(_ context.Context, _, _ string, _ *FramedUploadOptions) (*FrameTable, error) {
-	return nil, fmt.Errorf("StoreFileCompressed is not supported on AWS (builds target GCP only)")
-}
-
-func (s *awsStorage) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error) {
-	return getFrame(ctx, s.rangeRead, s.GetDetails(), objectPath, offsetU, frameTable, decompress, buf, readSize, onRead)
-}
-
-func (s *awsStorage) rangeRead(ctx context.Context, objectPath string, offset int64, length int) (io.ReadCloser, error) {
-	ctx, cancel := context.WithTimeout(ctx, awsReadTimeout)
-
-	rangeStr := fmt.Sprintf("bytes=%d-%d", offset, offset+int64(length)-1)
-	output, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucketName),
-		Key:    aws.String(objectPath),
-		Range:  aws.String(rangeStr),
-	})
-	if err != nil {
-		cancel()
-
-		return nil, fmt.Errorf("failed to get object range %q: %w", objectPath, err)
-	}
-
-	return &cancelOnCloseReaderAWS{ReadCloser: output.Body, cancel: cancel}, nil
-}
-
-type cancelOnCloseReaderAWS struct {
-	io.ReadCloser
-
-	cancel context.CancelFunc
-}
-
-func (r *cancelOnCloseReaderAWS) Close() error {
-	err := r.ReadCloser.Close()
-	r.cancel()
-
-	return err
+func (o *awsObject) GetFrame(ctx context.Context, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error) {
+	return getFrame(ctx, o.openRangeReader, "S3:"+o.path, offsetU, frameTable, decompress, buf, readSize, onRead)
 }

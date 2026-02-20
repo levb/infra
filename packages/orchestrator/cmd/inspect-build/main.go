@@ -225,39 +225,36 @@ func printHeader(h *header.Header, source string, summaryOnly bool) {
 	cmdutil.PrintCompressionSummary(h)
 }
 
-// printFileList prints a table of all expected files for this build with existence and size info.
+// printFileList lists all files that actually exist for this build in storage.
 func printFileList(ctx context.Context, storagePath, buildID string) {
 	fmt.Printf("\nFILES for build %s\n", buildID)
 	fmt.Printf("====================\n")
-	fmt.Printf("%-45s  %6s  %12s\n", "FILE", "EXISTS", "SIZE")
-	fmt.Printf("%-45s  %6s  %12s\n", strings.Repeat("-", 45), strings.Repeat("-", 6), strings.Repeat("-", 12))
 
-	// Check all artifacts
-	for _, a := range cmdutil.MainArtifacts() {
-		files := []string{a.File, a.HeaderFile, a.CompressedFile, a.CompressedHeaderFile}
-		for _, f := range files {
-			info := cmdutil.ProbeFile(ctx, storagePath, buildID, f)
-			printFileInfo(info)
-		}
+	files, err := cmdutil.ListFiles(ctx, storagePath, buildID)
+	if err != nil {
+		fmt.Printf("ERROR listing files: %s\n", err)
+
+		return
 	}
 
-	// Snapfile and metadata
-	for _, f := range []string{storage.SnapfileName, storage.MetadataName} {
-		info := cmdutil.ProbeFile(ctx, storagePath, buildID, f)
-		printFileInfo(info)
-	}
-}
+	if len(files) == 0 {
+		fmt.Printf("(no files found)\n")
 
-func printFileInfo(info cmdutil.FileInfo) {
-	if info.Exists {
+		return
+	}
+
+	fmt.Printf("%-45s  %12s\n", "FILE", "SIZE")
+	fmt.Printf("%-45s  %12s\n", strings.Repeat("-", 45), strings.Repeat("-", 12))
+
+	for _, info := range files {
 		extra := ""
 		if uSize, ok := info.Metadata["uncompressed-size"]; ok {
 			extra = fmt.Sprintf("  (uncompressed-size=%s)", uSize)
 		}
-		fmt.Printf("%-45s  %6s  %12s%s\n", info.Name, "yes", formatSize(info.Size), extra)
-	} else {
-		fmt.Printf("%-45s  %6s  %12s\n", info.Name, "no", "-")
+		fmt.Printf("%-45s  %12s%s\n", info.Name, formatSize(info.Size), extra)
 	}
+
+	fmt.Printf("\n%d files total\n", len(files))
 }
 
 func formatSize(size int64) string {

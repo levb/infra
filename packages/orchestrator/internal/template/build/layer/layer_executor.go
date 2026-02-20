@@ -284,136 +284,70 @@ func (lb *LayerExecutor) PauseAndUpload(
 	// Upload snapshot async, it's added to the template cache immediately
 	userLogger.Debug(ctx, fmt.Sprintf("Saving: %s", meta.Template.BuildID))
 
-	compressCfg := featureflags.GetCompressConfig(ctx, lb.featureFlags)
-	if compressCfg.CompressBuilds {
-		lb.twoPhaseUpload(ctx, userLogger, snapshot, hash, meta, compressCfg)
-	} else {
-		lb.singlePhaseUpload(ctx, userLogger, snapshot, hash, meta)
-	}
+	lb.uploadLayerAsync(ctx, userLogger, snapshot, hash, meta)
 
 	return nil
 }
 
-// singlePhaseUpload is the original upload path (uncompressed only).
-func (lb *LayerExecutor) singlePhaseUpload(
+// uploadLayerAsync uploads a layer's snapshot in the background.
+//
+// Pipeline per layer:
+//  1. Upload data files (uncompressed + compressed) — parallel across layers
+//  2. Register this layer's frame tables in shared pending
+//  3. Wait for previous layers to complete (data + headers)
+//  4. Finalize compressed headers — all upstream FTs now available
+//  5. Signal complete, save cache index
+func (lb *LayerExecutor) uploadLayerAsync(
 	ctx context.Context,
 	userLogger logger.Logger,
 	snapshot *sandbox.Snapshot,
 	hash string,
 	meta metadata.Template,
 ) {
-	completeUpload, waitForPreviousUploads := lb.uploadTracker.StartUpload()
-
-	lb.UploadErrGroup.Go(func() error {
-		ctx := context.WithoutCancel(ctx)
-		ctx, span := tracer.Start(ctx, "upload snapshot")
-		defer span.End()
-
-		defer completeUpload()
-
-		err := snapshot.Upload(
-			ctx,
-			lb.templateStorage,
-			storage.TemplateFiles{BuildID: meta.Template.BuildID},
-		)
-		if err != nil {
-			return fmt.Errorf("error uploading snapshot: %w", err)
-		}
-
-		err = waitForPreviousUploads(ctx)
-		if err != nil {
-			return fmt.Errorf("error waiting for previous uploads: %w", err)
-		}
-
-		err = lb.index.SaveLayerMeta(ctx, hash, cache.LayerMetadata{
-			Template: cache.Template{
-				BuildID: meta.Template.BuildID,
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("error saving UUID to hash mapping: %w", err)
-		}
-
-		userLogger.Debug(ctx, fmt.Sprintf("Saved: %s", meta.Template.BuildID))
-
-		return nil
-	})
-}
-
-// twoPhaseUpload implements the compressed write path:
-// Phase 1: Upload data files (uncompressed + compressed) in parallel
-// Phase 2: Wait for ALL data uploads across ALL layers, then finalize compressed headers
-// Phase 3: Wait for previous layer uploads, save cache index
-func (lb *LayerExecutor) twoPhaseUpload(
-	ctx context.Context,
-	userLogger logger.Logger,
-	snapshot *sandbox.Snapshot,
-	hash string,
-	meta metadata.Template,
-	compressCfg featureflags.CompressConfig,
-) {
-	completeDataFileUpload := lb.uploadTracker.StartDataFileUpload()
 	completeUpload, waitForPreviousUploads := lb.uploadTracker.StartUpload()
 	pending := lb.uploadTracker.Pending()
 	buildID := meta.Template.BuildID
 
-	megabyte := 1024 * 1024
-	compressOpts := &storage.FramedUploadOptions{
-		CompressionType:          storage.ParseCompressionType(compressCfg.CompressionType),
-		Level:                    compressCfg.Level,
-		TargetFrameSize:          compressCfg.FrameTargetMB * megabyte,
-		TargetPartSize:           compressCfg.UploadPartTargetMB * megabyte,
-		MaxUncompressedFrameSize: compressCfg.FrameMaxUncompressedMB * megabyte,
-	}
-
 	lb.UploadErrGroup.Go(func() error {
 		ctx := context.WithoutCancel(ctx)
-		ctx, span := tracer.Start(ctx, "upload snapshot (two-phase)")
+		ctx, span := tracer.Start(ctx, "upload layer")
 		defer span.End()
 
+		// Signal completion when done (including on error) to unblock downstream layers.
 		defer completeUpload()
 
-		// Phase 1: Upload data files (uncompressed + compressed)
+		// Step 1: Upload data files (uncompressed + optionally compressed)
 		result, err := snapshot.UploadDataFiles(
 			ctx,
 			lb.templateStorage,
 			storage.TemplateFiles{BuildID: buildID},
-			compressOpts,
+			lb.featureFlags,
 		)
-
-		// Register frame tables before signaling data complete
-		if result != nil {
-			if result.MemfileFrameTable != nil {
-				pending.Add(sandbox.PendingFrameTableKey(buildID, storage.MemfileName), result.MemfileFrameTable)
-			}
-
-			if result.RootfsFrameTable != nil {
-				pending.Add(sandbox.PendingFrameTableKey(buildID, storage.RootfsName), result.RootfsFrameTable)
-			}
-		}
-
-		// Always signal data file completion to avoid deadlocking the WaitGroup
-		completeDataFileUpload()
-
 		if err != nil {
 			return fmt.Errorf("error uploading data files: %w", err)
 		}
 
-		// Phase 2: Wait for ALL data uploads across ALL layers
-		if err := lb.uploadTracker.WaitForAllDataFileUploads(ctx); err != nil {
-			return fmt.Errorf("error waiting for data file uploads: %w", err)
+		// Step 2: Register this layer's frame tables
+		if result.MemfileFrameTable != nil {
+			pending.Add(sandbox.PendingFrameTableKey(buildID, storage.MemfileName), result.MemfileFrameTable)
+		}
+		if result.RootfsFrameTable != nil {
+			pending.Add(sandbox.PendingFrameTableKey(buildID, storage.RootfsName), result.RootfsFrameTable)
 		}
 
-		// Finalize compressed headers with frame tables from all layers
-		if err := result.TemplateBuild.UploadCompressedHeaders(ctx, pending); err != nil {
-			return fmt.Errorf("error uploading compressed headers: %w", err)
-		}
-
-		// Phase 3: Wait for previous layer uploads, save cache index
+		// Step 3: Wait for all previous layers (data + headers) to complete
 		if err := waitForPreviousUploads(ctx); err != nil {
 			return fmt.Errorf("error waiting for previous uploads: %w", err)
 		}
 
+		// Step 4: Finalize compressed headers — all upstream FTs are now in pending
+		if result.MemfileFrameTable != nil || result.RootfsFrameTable != nil {
+			if err := result.TemplateBuild.UploadCompressedHeaders(ctx, pending); err != nil {
+				return fmt.Errorf("error uploading compressed headers: %w", err)
+			}
+		}
+
+		// Step 5: Save cache index
 		if err := lb.index.SaveLayerMeta(ctx, hash, cache.LayerMetadata{
 			Template: cache.Template{
 				BuildID: buildID,

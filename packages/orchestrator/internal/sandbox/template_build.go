@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	featureflags "github.com/e2b-dev/infra/packages/shared/pkg/feature-flags"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	headers "github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
 )
@@ -16,15 +17,17 @@ import (
 type TemplateBuild struct {
 	files       storage.TemplateFiles
 	persistence storage.StorageProvider
+	ff          *featureflags.Client
 
 	memfileHeader *headers.Header
 	rootfsHeader  *headers.Header
 }
 
-func NewTemplateBuild(memfileHeader *headers.Header, rootfsHeader *headers.Header, persistence storage.StorageProvider, files storage.TemplateFiles) *TemplateBuild {
+func NewTemplateBuild(memfileHeader *headers.Header, rootfsHeader *headers.Header, persistence storage.StorageProvider, files storage.TemplateFiles, ff *featureflags.Client) *TemplateBuild {
 	return &TemplateBuild{
 		persistence: persistence,
 		files:       files,
+		ff:          ff,
 
 		memfileHeader: memfileHeader,
 		rootfsHeader:  rootfsHeader,
@@ -41,7 +44,7 @@ func (t *TemplateBuild) Remove(ctx context.Context) error {
 }
 
 func (t *TemplateBuild) uploadMemfileHeader(ctx context.Context, h *headers.Header) error {
-	object, err := t.persistence.OpenBlob(ctx, t.files.StorageMemfileHeaderPath(), storage.MemfileHeaderObjectType)
+	object, err := t.persistence.OpenBlob(ctx, t.files.StorageMemfileHeaderPath())
 	if err != nil {
 		return err
 	}
@@ -60,13 +63,12 @@ func (t *TemplateBuild) uploadMemfileHeader(ctx context.Context, h *headers.Head
 }
 
 func (t *TemplateBuild) uploadMemfile(ctx context.Context, memfilePath string) error {
-	object, err := t.persistence.OpenSeekable(ctx, t.files.StorageMemfilePath(), storage.MemfileObjectType)
+	object, err := t.persistence.OpenFramedFile(ctx, t.files.StorageMemfilePath())
 	if err != nil {
 		return err
 	}
 
-	err = object.StoreFile(ctx, memfilePath)
-	if err != nil {
+	if _, err := object.StoreFile(ctx, memfilePath, nil); err != nil {
 		return fmt.Errorf("error when uploading memfile: %w", err)
 	}
 
@@ -74,7 +76,7 @@ func (t *TemplateBuild) uploadMemfile(ctx context.Context, memfilePath string) e
 }
 
 func (t *TemplateBuild) uploadRootfsHeader(ctx context.Context, h *headers.Header) error {
-	object, err := t.persistence.OpenBlob(ctx, t.files.StorageRootfsHeaderPath(), storage.RootFSHeaderObjectType)
+	object, err := t.persistence.OpenBlob(ctx, t.files.StorageRootfsHeaderPath())
 	if err != nil {
 		return err
 	}
@@ -93,13 +95,12 @@ func (t *TemplateBuild) uploadRootfsHeader(ctx context.Context, h *headers.Heade
 }
 
 func (t *TemplateBuild) uploadRootfs(ctx context.Context, rootfsPath string) error {
-	object, err := t.persistence.OpenSeekable(ctx, t.files.StorageRootfsPath(), storage.RootFSObjectType)
+	object, err := t.persistence.OpenFramedFile(ctx, t.files.StorageRootfsPath())
 	if err != nil {
 		return err
 	}
 
-	err = object.StoreFile(ctx, rootfsPath)
-	if err != nil {
+	if _, err := object.StoreFile(ctx, rootfsPath, nil); err != nil {
 		return fmt.Errorf("error when uploading rootfs: %w", err)
 	}
 
@@ -108,7 +109,7 @@ func (t *TemplateBuild) uploadRootfs(ctx context.Context, rootfsPath string) err
 
 // Snap-file is small enough so we don't use composite upload.
 func (t *TemplateBuild) uploadSnapfile(ctx context.Context, path string) error {
-	object, err := t.persistence.OpenBlob(ctx, t.files.StorageSnapfilePath(), storage.SnapfileObjectType)
+	object, err := t.persistence.OpenBlob(ctx, t.files.StorageSnapfilePath())
 	if err != nil {
 		return err
 	}
@@ -122,7 +123,7 @@ func (t *TemplateBuild) uploadSnapfile(ctx context.Context, path string) error {
 
 // Metadata is small enough so we don't use composite upload.
 func (t *TemplateBuild) uploadMetadata(ctx context.Context, path string) error {
-	object, err := t.persistence.OpenBlob(ctx, t.files.StorageMetadataPath(), storage.MetadataObjectType)
+	object, err := t.persistence.OpenBlob(ctx, t.files.StorageMetadataPath())
 	if err != nil {
 		return err
 	}
@@ -158,20 +159,21 @@ func uploadFileAsBlob(ctx context.Context, b storage.Blob, path string) error {
 type DataUploadResult struct {
 	MemfileFrameTable *storage.FrameTable
 	RootfsFrameTable  *storage.FrameTable
+	Compressed        bool
 }
 
 // UploadData uploads all template build files, optionally including compressed data.
-// When compressOpts is non-nil, compressed data is uploaded in parallel with uncompressed
-// data (dual-write). Returns the frame tables from compressed uploads for later use
-// in header serialization.
+// When compression is enabled (via feature flag), compressed data is uploaded in
+// parallel with uncompressed data (dual-write). Returns the frame tables from
+// compressed uploads for later use in header serialization.
 func (t *TemplateBuild) UploadData(
 	ctx context.Context,
 	metadataPath string,
 	fcSnapfilePath string,
 	memfilePath *string,
 	rootfsPath *string,
-	compressOpts *storage.FramedUploadOptions,
 ) (*DataUploadResult, error) {
+	compressOpts := storage.GetUploadOptions(ctx, t.ff)
 	eg, ctx := errgroup.WithContext(ctx)
 	result := &DataUploadResult{}
 
@@ -211,6 +213,7 @@ func (t *TemplateBuild) UploadData(
 
 	// Compressed data (when enabled)
 	if compressOpts != nil {
+		result.Compressed = true
 		var memFTMu, rootFTMu sync.Mutex
 
 		if memfilePath != nil {
@@ -264,7 +267,12 @@ func (t *TemplateBuild) UploadData(
 func (t *TemplateBuild) uploadCompressed(ctx context.Context, localPath, fileName string, opts *storage.FramedUploadOptions) (*storage.FrameTable, error) {
 	objectPath := t.files.CompressedDataPath(fileName, opts.CompressionType)
 
-	ft, err := t.persistence.StoreFileCompressed(ctx, localPath, objectPath, opts)
+	object, err := t.persistence.OpenFramedFile(ctx, objectPath)
+	if err != nil {
+		return nil, fmt.Errorf("error opening framed file for %s: %w", objectPath, err)
+	}
+
+	ft, err := object.StoreFile(ctx, localPath, opts)
 	if err != nil {
 		return nil, fmt.Errorf("error compressing %s to %s: %w", fileName, objectPath, err)
 	}
@@ -318,7 +326,7 @@ func (t *TemplateBuild) uploadCompressedHeader(
 	}
 
 	objectPath := t.files.CompressedHeaderPath(fileType)
-	blob, err := t.persistence.OpenBlob(ctx, objectPath, storage.MemfileHeaderObjectType)
+	blob, err := t.persistence.OpenBlob(ctx, objectPath)
 	if err != nil {
 		return fmt.Errorf("open blob for compressed %s header: %w", fileType, err)
 	}
@@ -330,77 +338,42 @@ func (t *TemplateBuild) uploadCompressedHeader(
 	return nil
 }
 
+// Upload uploads data files and headers for a single build (e.g., sandbox pause).
+// When compression is enabled (via feature flag), compressed data + compressed headers
+// are also uploaded. For single-layer uploads the PendingFrameTables only contains
+// this build's own frame tables. For multi-layer builds, use UploadData +
+// UploadCompressedHeaders with a shared PendingFrameTables instead.
 func (t *TemplateBuild) Upload(ctx context.Context, metadataPath string, fcSnapfilePath string, memfilePath *string, rootfsPath *string) chan error {
-	eg, ctx := errgroup.WithContext(ctx)
-
-	eg.Go(func() error {
-		if t.rootfsHeader == nil {
-			return nil
-		}
-
-		err := t.uploadRootfsHeader(ctx, t.rootfsHeader)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	})
-
-	eg.Go(func() error {
-		if rootfsPath == nil {
-			return nil
-		}
-
-		err := t.uploadRootfs(ctx, *rootfsPath)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	})
-
-	eg.Go(func() error {
-		if t.memfileHeader == nil {
-			return nil
-		}
-
-		err := t.uploadMemfileHeader(ctx, t.memfileHeader)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	})
-
-	eg.Go(func() error {
-		if memfilePath == nil {
-			return nil
-		}
-
-		err := t.uploadMemfile(ctx, *memfilePath)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	})
-
-	eg.Go(func() error {
-		if err := t.uploadSnapfile(ctx, fcSnapfilePath); err != nil {
-			return fmt.Errorf("error when uploading snapfile: %w", err)
-		}
-
-		return nil
-	})
-
-	eg.Go(func() error {
-		return t.uploadMetadata(ctx, metadataPath)
-	})
-
-	done := make(chan error)
+	done := make(chan error, 1)
 
 	go func() {
-		done <- eg.Wait()
+		result, err := t.UploadData(ctx, metadataPath, fcSnapfilePath, memfilePath, rootfsPath)
+		if err != nil {
+			done <- err
+
+			return
+		}
+
+		// Finalize compressed headers if compression was enabled.
+		if result.Compressed {
+			pending := &PendingFrameTables{}
+			buildID := t.files.BuildID
+
+			if result.MemfileFrameTable != nil {
+				pending.Add(PendingFrameTableKey(buildID, storage.MemfileName), result.MemfileFrameTable)
+			}
+			if result.RootfsFrameTable != nil {
+				pending.Add(PendingFrameTableKey(buildID, storage.RootfsName), result.RootfsFrameTable)
+			}
+
+			if err := t.UploadCompressedHeaders(ctx, pending); err != nil {
+				done <- fmt.Errorf("error uploading compressed headers: %w", err)
+
+				return
+			}
+		}
+
+		done <- nil
 	}()
 
 	return done

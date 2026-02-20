@@ -264,54 +264,17 @@ var ChunkerConfigFlag = newJSONFlag("chunker-config", ldvalue.FromJSONMarshal(ma
 //   - frameMaxUncompressedMB (int): Cap on uncompressed bytes per frame in MiB.
 //     Default 16 (= 4 × MemoryChunkSize).
 //   - uploadPartTargetMB (int): Target upload part size in MiB. Default 50.
+//   - encoderConcurrency (int): Goroutines per zstd encoder. Default 1.
+//   - decoderConcurrency (int): Goroutines per pooled zstd decoder. Default 1.
 //
 // JSON format: {"compressBuilds": false, "compressionType": "lz4", "level": 3, ...}
 var CompressConfigFlag = newJSONFlag("compress-config", ldvalue.FromJSONMarshal(map[string]any{
-	"compressBuilds":        false,
-	"compressionType":       "lz4",
-	"level":                 3,
-	"frameTargetMB":     2,
-	"uploadPartTargetMB":      50,
+	"compressBuilds":         false,
+	"compressionType":        "zstd",
+	"level":                  2,
+	"frameTargetMB":          2,
+	"uploadPartTargetMB":     50,
 	"frameMaxUncompressedMB": 16,
+	"encoderConcurrency":     1,
+	"decoderConcurrency":     1,
 }))
-
-// CompressConfig holds the parsed compress-config flag values.
-type CompressConfig struct {
-	CompressBuilds        bool
-	CompressionType       string // "lz4" or "zstd"
-	Level                 int
-	FrameTargetMB     int
-	UploadPartTargetMB      int
-	FrameMaxUncompressedMB int
-}
-
-// GetCompressConfig reads the compress-config flag and returns a typed struct.
-// Zero/missing JSON fields fall back to the defaults baked into the flag.
-func GetCompressConfig(ctx context.Context, ff *Client) CompressConfig {
-	v := ff.JSONFlag(ctx, CompressConfigFlag).AsValueMap()
-
-	return CompressConfig{
-		CompressBuilds:        v.Get("compressBuilds").BoolValue(),
-		CompressionType:       stringOrDefault(v.Get("compressionType"), "lz4"),
-		Level:                 intOrDefault(v.Get("level"), 3),
-		FrameTargetMB:     intOrDefault(v.Get("frameTargetMB"), 2),
-		UploadPartTargetMB:      intOrDefault(v.Get("uploadPartTargetMB"), 50),
-		FrameMaxUncompressedMB: intOrDefault(v.Get("frameMaxUncompressedMB"), 16),
-	}
-}
-
-func stringOrDefault(v ldvalue.Value, fallback string) string {
-	if s := v.StringValue(); s != "" {
-		return s
-	}
-
-	return fallback
-}
-
-func intOrDefault(v ldvalue.Value, fallback int) int {
-	if n := v.IntValue(); n != 0 {
-		return n
-	}
-
-	return fallback
-}

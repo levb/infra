@@ -11,6 +11,8 @@ import (
 	"github.com/klauspost/compress/zstd"
 	lz4 "github.com/pierrec/lz4/v4"
 	"golang.org/x/sync/errgroup"
+
+	featureflags "github.com/e2b-dev/infra/packages/shared/pkg/feature-flags"
 )
 
 const (
@@ -76,6 +78,53 @@ var DefaultCompressionOptions = &FramedUploadOptions{
 
 // NoCompression indicates no compression should be applied.
 var NoCompression = (*FramedUploadOptions)(nil)
+
+// GetUploadOptions reads the compress-config feature flag and returns
+// FramedUploadOptions. Returns nil when compression is disabled.
+func GetUploadOptions(ctx context.Context, ff *featureflags.Client) *FramedUploadOptions {
+	v := ff.JSONFlag(ctx, featureflags.CompressConfigFlag).AsValueMap()
+
+	if !v.Get("compressBuilds").BoolValue() {
+		return nil
+	}
+
+	intOr := func(key string, fallback int) int {
+		if n := v.Get(key).IntValue(); n != 0 {
+			return n
+		}
+
+		return fallback
+	}
+	strOr := func(key, fallback string) string {
+		if s := v.Get(key).StringValue(); s != "" {
+			return s
+		}
+
+		return fallback
+	}
+
+	ct := parseCompressionType(strOr("compressionType", "lz4"))
+	if ct == CompressionNone {
+		return nil
+	}
+
+	return &FramedUploadOptions{
+		CompressionType:          ct,
+		Level:                    intOr("level", 3),
+		TargetFrameSize:          intOr("frameTargetMB", 2) * megabyte,
+		TargetPartSize:           intOr("uploadPartTargetMB", 50) * megabyte,
+		MaxUncompressedFrameSize: intOr("frameMaxUncompressedMB", 16) * megabyte,
+		CompressionConcurrency:   intOr("encoderConcurrency", 1),
+	}
+}
+
+// InitDecoders reads the compress-config feature flag and sets the pooled
+// zstd decoder concurrency. Call once at startup before any reads.
+func InitDecoders(ctx context.Context, ff *featureflags.Client) {
+	v := ff.JSONFlag(ctx, featureflags.CompressConfigFlag).AsValueMap()
+	n := max(v.Get("decoderConcurrency").IntValue(), 1)
+	SetDecoderConcurrency(n)
+}
 
 // ValidateCompressionOptions checks that compression options are valid.
 func ValidateCompressionOptions(opts *FramedUploadOptions) error {
@@ -283,9 +332,11 @@ func (e *encoder) readFile(ctx context.Context, in io.Reader, chunkSize int, chu
 		if err == nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				errorCh <- ctxErr
+
 				return
 			}
 			chunkCh <- chunk[:n]
+
 			continue
 		}
 
@@ -295,15 +346,18 @@ func (e *encoder) readFile(ctx context.Context, in io.Reader, chunkSize int, chu
 				chunkCh <- chunk[:n]
 			}
 			close(chunkCh)
+
 			return
 		}
 		// EOF means no bytes were read at all.
 		if errors.Is(err, io.EOF) {
 			close(chunkCh)
+
 			return
 		}
 
 		errorCh <- fmt.Errorf("failed to read file chunk %d: %w", i, err)
+
 		return
 	}
 }

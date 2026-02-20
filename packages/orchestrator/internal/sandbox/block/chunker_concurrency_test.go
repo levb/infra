@@ -22,7 +22,7 @@ const (
 	testFileSize  = testFrameSize * 4
 )
 
-// testFrameGetter implements storage.FrameGetter for testing.
+// testFrameGetter implements storage.FramedFile for testing.
 // It serves both compressed frames (via GetFrame with ft!=nil) and
 // uncompressed data (via GetFrame with ft==nil).
 type testFrameGetter struct {
@@ -31,9 +31,17 @@ type testFrameGetter struct {
 	frameTable   *storage.FrameTable
 	delay        time.Duration
 	fetchCount   atomic.Int64
+	dataSize     int64
 }
 
-func (g *testFrameGetter) GetFrame(_ context.Context, _ string, offsetU int64, ft *storage.FrameTable, decompress bool, buf []byte, readSize int64, onRead func(int64)) (storage.Range, error) {
+var _ storage.FramedFile = (*testFrameGetter)(nil)
+
+func (g *testFrameGetter) Size(_ context.Context) (int64, error) { return g.dataSize, nil }
+func (g *testFrameGetter) StoreFile(_ context.Context, _ string, _ *storage.FramedUploadOptions) (*storage.FrameTable, error) {
+	return nil, fmt.Errorf("testFrameGetter: StoreFile not supported")
+}
+
+func (g *testFrameGetter) GetFrame(_ context.Context, offsetU int64, ft *storage.FrameTable, decompress bool, buf []byte, readSize int64, onRead func(int64)) (storage.Range, error) {
 	g.fetchCount.Add(1)
 
 	if g.delay > 0 {
@@ -137,6 +145,7 @@ func makeCompressedTestData(t *testing.T, dataSize, frameSize int, delay time.Du
 		compressed:   compressed,
 		frameTable:   ft,
 		delay:        delay,
+		dataSize:     int64(dataSize),
 	}
 
 	return data, ft, getter
@@ -159,12 +168,13 @@ func allChunkerTestCases() []chunkerTestCase {
 				copy(data, getter.uncompressed)
 				c, err := NewChunker(
 					AssetInfo{
-						BasePath: "test-object",
-						Size:     int64(len(data)),
-						HasLZ4:   true,
+						BasePath:     "test-object",
+						Size:         int64(len(data)),
+						HasLZ4:       true,
+						Uncompressed: getter,
+						LZ4:          getter,
 					},
 					testBlockSize,
-					getter,
 					t.TempDir()+"/cache",
 					newTestMetrics(t),
 					newTestFlags(t),
@@ -181,11 +191,12 @@ func allChunkerTestCases() []chunkerTestCase {
 				getter := &testUncompressedStorage{data: data, delay: delay}
 				c, err := NewChunker(
 					AssetInfo{
-						BasePath: "test-object",
-						Size:     int64(len(data)),
+						BasePath:        "test-object",
+						Size:            int64(len(data)),
+						HasUncompressed: true,
+						Uncompressed:    getter,
 					},
 					testBlockSize,
-					getter,
 					t.TempDir()+"/cache",
 					newTestMetrics(t),
 					newTestFlags(t),
@@ -437,12 +448,13 @@ func TestChunker_FetchDedup(t *testing.T) {
 
 		chunker, err := NewChunker(
 			AssetInfo{
-				BasePath: "test-object",
-				Size:     int64(len(data)),
-				HasLZ4:   true,
+				BasePath:     "test-object",
+				Size:         int64(len(data)),
+				HasLZ4:       true,
+				Uncompressed: getter,
+				LZ4:          getter,
 			},
 			testBlockSize,
-			getter,
 			t.TempDir()+"/cache",
 			newTestMetrics(t),
 			newTestFlags(t),
@@ -469,7 +481,7 @@ func TestChunker_FetchDedup(t *testing.T) {
 	})
 }
 
-// testUncompressedStorage implements storage.FrameGetter for uncompressed-only tests.
+// testUncompressedStorage implements storage.FramedFile for uncompressed-only tests.
 // GetFrame serves raw uncompressed data when ft is nil.
 type testUncompressedStorage struct {
 	data       []byte
@@ -477,7 +489,17 @@ type testUncompressedStorage struct {
 	fetchCount atomic.Int64
 }
 
-func (t *testUncompressedStorage) GetFrame(_ context.Context, _ string, offsetU int64, ft *storage.FrameTable, _ bool, buf []byte, readSize int64, onRead func(int64)) (storage.Range, error) {
+var _ storage.FramedFile = (*testUncompressedStorage)(nil)
+
+func (t *testUncompressedStorage) Size(_ context.Context) (int64, error) {
+	return int64(len(t.data)), nil
+}
+
+func (t *testUncompressedStorage) StoreFile(_ context.Context, _ string, _ *storage.FramedUploadOptions) (*storage.FrameTable, error) {
+	return nil, fmt.Errorf("testUncompressedStorage: StoreFile not supported")
+}
+
+func (t *testUncompressedStorage) GetFrame(_ context.Context, offsetU int64, ft *storage.FrameTable, _ bool, buf []byte, readSize int64, onRead func(int64)) (storage.Range, error) {
 	t.fetchCount.Add(1)
 
 	if t.delay > 0 {
@@ -519,12 +541,14 @@ func TestChunker_DualMode_SharedCache(t *testing.T) {
 	// Create ONE chunker with both compressed and uncompressed assets available.
 	chunker, err := NewChunker(
 		AssetInfo{
-			BasePath: "test-object",
-			Size:     int64(len(data)),
-			HasLZ4:   true,
+			BasePath:        "test-object",
+			Size:            int64(len(data)),
+			HasLZ4:          true,
+			HasUncompressed: true,
+			Uncompressed:    getter,
+			LZ4:             getter,
 		},
 		testBlockSize,
-		getter,
 		t.TempDir()+"/cache",
 		newTestMetrics(t),
 		newTestFlags(t),

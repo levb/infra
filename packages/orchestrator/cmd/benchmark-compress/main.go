@@ -33,6 +33,7 @@ type bufferPartUploader struct {
 
 func (b *bufferPartUploader) Start(_ context.Context) error {
 	b.parts = make(map[int][]byte)
+
 	return nil
 }
 
@@ -44,6 +45,7 @@ func (b *bufferPartUploader) UploadPart(_ context.Context, partIndex int, data .
 	b.mu.Lock()
 	b.parts[partIndex] = combined.Bytes()
 	b.mu.Unlock()
+
 	return nil
 }
 
@@ -58,6 +60,7 @@ func (b *bufferPartUploader) Complete(_ context.Context) error {
 		b.buf.Write(b.parts[k])
 	}
 	b.parts = nil
+
 	return nil
 }
 
@@ -143,7 +146,6 @@ func main() {
 	}
 }
 
-
 func loadArtifact(ctx context.Context, storagePath, buildID, file string) ([]byte, error) {
 	reader, dataSize, source, err := cmdutil.OpenDataFile(ctx, storagePath, buildID, file)
 	if err != nil {
@@ -172,10 +174,10 @@ func benchmarkArtifact(data []byte, iterations int, emit func(benchResult)) {
 	codecs := []codecConfig{
 		{"lz4", storage.CompressionLZ4, []int{0, 1}},
 		{"zstd", storage.CompressionZstd, []int{
-			int(zstd.SpeedFastest),          // 1
-			int(zstd.SpeedDefault),          // 2
+			int(zstd.SpeedFastest),           // 1
+			int(zstd.SpeedDefault),           // 2
 			int(zstd.SpeedBetterCompression), // 3
-			int(zstd.SpeedBestCompression),  // 4
+			int(zstd.SpeedBestCompression),   // 4
 		}},
 	}
 
@@ -264,6 +266,7 @@ func rawEncode(data []byte, ct storage.CompressionType, level int) ([]byte, time
 	}
 
 	elapsed := time.Since(start)
+
 	return buf.Bytes(), elapsed
 }
 
@@ -378,6 +381,7 @@ func pad(s string, width int) string {
 	if len(s) >= width {
 		return s
 	}
+
 	return s + strings.Repeat(" ", width-len(s))
 }
 
@@ -386,12 +390,14 @@ func rpad(s string, width int) string {
 	if len(s) >= width {
 		return s
 	}
+
 	return strings.Repeat(" ", width-len(s)) + s
 }
 
 // colorWrap wraps text with ANSI color, pre-padded to width so alignment is correct.
 func colorWrap(color, text string, width int) string {
 	padded := pad(text, width)
+
 	return color + padded + colorReset
 }
 
@@ -400,6 +406,7 @@ func fmtSpeed(dataSize int64, d time.Duration) string {
 		return rpad("N/A", 9)
 	}
 	mbps := float64(dataSize) / d.Seconds() / (1024 * 1024)
+
 	return rpad(fmt.Sprintf("%.0f MB/s", mbps), 9)
 }
 
@@ -409,6 +416,7 @@ func fmtOverhead(raw, framed time.Duration) string {
 	}
 	pct := float64(framed-raw) / float64(raw) * 100
 	text := fmt.Sprintf("%+.1f%%", pct)
+
 	return colorWrap(overheadColor(pct), text, 7)
 }
 
@@ -418,6 +426,7 @@ func fmtSizeOH(rawSize, frmSize int64) string {
 	}
 	pct := float64(frmSize-rawSize) / float64(rawSize) * 100
 	text := fmt.Sprintf("%+.1f%%", pct)
+
 	return colorWrap(overheadColor(pct), text, 7)
 }
 
@@ -513,6 +522,7 @@ func resolveTemplateID(input string) (string, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+
 		return "", fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -530,14 +540,17 @@ func resolveTemplateID(input string) (string, error) {
 
 		if t.TemplateID == input {
 			match = t
+
 			break
 		}
 		if slices.Contains(t.Aliases, input) {
 			match = t
+
 			break
 		}
 		if slices.Contains(t.Names, input) {
 			match = t
+
 			break
 		}
 	}

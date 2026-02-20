@@ -7,20 +7,18 @@ import (
 	"github.com/e2b-dev/infra/packages/orchestrator/internal/sandbox"
 )
 
-// UploadTracker tracks in-flight uploads and allows waiting for all previous uploads to complete.
-// This prevents race conditions where a layer's cache entry is saved before its
-// dependencies (previous layers) are fully uploaded.
+// UploadTracker tracks in-flight layer uploads and provides ordering guarantees.
+//
+// Each layer's upload proceeds as: data files → wait for previous → compressed headers → save cache.
+// waitForPreviousUploads ensures that by the time layer N finalizes its compressed headers,
+// all upstream layers (0..N-1) have completed both their data uploads and header uploads,
+// so all upstream frame tables are available in the shared PendingFrameTables.
 type UploadTracker struct {
 	mu      sync.Mutex
 	waitChs []chan struct{}
 
-	// pending collects frame tables from compressed uploads across all layers
+	// pending collects frame tables from compressed uploads across all layers.
 	pending *sandbox.PendingFrameTables
-
-	// dataFileWg tracks in-flight data file uploads (phase 1).
-	// All layers must complete their data uploads before any layer
-	// can finalize compressed headers.
-	dataFileWg sync.WaitGroup
 }
 
 func NewUploadTracker() *UploadTracker {
@@ -33,34 +31,6 @@ func NewUploadTracker() *UploadTracker {
 // Pending returns the shared PendingFrameTables for collecting frame tables.
 func (t *UploadTracker) Pending() *sandbox.PendingFrameTables {
 	return t.pending
-}
-
-// StartDataFileUpload registers that a data file upload is starting.
-// Returns a function that must be called when the data upload completes.
-// Must be called even on error (use defer) to avoid deadlocking the WaitGroup.
-func (t *UploadTracker) StartDataFileUpload() func() {
-	t.dataFileWg.Add(1)
-
-	return func() {
-		t.dataFileWg.Done()
-	}
-}
-
-// WaitForAllDataFileUploads blocks until all data file uploads have completed.
-func (t *UploadTracker) WaitForAllDataFileUploads(ctx context.Context) error {
-	done := make(chan struct{})
-
-	go func() {
-		t.dataFileWg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
 }
 
 // StartUpload registers that a new upload has started.

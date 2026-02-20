@@ -28,7 +28,8 @@ type Slicer interface {
 }
 
 type ReadonlyDevice interface {
-	storage.SeekableReader
+	ReadAt(ctx context.Context, p []byte, off int64) (int, error)
+	Size(ctx context.Context) (int64, error)
 	io.Closer
 	Slicer
 	BlockSize() int64

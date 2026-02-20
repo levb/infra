@@ -52,7 +52,6 @@ func (s *Server) Create(ctx context.Context, req *orchestrator.SandboxCreateRequ
 	// set up tracing
 	ctx, childSpan := tracer.Start(ctx, "sandbox-create")
 	defer childSpan.End()
-
 	childSpan.SetAttributes(
 		telemetry.WithTemplateID(req.GetSandbox().GetTemplateId()),
 		attribute.String("kernel.version", req.GetSandbox().GetKernelVersion()),
@@ -109,7 +108,6 @@ func (s *Server) Create(ctx context.Context, req *orchestrator.SandboxCreateRequ
 	if err != nil {
 		return nil, fmt.Errorf("failed to get template snapshot data: %w", err)
 	}
-
 	// Clone the network config to avoid modifying the original request
 	network := proto.CloneOf(req.GetSandbox().GetNetwork())
 
@@ -566,7 +564,7 @@ func (s *Server) snapshotAndCacheSandbox(
 	errCh := make(chan error, 1)
 
 	go func() {
-		err := snapshot.Upload(uploadCtx, s.persistence, storage.TemplateFiles{BuildID: meta.Template.BuildID})
+		err := snapshot.Upload(uploadCtx, s.persistence, storage.TemplateFiles{BuildID: meta.Template.BuildID}, s.featureFlags)
 		if err != nil {
 			sbxlogger.I(sbx).Error(uploadCtx, "error uploading snapshot", zap.Error(err))
 			errCh <- err

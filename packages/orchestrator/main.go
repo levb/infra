@@ -290,6 +290,8 @@ func run(config cfg.Config) (success bool) {
 		zap.String("compress-config", compressCfg.JSONString()),
 	)
 
+	storage.InitDecoders(ctx, featureFlags)
+
 	if config.DomainName != "" {
 		featureFlags.SetDeploymentName(config.DomainName)
 	}

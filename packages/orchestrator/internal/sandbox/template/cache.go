@@ -140,7 +140,6 @@ func (c *Cache) GetTemplate(
 		attribute.Bool("is_building", isBuilding),
 	))
 	defer span.End()
-
 	persistence := c.persistence
 	// Because of the template caching, if we enable the NFS cache feature flag,
 	// it will start working only for new orchestrators or new builds.
@@ -166,8 +165,9 @@ func (c *Cache) GetTemplate(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create template cache from storage: %w", err)
 	}
+	result := c.getTemplateWithFetch(ctx, storageTemplate)
 
-	return c.getTemplateWithFetch(ctx, storageTemplate), nil
+	return result, nil
 }
 
 func (c *Cache) AddSnapshot(

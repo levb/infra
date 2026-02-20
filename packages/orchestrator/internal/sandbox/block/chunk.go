@@ -43,7 +43,12 @@ type AssetInfo struct {
 	Size            int64  // uncompressed size (from either source)
 	HasUncompressed bool   // true if the uncompressed object exists in storage
 	HasLZ4          bool   // true if a .lz4 compressed variant exists
-	HasZst          bool   // true if a .zst compressed variant exists
+	HasZstd         bool   // true if a .zstd compressed variant exists
+
+	// Opened FramedFile handles — may be nil if the corresponding asset doesn't exist.
+	Uncompressed storage.FramedFile
+	LZ4          storage.FramedFile
+	Zstd         storage.FramedFile
 }
 
 // HasCompressed reports whether a compressed asset matching ft's type exists.
@@ -56,9 +61,25 @@ func (a *AssetInfo) HasCompressed(ft *storage.FrameTable) bool {
 	case storage.CompressionLZ4:
 		return a.HasLZ4
 	case storage.CompressionZstd:
-		return a.HasZst
+		return a.HasZstd
 	default:
 		return false
+	}
+}
+
+// CompressedFile returns the FramedFile for the compression type in ft, or nil.
+func (a *AssetInfo) CompressedFile(ft *storage.FrameTable) storage.FramedFile {
+	if ft == nil {
+		return nil
+	}
+
+	switch ft.CompressionType {
+	case storage.CompressionLZ4:
+		return a.LZ4
+	case storage.CompressionZstd:
+		return a.Zstd
+	default:
+		return nil
 	}
 }
 
@@ -77,8 +98,7 @@ func (a *AssetInfo) HasCompressed(ft *storage.FrameTable) bool {
 // Decompressed/fetched bytes end up in the shared mmap cache and are
 // available to all subsequent callers regardless of compression mode.
 type Chunker struct {
-	storage storage.FrameGetter
-	assets  AssetInfo
+	assets AssetInfo
 
 	cache   *Cache
 	metrics metrics.Metrics
@@ -101,7 +121,6 @@ var _ Reader = (*Chunker)(nil)
 func NewChunker(
 	assets AssetInfo,
 	blockSize int64,
-	s storage.FrameGetter,
 	cachePath string,
 	m metrics.Metrics,
 	flags *featureflags.Client,
@@ -112,7 +131,6 @@ func NewChunker(
 	}
 
 	return &Chunker{
-		storage:  s,
 		assets:   assets,
 		cache:    cache,
 		metrics:  m,
@@ -203,7 +221,6 @@ func (c *Chunker) getOrCreateSession(ctx context.Context, off int64, ft *storage
 	var (
 		chunkOff   int64
 		chunkLen   int64
-		objectPath string
 		decompress bool
 		key        fetchKey
 	)
@@ -216,13 +233,11 @@ func (c *Chunker) getOrCreateSession(ctx context.Context, off int64, ft *storage
 
 		chunkOff = frameStarts.U
 		chunkLen = int64(frameSize.U)
-		objectPath = storage.V4DataPath(c.assets.BasePath, ft.CompressionType)
 		decompress = true
 		key = fetchKey{offset: frameStarts.U, compressed: true}
 	} else {
 		chunkOff = (off / storage.MemoryChunkSize) * storage.MemoryChunkSize
 		chunkLen = min(int64(storage.MemoryChunkSize), c.assets.Size-chunkOff)
-		objectPath = c.assets.BasePath
 		decompress = false
 		key = fetchKey{offset: chunkOff, compressed: false}
 	}
@@ -238,14 +253,14 @@ func (c *Chunker) getOrCreateSession(ctx context.Context, off int64, ft *storage
 	c.fetchMap[key] = s
 	c.fetchMu.Unlock()
 
-	go c.runFetch(context.WithoutCancel(ctx), s, key, objectPath, chunkOff, ft, decompress)
+	go c.runFetch(context.WithoutCancel(ctx), s, key, chunkOff, ft, decompress)
 
 	return s, nil
 }
 
 // runFetch fetches data from storage into the mmap cache. Runs in a background goroutine.
 // Works for both compressed (decompress=true, ft!=nil) and uncompressed (decompress=false, ft=nil) paths.
-func (c *Chunker) runFetch(ctx context.Context, s *fetchSession, key fetchKey, objectPath string, offsetU int64, ft *storage.FrameTable, decompress bool) {
+func (c *Chunker) runFetch(ctx context.Context, s *fetchSession, key fetchKey, offsetU int64, ft *storage.FrameTable, decompress bool) {
 	ctx, cancel := context.WithTimeout(ctx, decompressFetchTimeout)
 	defer cancel()
 
@@ -292,11 +307,18 @@ func (c *Chunker) runFetch(ctx context.Context, s *fetchSession, key fetchKey, o
 		prevTotal = totalWritten
 	}
 
-	_, err = c.storage.GetFrame(ctx, objectPath, offsetU, ft, decompress, mmapSlice[:s.chunkLen], readSize, onRead)
+	var handle storage.FramedFile
+	if decompress {
+		handle = c.assets.CompressedFile(ft)
+	} else {
+		handle = c.assets.Uncompressed
+	}
+
+	_, err = handle.GetFrame(ctx, offsetU, ft, decompress, mmapSlice[:s.chunkLen], readSize, onRead)
 	if err != nil {
 		fetchSW.Failure(ctx, s.chunkLen,
 			attribute.String(failureReason, failureTypeRemoteRead))
-		s.setError(fmt.Errorf("failed to fetch data at %#x from %s: %w", offsetU, objectPath, err), false)
+		s.setError(fmt.Errorf("failed to fetch data at %#x: %w", offsetU, err), false)
 
 		return
 	}

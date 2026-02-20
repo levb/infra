@@ -24,9 +24,8 @@ type fsObject struct {
 }
 
 var (
-	_ Seekable        = (*fsObject)(nil)
-	_ Blob            = (*fsObject)(nil)
-	_ StreamingReader = (*fsObject)(nil)
+	_ FramedFile = (*fsObject)(nil)
+	_ Blob       = (*fsObject)(nil)
 )
 
 type fsRangeReadCloser struct {
@@ -60,7 +59,7 @@ func (s *fsStorage) UploadSignedURL(_ context.Context, _ string, _ time.Duration
 	return "", fmt.Errorf("file system storage does not support signed URLs")
 }
 
-func (s *fsStorage) OpenSeekable(_ context.Context, path string, _ SeekableObjectType) (Seekable, error) {
+func (s *fsStorage) OpenFramedFile(_ context.Context, path string) (FramedFile, error) {
 	dir := filepath.Dir(s.getPath(path))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -71,7 +70,7 @@ func (s *fsStorage) OpenSeekable(_ context.Context, path string, _ SeekableObjec
 	}, nil
 }
 
-func (s *fsStorage) OpenBlob(_ context.Context, path string, _ ObjectType) (Blob, error) {
+func (s *fsStorage) OpenBlob(_ context.Context, path string) (Blob, error) {
 	dir := filepath.Dir(s.getPath(path))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -109,47 +108,58 @@ func (o *fsObject) Put(_ context.Context, data []byte) error {
 	return err
 }
 
-func (o *fsObject) StoreFile(_ context.Context, path string) error {
+func (o *fsObject) StoreFile(ctx context.Context, path string, opts *FramedUploadOptions) (*FrameTable, error) {
+	if opts != nil && opts.CompressionType != CompressionNone {
+		return o.storeFileCompressed(ctx, path, opts)
+	}
+
 	r, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("failed to open file %s: %w", path, err)
+		return nil, fmt.Errorf("failed to open file %s: %w", path, err)
 	}
 	defer r.Close()
 
 	handle, err := o.getHandle(false)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer handle.Close()
 
 	_, err = io.Copy(handle, r)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return nil
+	return nil, nil
 }
 
-func (o *fsObject) OpenRangeReader(_ context.Context, off, length int64) (io.ReadCloser, error) {
+func (o *fsObject) storeFileCompressed(ctx context.Context, localPath string, opts *FramedUploadOptions) (*FrameTable, error) {
+	file, err := os.Open(localPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open local file %s: %w", localPath, err)
+	}
+	defer file.Close()
+
+	uploader := &fsPartUploader{fullPath: o.path}
+
+	ft, err := CompressStream(ctx, file, opts, uploader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compress and upload %s: %w", localPath, err)
+	}
+
+	return ft, nil
+}
+
+func (o *fsObject) openRangeReader(_ context.Context, off int64, length int) (io.ReadCloser, error) {
 	f, err := o.getHandle(true)
 	if err != nil {
 		return nil, err
 	}
 
 	return &fsRangeReadCloser{
-		Reader: io.NewSectionReader(f, off, length),
+		Reader: io.NewSectionReader(f, off, int64(length)),
 		file:   f,
 	}, nil
-}
-
-func (o *fsObject) ReadAt(_ context.Context, buff []byte, off int64) (n int, err error) {
-	handle, err := o.getHandle(true)
-	if err != nil {
-		return 0, err
-	}
-	defer handle.Close()
-
-	return handle.ReadAt(buff, off)
 }
 
 func (o *fsObject) Exists(_ context.Context) (bool, error) {
@@ -212,50 +222,18 @@ func (o *fsObject) getHandle(checkExistence bool) (*os.File, error) {
 	return handle, nil
 }
 
-func (s *fsStorage) StoreFileCompressed(ctx context.Context, localPath, objectPath string, opts *FramedUploadOptions) (*FrameTable, error) {
-	if opts == nil || opts.CompressionType == CompressionNone {
-		obj, err := s.OpenSeekable(ctx, objectPath, UnknownSeekableObjectType)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open seekable for uncompressed upload: %w", err)
-		}
-
-		if err := obj.StoreFile(ctx, localPath); err != nil {
-			return nil, fmt.Errorf("failed to store file uncompressed: %w", err)
-		}
-
-		return nil, nil
-	}
-
-	file, err := os.Open(localPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open local file %s: %w", localPath, err)
-	}
-	defer file.Close()
-
-	uploader := &fsPartUploader{basePath: s.basePath, objectPath: objectPath}
-
-	ft, err := CompressStream(ctx, file, opts, uploader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compress and upload %s: %w", localPath, err)
-	}
-
-	return ft, nil
-}
-
 // fsPartUploader implements PartUploader for local filesystem.
 type fsPartUploader struct {
-	basePath   string
-	objectPath string
-	file       *os.File
+	fullPath string
+	file     *os.File
 }
 
 func (u *fsPartUploader) Start(_ context.Context) error {
-	fullPath := filepath.Join(u.basePath, u.objectPath)
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(u.fullPath), 0o755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	f, err := os.OpenFile(fullPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(u.fullPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
@@ -279,33 +257,6 @@ func (u *fsPartUploader) Complete(_ context.Context) error {
 	return u.file.Close()
 }
 
-func (s *fsStorage) GetFrame(ctx context.Context, objectPath string, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error) {
-	return getFrame(ctx, s.rangeRead, s.GetDetails(), objectPath, offsetU, frameTable, decompress, buf, readSize, onRead)
-}
-
-func (s *fsStorage) rangeRead(_ context.Context, objectPath string, offset int64, length int) (io.ReadCloser, error) {
-	fullPath := filepath.Join(s.basePath, objectPath)
-
-	f, err := os.Open(fullPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file %q: %w", fullPath, err)
-	}
-
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		f.Close()
-
-		return nil, fmt.Errorf("failed to seek in %q to offset %d: %w", fullPath, offset, err)
-	}
-
-	return &limitedFileReader{file: f, Reader: io.LimitReader(f, int64(length))}, nil
-}
-
-type limitedFileReader struct {
-	io.Reader
-
-	file *os.File
-}
-
-func (r *limitedFileReader) Close() error {
-	return r.file.Close()
+func (o *fsObject) GetFrame(ctx context.Context, offsetU int64, frameTable *FrameTable, decompress bool, buf []byte, readSize int64, onRead func(totalWritten int64)) (Range, error) {
+	return getFrame(ctx, o.openRangeReader, "FS:"+o.path, offsetU, frameTable, decompress, buf, readSize, onRead)
 }
