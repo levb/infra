@@ -361,10 +361,9 @@ func (lb *LayerExecutor) twoPhaseUpload(
 	compressOpts := &storage.FramedUploadOptions{
 		CompressionType:          storage.ParseCompressionType(compressCfg.CompressionType),
 		Level:                    compressCfg.Level,
-		ChunkSize:                compressCfg.ChunkSizeMB * megabyte,
-		TargetFrameSize:          compressCfg.TargetFrameSizeMB * megabyte,
-		TargetPartSize:           compressCfg.TargetPartSizeMB * megabyte,
-		MaxUncompressedFrameSize: compressCfg.MaxFrameUncompressedMB * megabyte,
+		TargetFrameSize:          compressCfg.FrameTargetMB * megabyte,
+		TargetPartSize:           compressCfg.UploadPartTargetMB * megabyte,
+		MaxUncompressedFrameSize: compressCfg.FrameMaxUncompressedMB * megabyte,
 	}
 
 	lb.UploadErrGroup.Go(func() error {

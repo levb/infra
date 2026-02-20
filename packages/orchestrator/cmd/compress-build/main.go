@@ -299,7 +299,6 @@ func compressArtifact(ctx context.Context, cfg *compressConfig, buildID, name, f
 	opts := &storage.FramedUploadOptions{
 		CompressionType:          cfg.compType,
 		Level:                    cfg.level,
-		ChunkSize:                storage.MemoryChunkSize,
 		TargetFrameSize:          cfg.frameSize,
 		MaxUncompressedFrameSize: cfg.maxFrameU,
 		TargetPartSize:           50 * 1024 * 1024,

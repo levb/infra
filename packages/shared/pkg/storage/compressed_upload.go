@@ -13,12 +13,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Each compressed frame contains 1+ chunks.
 const (
-	// defaultChunkSizeU is the uncompressed chunk size for compression.
-	// Must be a multiple of MemoryChunkSize to ensure aligned block/prefetch
-	// requests do not cross compression frame boundaries.
-	defaultChunkSizeU             = MemoryChunkSize
 	defaultTargetFrameSizeC       = 2 * megabyte // target compressed frame size
 	defaultLZ4CompressionLevel    = 3            // lz4 compression level (0=fast, higher=better ratio)
 	defaultCompressionConcurrency = 0            // use default compression concurrency settings
@@ -28,6 +23,20 @@ const (
 	// When a frame's uncompressed size reaches this limit it is flushed regardless
 	// of the compressed size.  4× MemoryChunkSize = 16 MiB.
 	DefaultMaxFrameUncompressedSize = 4 * MemoryChunkSize
+
+	// FrameAlignmentSize is the read granularity for compression input.
+	// Frames are composed of whole chunks of this size, guaranteeing that
+	// no request served by the chunker (UFFD, NBD, prefetch) ever crosses
+	// a frame boundary.
+	//
+	// This MUST be >= every block/page size the system uses:
+	//   - MemoryChunkSize  (4 MiB)  — uncompressed fetch unit
+	//   - header.HugepageSize (2 MiB) — UFFD huge-page size
+	//   - header.RootfsBlockSize (4 KiB) — NBD / rootfs block size
+	//
+	// Do NOT increase this without also ensuring all compressed frame
+	// sizes remain exact multiples.  Changing it is not free.
+	FrameAlignmentSize = 1 * MemoryChunkSize
 )
 
 // PartUploader is the interface for uploading data in parts.
@@ -39,11 +48,12 @@ type PartUploader interface {
 }
 
 // FramedUploadOptions configures compression for framed uploads.
+// Input is read in FrameAlignmentSize chunks; frames are always composed
+// of whole chunks so no chunker request ever crosses a frame boundary.
 type FramedUploadOptions struct {
 	CompressionType        CompressionType
 	Level                  int
 	CompressionConcurrency int
-	ChunkSize              int // frames are made of whole chunks
 	TargetFrameSize        int // frames may be bigger than this due to chunk alignment and async compression.
 	TargetPartSize         int
 
@@ -57,7 +67,6 @@ type FramedUploadOptions struct {
 // DefaultCompressionOptions is the default compression configuration (LZ4).
 var DefaultCompressionOptions = &FramedUploadOptions{
 	CompressionType:          CompressionLZ4,
-	ChunkSize:                defaultChunkSizeU,
 	TargetFrameSize:          defaultTargetFrameSizeC,
 	Level:                    defaultLZ4CompressionLevel,
 	CompressionConcurrency:   defaultCompressionConcurrency,
@@ -69,17 +78,9 @@ var DefaultCompressionOptions = &FramedUploadOptions{
 var NoCompression = (*FramedUploadOptions)(nil)
 
 // ValidateCompressionOptions checks that compression options are valid.
-// ChunkSize must be a multiple of MemoryChunkSize to ensure alignment.
 func ValidateCompressionOptions(opts *FramedUploadOptions) error {
 	if opts == nil || opts.CompressionType == CompressionNone {
 		return nil
-	}
-	chunkSize := opts.ChunkSize
-	if chunkSize == 0 {
-		chunkSize = defaultChunkSizeU
-	}
-	if chunkSize%MemoryChunkSize != 0 {
-		return fmt.Errorf("compression ChunkSize (%d) must be a multiple of MemoryChunkSize (%d)", chunkSize, MemoryChunkSize)
 	}
 
 	return nil
@@ -164,7 +165,7 @@ func (e *encoder) uploadFramed(ctx context.Context, in io.Reader) (*FrameTable, 
 	// Buffer 8 chunks to allow read-ahead and better pipelining.
 	chunkCh := make(chan []byte, 8)
 	readErrorCh := make(chan error, 1)
-	go e.readFile(ctx, in, e.opts.ChunkSize, chunkCh, readErrorCh)
+	go e.readFile(ctx, in, FrameAlignmentSize, chunkCh, readErrorCh)
 
 	for {
 		select {
@@ -275,40 +276,36 @@ func (e *encoder) flushFrame(eg *errgroup.Group, uploadCtx context.Context, f *f
 }
 
 func (e *encoder) readFile(ctx context.Context, in io.Reader, chunkSize int, chunkCh chan<- []byte, errorCh chan<- error) {
-	var err error
-	for i := 0; err == nil; i++ {
-		var chunk []byte
-		chunk, err = readChunk(in, chunkSize)
+	for i := 0; ; i++ {
+		chunk := make([]byte, chunkSize)
+		n, err := io.ReadFull(in, chunk)
 
 		if err == nil {
-			err = ctx.Err()
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				errorCh <- ctxErr
+				return
+			}
+			chunkCh <- chunk[:n]
+			continue
 		}
-		switch {
-		case err == nil:
-			chunkCh <- chunk
-		case errors.Is(err, io.EOF):
-			if len(chunk) > 0 {
-				chunkCh <- chunk
+
+		// ErrUnexpectedEOF means a partial read (last chunk shorter than chunkSize).
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			if n > 0 {
+				chunkCh <- chunk[:n]
 			}
 			close(chunkCh)
-		default:
-			errorCh <- fmt.Errorf("failed to read file chunk %d: %w", i, err)
+			return
 		}
+		// EOF means no bytes were read at all.
+		if errors.Is(err, io.EOF) {
+			close(chunkCh)
+			return
+		}
+
+		errorCh <- fmt.Errorf("failed to read file chunk %d: %w", i, err)
+		return
 	}
-}
-
-func readChunk(file io.Reader, chunkSize int) ([]byte, error) {
-	chunk := make([]byte, chunkSize)
-	var n int
-	var err error
-
-	for n < chunkSize && err == nil {
-		var c int
-		c, err = file.Read(chunk[n:])
-		n += c
-	}
-
-	return chunk[:n], err
 }
 
 func (e *encoder) startFrame() (*frame, error) {
@@ -316,7 +313,7 @@ func (e *encoder) startFrame() (*frame, error) {
 	var err error
 	frame := &frame{
 		e:                e,
-		compressedBuffer: bytes.NewBuffer(make([]byte, 0, e.opts.TargetFrameSize+e.opts.ChunkSize)),
+		compressedBuffer: bytes.NewBuffer(make([]byte, 0, e.opts.TargetFrameSize+e.opts.TargetFrameSize/2)), // pre-allocate buffer to avoid resizes during compression
 	}
 	switch e.opts.CompressionType {
 	case CompressionZstd:
@@ -334,7 +331,7 @@ func (e *encoder) startFrame() (*frame, error) {
 	return frame, nil
 }
 
-// writeChunk writes uncompressed data chunk into the frame. len(data) is expected to be <= opts.ChunkSize.
+// writeChunk writes uncompressed data chunk into the frame. len(data) is expected to be <= FrameAlignmentSize.
 func (e *encoder) writeChunk(frame *frame, data []byte) error {
 	for len(data) > 0 {
 		// Write out data that fits the current chunk

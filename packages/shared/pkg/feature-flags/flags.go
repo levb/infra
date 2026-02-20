@@ -260,22 +260,19 @@ var ChunkerConfigFlag = newJSONFlag("chunker-config", ldvalue.FromJSONMarshal(ma
 //     template builds. Default false.
 //   - compressionType (string): "lz4" or "zstd". Default "lz4".
 //   - level (int): Compression level. For LZ4 0=fast, higher=better ratio. Default 3.
-//   - chunkSizeMB (int): Uncompressed chunk size in MiB. Must be a multiple of 4.
-//     Default 4 (= MemoryChunkSize).
-//   - targetFrameSizeMB (int): Target compressed frame size in MiB. Default 2.
-//   - targetPartSizeMB (int): Target upload part size in MiB. Default 50.
-//   - maxFrameUncompressedMB (int): Cap on uncompressed bytes per frame in MiB.
+//   - frameTargetMB (int): Target compressed frame size in MiB. Default 2.
+//   - frameMaxUncompressedMB (int): Cap on uncompressed bytes per frame in MiB.
 //     Default 16 (= 4 × MemoryChunkSize).
+//   - uploadPartTargetMB (int): Target upload part size in MiB. Default 50.
 //
 // JSON format: {"compressBuilds": false, "compressionType": "lz4", "level": 3, ...}
 var CompressConfigFlag = newJSONFlag("compress-config", ldvalue.FromJSONMarshal(map[string]any{
 	"compressBuilds":        false,
 	"compressionType":       "lz4",
 	"level":                 3,
-	"chunkSizeMB":           4,
-	"targetFrameSizeMB":     2,
-	"targetPartSizeMB":      50,
-	"maxFrameUncompressedMB": 16,
+	"frameTargetMB":     2,
+	"uploadPartTargetMB":      50,
+	"frameMaxUncompressedMB": 16,
 }))
 
 // CompressConfig holds the parsed compress-config flag values.
@@ -283,10 +280,9 @@ type CompressConfig struct {
 	CompressBuilds        bool
 	CompressionType       string // "lz4" or "zstd"
 	Level                 int
-	ChunkSizeMB           int
-	TargetFrameSizeMB     int
-	TargetPartSizeMB      int
-	MaxFrameUncompressedMB int
+	FrameTargetMB     int
+	UploadPartTargetMB      int
+	FrameMaxUncompressedMB int
 }
 
 // GetCompressConfig reads the compress-config flag and returns a typed struct.
@@ -298,10 +294,9 @@ func GetCompressConfig(ctx context.Context, ff *Client) CompressConfig {
 		CompressBuilds:        v.Get("compressBuilds").BoolValue(),
 		CompressionType:       stringOrDefault(v.Get("compressionType"), "lz4"),
 		Level:                 intOrDefault(v.Get("level"), 3),
-		ChunkSizeMB:           intOrDefault(v.Get("chunkSizeMB"), 4),
-		TargetFrameSizeMB:     intOrDefault(v.Get("targetFrameSizeMB"), 2),
-		TargetPartSizeMB:      intOrDefault(v.Get("targetPartSizeMB"), 50),
-		MaxFrameUncompressedMB: intOrDefault(v.Get("maxFrameUncompressedMB"), 16),
+		FrameTargetMB:     intOrDefault(v.Get("frameTargetMB"), 2),
+		UploadPartTargetMB:      intOrDefault(v.Get("uploadPartTargetMB"), 50),
+		FrameMaxUncompressedMB: intOrDefault(v.Get("frameMaxUncompressedMB"), 16),
 	}
 }
 

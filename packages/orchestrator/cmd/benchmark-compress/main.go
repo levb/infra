@@ -274,7 +274,6 @@ func framedEncode(data []byte, ct storage.CompressionType, level int) ([]byte, *
 		CompressionType:          ct,
 		Level:                    level,
 		CompressionConcurrency:   1,
-		ChunkSize:                storage.MemoryChunkSize,
 		TargetFrameSize:          2 * 1024 * 1024, // 2 MiB
 		MaxUncompressedFrameSize: storage.DefaultMaxFrameUncompressedSize,
 		TargetPartSize:           50 * 1024 * 1024,
