@@ -283,6 +283,16 @@ func run(config cfg.Config) (success bool) {
 	}
 	closers = append(closers, closer{"feature flags", featureFlags.Close})
 
+	// Log compression-related feature flags for diagnostics.
+	chunkerCfg := featureFlags.JSONFlag(ctx, featureflags.ChunkerConfigFlag)
+	compressCfg := featureFlags.JSONFlag(ctx, featureflags.CompressConfigFlag)
+	globalLogger.Info(ctx, "Feature flags",
+		zap.String("chunker-config", chunkerCfg.JSONString()),
+		zap.String("compress-config", compressCfg.JSONString()),
+	)
+
+	storage.InitDecoders(ctx, featureFlags)
+
 	if config.DomainName != "" {
 		featureFlags.SetDeploymentName(config.DomainName)
 	}

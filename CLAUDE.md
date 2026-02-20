@@ -286,6 +286,11 @@ make connect-orchestrator
 - Access: `https://nomad.<your-domain>`
 - Token: GCP Secrets Manager
 
-### Logs
+### Nomad Logs
+- Use `nomad alloc logs -job <job-name>` to fetch service logs (e.g., `nomad alloc logs -job orchestrator-dev`)
+- Use `-stderr` flag for stderr output: `nomad alloc logs -job orchestrator-dev -stderr`
+- Use `-tail` for live tailing: `nomad alloc logs -job orchestrator-dev -tail`
+- The orchestrator job in dev is called `orchestrator-dev`
+- Integration test failures should be diagnosed by checking these logs first
 - Local: Docker logs in `make local-infra`
 - Production: Grafana Loki or Nomad UI
