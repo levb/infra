@@ -55,7 +55,6 @@ func (s *Server) Create(ctx context.Context, req *orchestrator.SandboxCreateRequ
 	// set up tracing
 	ctx, childSpan := tracer.Start(ctx, "sandbox-create")
 	defer childSpan.End()
-
 	childSpan.SetAttributes(
 		telemetry.WithTemplateID(req.GetSandbox().GetTemplateId()),
 		attribute.String("kernel.version", req.GetSandbox().GetKernelVersion()),
@@ -602,12 +601,13 @@ func (s *Server) snapshotAndCacheSandbox(
 	telemetry.ReportEvent(ctx, "added snapshot to template cache")
 
 	// Start upload in background, return a wait function
+	tb := sandbox.NewTemplateBuild(snapshot, s.persistence, storage.TemplateFiles{BuildID: meta.Template.BuildID}, s.featureFlags, nil)
+
 	uploadCtx := context.WithoutCancel(ctx)
 	errCh := make(chan error, 1)
 
 	go func() {
-		err := snapshot.Upload(uploadCtx, s.persistence, storage.TemplateFiles{BuildID: meta.Template.BuildID})
-		if err != nil {
+		if err := tb.UploadAtOnce(uploadCtx); err != nil {
 			sbxlogger.I(sbx).Error(uploadCtx, "error uploading snapshot", zap.Error(err))
 			errCh <- err
 

@@ -249,17 +249,25 @@ func GetTrackedTemplatesSet(ctx context.Context, ff *Client) map[string]struct{}
 	return result
 }
 
-// ChunkerConfigFlag is a JSON flag controlling the chunker implementation and tuning.
-//
-// NOTE: Changing useStreaming has no effect on chunkers already created for
-// cached templates. A service restart (redeploy) is required for that change
-// to take effect. minReadBatchSizeKB is checked just-in-time on each fetch,
-// so it takes effect immediately.
-//
-// JSON format: {"useStreaming": false, "minReadBatchSizeKB": 16}
-var ChunkerConfigFlag = newJSONFlag("chunker-config", ldvalue.FromJSONMarshal(map[string]any{
-	"useStreaming":       false,
-	"minReadBatchSizeKB": 16,
+// OverrideJSONFlag updates a JSON flag value in the offline store.
+// Intended for benchmarks and tests.
+func OverrideJSONFlag(flag JSONFlag, value ldvalue.Value) {
+	builder := launchDarklyOfflineStore.Flag(flag.Key()).ValueForAll(value)
+	launchDarklyOfflineStore.Update(builder)
+}
+
+// CompressConfigFlag controls compression during template builds.
+// When compressBuilds is true, builds upload exclusively compressed data
+// (no uncompressed fallback). When false, exclusively uncompressed with V3 headers.
+var CompressConfigFlag = newJSONFlag("compress-config", ldvalue.FromJSONMarshal(map[string]any{
+	"compressBuilds":     false,
+	"compressionType":    "zstd",
+	"level":              2,
+	"frameSizeKB":        2048,
+	"uploadPartTargetMB": 50,
+	"encodeWorkers":      4,
+	"encoderConcurrency": 1,
+	"decoderConcurrency": 1,
 }))
 
 // TCPFirewallEgressThrottleConfig controls per-sandbox egress throttling via Firecracker's
