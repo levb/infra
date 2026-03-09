@@ -140,27 +140,66 @@ type Metadata struct {
 	Config         Config
 	Runtime        RuntimeMetadata
 
-	startedAtMu sync.RWMutex // protects startedAt
-	startedAt   time.Time
-
-	endAtMu sync.RWMutex // protects endAt
-	endAt   time.Time
+	rwmu          sync.RWMutex // protects startedAt, endAt, networkEgress
+	startedAt     time.Time
+	endAt         time.Time
+	networkEgress *orchestrator.SandboxNetworkEgressConfig
 }
 
 // GetEndAt returns the sandbox end time in a thread-safe manner.
 func (m *Metadata) GetEndAt() time.Time {
-	m.endAtMu.RLock()
-	defer m.endAtMu.RUnlock()
+	m.rwmu.RLock()
+	defer m.rwmu.RUnlock()
 
 	return m.endAt
 }
 
 // SetEndAt sets the sandbox end time in a thread-safe manner.
 func (m *Metadata) SetEndAt(t time.Time) {
-	m.endAtMu.Lock()
-	defer m.endAtMu.Unlock()
+	m.rwmu.Lock()
+	defer m.rwmu.Unlock()
 
 	m.endAt = t
+}
+
+// GetNetworkEgress returns the sandbox network egress config in a thread-safe manner.
+func (m *Metadata) GetNetworkEgress() *orchestrator.SandboxNetworkEgressConfig {
+	m.rwmu.RLock()
+	defer m.rwmu.RUnlock()
+
+	return m.networkEgress
+}
+
+// GetNetwork returns the sandbox network config in a thread-safe manner.
+// The returned value is never nil; Ingress is always set (possibly empty).
+func (m *Metadata) GetNetwork() *orchestrator.SandboxNetworkConfig {
+	egress := m.GetNetworkEgress()
+
+	net := m.Config.Network
+	if net == nil {
+		return &orchestrator.SandboxNetworkConfig{
+			Egress:  egress,
+			Ingress: &orchestrator.SandboxNetworkIngressConfig{},
+		}
+	}
+
+	ingress := net.GetIngress()
+	if ingress == nil {
+		ingress = &orchestrator.SandboxNetworkIngressConfig{}
+	}
+
+	return &orchestrator.SandboxNetworkConfig{
+		Egress:  egress,
+		Ingress: ingress,
+	}
+}
+
+// SetNetworkEgress updates the sandbox network egress config in a thread-safe manner.
+func (m *Metadata) SetNetworkEgress(egress *orchestrator.SandboxNetworkEgressConfig) {
+	m.rwmu.Lock()
+	defer m.rwmu.Unlock()
+
+	m.networkEgress = egress
 }
 
 type Sandbox struct {
@@ -206,16 +245,16 @@ func (s *Sandbox) LoggerMetadata() sbxlogger.SandboxMetadata {
 
 // GetStartedAt returns the sandbox start time in a thread-safe manner.
 func (m *Metadata) GetStartedAt() time.Time {
-	m.startedAtMu.RLock()
-	defer m.startedAtMu.RUnlock()
+	m.rwmu.RLock()
+	defer m.rwmu.RUnlock()
 
 	return m.startedAt
 }
 
 // SetStartedAt sets the sandbox start time in a thread-safe manner.
 func (m *Metadata) SetStartedAt(t time.Time) {
-	m.startedAtMu.Lock()
-	defer m.startedAtMu.Unlock()
+	m.rwmu.Lock()
+	defer m.rwmu.Unlock()
 
 	m.startedAt = t
 }
@@ -389,8 +428,9 @@ func (f *Factory) CreateSandbox(
 		Config:  config,
 		Runtime: runtime,
 
-		startedAt: time.Now(),
-		endAt:     time.Now().Add(sandboxTimeout),
+		startedAt:     time.Now(),
+		endAt:         time.Now().Add(sandboxTimeout),
+		networkEgress: config.Network.GetEgress(),
 	}
 
 	sbx := &Sandbox{
@@ -709,8 +749,9 @@ func (f *Factory) ResumeSandbox(
 		Config:  config,
 		Runtime: runtime,
 
-		startedAt: startedAt,
-		endAt:     endAt,
+		startedAt:     startedAt,
+		endAt:         endAt,
+		networkEgress: config.Network.GetEgress(),
 	}
 
 	sbx := &Sandbox{
