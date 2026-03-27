@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 
 	"github.com/bits-and-blooms/bitset"
 	"github.com/google/uuid"
@@ -27,7 +28,7 @@ type DiffMetadata struct {
 func (d *DiffMetadata) toDiffMapping(
 	ctx context.Context,
 	buildID uuid.UUID,
-) (mapping []*BuildMap) {
+) ([]*BuildMap, error) {
 	dirtyMappings := CreateMapping(
 		&buildID,
 		d.Dirty,
@@ -43,10 +44,14 @@ func (d *DiffMetadata) toDiffMapping(
 	)
 	telemetry.ReportEvent(ctx, "created empty mapping")
 
-	mappings := MergeMappings(dirtyMappings, emptyMappings)
+	mappings, err := MergeMappings(dirtyMappings, emptyMappings)
+	if err != nil {
+		return nil, fmt.Errorf("merge diff mappings: %w", err)
+	}
+
 	telemetry.ReportEvent(ctx, "merge mappings")
 
-	return mappings
+	return mappings, nil
 }
 
 func (d *DiffMetadata) ToDiffHeader(
@@ -63,12 +68,19 @@ func (d *DiffMetadata) ToDiffHeader(
 		}
 	}()
 
-	diffMapping := d.toDiffMapping(ctx, buildID)
+	diffMapping, err := d.toDiffMapping(ctx, buildID)
+	if err != nil {
+		return nil, fmt.Errorf("create diff mapping: %w", err)
+	}
 
-	m := MergeMappings(
+	m, err := MergeMappings(
 		originalHeader.Mapping,
 		diffMapping,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("merge mappings: %w", err)
+	}
+
 	telemetry.ReportEvent(ctx, "merged mappings")
 
 	// TODO: We can run normalization only when empty mappings are not empty for this snapshot
@@ -92,6 +104,9 @@ func (d *DiffMetadata) ToDiffHeader(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create header: %w", err)
 	}
+
+	// Inherit upstream build file info (sizes + checksums).
+	header.BuildFiles = maps.Clone(originalHeader.BuildFiles)
 
 	err = ValidateMappings(header.Mapping, header.Metadata.Size, header.Metadata.BlockSize)
 	if err != nil {
