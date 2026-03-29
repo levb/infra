@@ -31,11 +31,10 @@ var (
 		"Total peer orchestrator reads",
 	))
 
-	attrOpWriteTo     = attribute.String("operation", "WriteTo")
-	attrOpExists      = attribute.String("operation", "Exists")
-	attrOpSize        = attribute.String("operation", "Size")
-	attrOpReadAt      = attribute.String("operation", "ReadAt")
-	attrOpRangeReader = attribute.String("operation", "OpenRangeReader")
+	attrOpWriteTo  = attribute.String("operation", "WriteTo")
+	attrOpExists   = attribute.String("operation", "Exists")
+	attrOpSize     = attribute.String("operation", "Size")
+	attrOpGetFrame = attribute.String("operation", "GetFrame")
 
 	attrResolveRedisError = attribute.String("peer_resolve", "redis_error")
 	attrResolveNoPeer     = attribute.String("peer_resolve", "no_peer")
@@ -81,16 +80,16 @@ func (p *routingProvider) resolveProvider(ctx context.Context, buildID string) s
 	return newPeerStorageProvider(p.base, res.client, res.uploaded)
 }
 
-func (p *routingProvider) OpenBlob(ctx context.Context, path string, objType storage.ObjectType) (storage.Blob, error) {
+func (p *routingProvider) OpenBlob(ctx context.Context, path string) (storage.Blob, error) {
 	buildID, _ := storage.ParseStoragePath(path)
 
-	return p.resolveProvider(ctx, buildID).OpenBlob(ctx, path, objType)
+	return p.resolveProvider(ctx, buildID).OpenBlob(ctx, path)
 }
 
-func (p *routingProvider) OpenSeekable(ctx context.Context, path string, objType storage.SeekableObjectType) (storage.Seekable, error) {
+func (p *routingProvider) OpenFramedFile(ctx context.Context, path string) (storage.FramedFile, error) {
 	buildID, _ := storage.ParseStoragePath(path)
 
-	return p.resolveProvider(ctx, buildID).OpenSeekable(ctx, path, objType)
+	return p.resolveProvider(ctx, buildID).OpenFramedFile(ctx, path)
 }
 
 func (p *routingProvider) DeleteObjectsWithPrefix(ctx context.Context, prefix string) error {
@@ -108,18 +107,19 @@ func (p *routingProvider) GetDetails() string {
 var _ storage.StorageProvider = (*peerStorageProvider)(nil)
 
 // peerStorageProvider tries the peer first for reads. Writes are always delegated to base.
+// uploaded doubles as the "uploaded" flag: when non-nil, the build is in GCS
+// and all reads skip the peer. The UploadedHeaders value contains serialized V4
+// headers for compressed builds (empty for uncompressed).
 type peerStorageProvider struct {
 	base       storage.StorageProvider
 	peerClient orchestrator.ChunkServiceClient
-	// uploaded is set to true when the peer signals that GCS upload is complete
-	// (use_storage=true). Once set, all subsequent reads skip the peer and go to base.
-	uploaded *atomic.Bool
+	uploaded   *atomic.Pointer[UploadedHeaders]
 }
 
 func newPeerStorageProvider(
 	base storage.StorageProvider,
 	peerClient orchestrator.ChunkServiceClient,
-	uploaded *atomic.Bool,
+	uploaded *atomic.Pointer[UploadedHeaders],
 ) storage.StorageProvider {
 	return &peerStorageProvider{
 		base:       base,
@@ -128,7 +128,7 @@ func newPeerStorageProvider(
 	}
 }
 
-func (p *peerStorageProvider) OpenBlob(_ context.Context, path string, objType storage.ObjectType) (storage.Blob, error) {
+func (p *peerStorageProvider) OpenBlob(_ context.Context, path string) (storage.Blob, error) {
 	buildID, fileName := storage.ParseStoragePath(path)
 
 	return &peerBlob{peerHandle: peerHandle[storage.Blob]{
@@ -137,21 +137,24 @@ func (p *peerStorageProvider) OpenBlob(_ context.Context, path string, objType s
 		fileName: fileName,
 		uploaded: p.uploaded,
 		openFn: func(ctx context.Context) (storage.Blob, error) {
-			return p.base.OpenBlob(ctx, path, objType)
+			return p.base.OpenBlob(ctx, path)
 		},
 	}}, nil
 }
 
-func (p *peerStorageProvider) OpenSeekable(_ context.Context, path string, objType storage.SeekableObjectType) (storage.Seekable, error) {
+func (p *peerStorageProvider) OpenFramedFile(_ context.Context, path string) (storage.FramedFile, error) {
 	buildID, fileName := storage.ParseStoragePath(path)
+	// Strip compression suffix for peer gRPC requests — the peer serves
+	// uncompressed data under the base file name.
+	peerFileName := storage.BaseFileName(fileName)
 
-	return &peerSeekable{peerHandle: peerHandle[storage.Seekable]{
+	return &peerFramedFile{peerHandle: peerHandle[storage.FramedFile]{
 		client:   p.peerClient,
 		buildID:  buildID,
-		fileName: fileName,
+		fileName: peerFileName,
 		uploaded: p.uploaded,
-		openFn: func(ctx context.Context) (storage.Seekable, error) {
-			return p.base.OpenSeekable(ctx, path, objType)
+		openFn: func(ctx context.Context) (storage.FramedFile, error) {
+			return p.base.OpenFramedFile(ctx, path)
 		},
 	}}, nil
 }
@@ -168,14 +171,20 @@ func (p *peerStorageProvider) GetDetails() string {
 	return p.base.GetDetails()
 }
 
-// checkPeerAvailability also marks the uploaded flag when UseStorage is set.
-func checkPeerAvailability(avail *orchestrator.PeerAvailability, uploaded *atomic.Bool) bool {
+// checkPeerAvailability marks the build as uploaded when UseStorage is set.
+// A single atomic store on uploaded serves as both the "uploaded" flag
+// and the V4 header carrier — no ordering concern between separate atomics.
+func checkPeerAvailability(avail *orchestrator.PeerAvailability, uploaded *atomic.Pointer[UploadedHeaders]) bool {
 	if avail.GetNotAvailable() {
 		return false
 	}
 
 	if avail.GetUseStorage() {
-		uploaded.Store(true)
+		hdrs := &UploadedHeaders{
+			MemfileHeader: avail.GetMemfileHeader(),
+			RootfsHeader:  avail.GetRootfsHeader(),
+		}
+		uploaded.Store(hdrs)
 
 		return false
 	}
@@ -187,7 +196,7 @@ type peerHandle[Base any] struct {
 	client   orchestrator.ChunkServiceClient
 	buildID  string
 	fileName string
-	uploaded *atomic.Bool
+	uploaded *atomic.Pointer[UploadedHeaders]
 
 	mu     sync.Mutex
 	base   Base
@@ -238,7 +247,7 @@ func withPeerFallback[Base, T any](
 	))
 	defer span.End()
 
-	if !h.uploaded.Load() {
+	if h.uploaded.Load() == nil {
 		timer := peerReadTimerFactory.Begin(opAttr)
 
 		res, err := peerFn(ctx)

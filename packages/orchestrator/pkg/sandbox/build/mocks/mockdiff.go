@@ -8,6 +8,7 @@ import (
 	"context"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/build"
+	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	mock "github.com/stretchr/testify/mock"
 )
 
@@ -327,46 +328,47 @@ func (_c *MockDiff_Init_Call) RunAndReturn(run func(ctx context.Context) error) 
 	return _c
 }
 
-// ReadAt provides a mock function for the type MockDiff
-func (_mock *MockDiff) ReadAt(ctx context.Context, buffer []byte, off int64) (int, error) {
-	ret := _mock.Called(ctx, buffer, off)
+// ReadBlock provides a mock function for the type MockDiff
+func (_mock *MockDiff) ReadBlock(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error) {
+	ret := _mock.Called(ctx, p, off, ft)
 
 	if len(ret) == 0 {
-		panic("no return value specified for ReadAt")
+		panic("no return value specified for ReadBlock")
 	}
 
 	var r0 int
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, []byte, int64) (int, error)); ok {
-		return returnFunc(ctx, buffer, off)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []byte, int64, *storage.FrameTable) (int, error)); ok {
+		return returnFunc(ctx, p, off, ft)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, []byte, int64) int); ok {
-		r0 = returnFunc(ctx, buffer, off)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []byte, int64, *storage.FrameTable) int); ok {
+		r0 = returnFunc(ctx, p, off, ft)
 	} else {
 		r0 = ret.Get(0).(int)
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, []byte, int64) error); ok {
-		r1 = returnFunc(ctx, buffer, off)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, []byte, int64, *storage.FrameTable) error); ok {
+		r1 = returnFunc(ctx, p, off, ft)
 	} else {
 		r1 = ret.Error(1)
 	}
 	return r0, r1
 }
 
-// MockDiff_ReadAt_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ReadAt'
-type MockDiff_ReadAt_Call struct {
+// MockDiff_ReadBlock_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ReadBlock'
+type MockDiff_ReadBlock_Call struct {
 	*mock.Call
 }
 
-// ReadAt is a helper method to define mock.On call
+// ReadBlock is a helper method to define mock.On call
 //   - ctx context.Context
-//   - buffer []byte
+//   - p []byte
 //   - off int64
-func (_e *MockDiff_Expecter) ReadAt(ctx interface{}, buffer interface{}, off interface{}) *MockDiff_ReadAt_Call {
-	return &MockDiff_ReadAt_Call{Call: _e.mock.On("ReadAt", ctx, buffer, off)}
+//   - ft *storage.FrameTable
+func (_e *MockDiff_Expecter) ReadBlock(ctx interface{}, p interface{}, off interface{}, ft interface{}) *MockDiff_ReadBlock_Call {
+	return &MockDiff_ReadBlock_Call{Call: _e.mock.On("ReadBlock", ctx, p, off, ft)}
 }
 
-func (_c *MockDiff_ReadAt_Call) Run(run func(ctx context.Context, buffer []byte, off int64)) *MockDiff_ReadAt_Call {
+func (_c *MockDiff_ReadBlock_Call) Run(run func(ctx context.Context, p []byte, off int64, ft *storage.FrameTable)) *MockDiff_ReadBlock_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -380,127 +382,73 @@ func (_c *MockDiff_ReadAt_Call) Run(run func(ctx context.Context, buffer []byte,
 		if args[2] != nil {
 			arg2 = args[2].(int64)
 		}
+		var arg3 *storage.FrameTable
+		if args[3] != nil {
+			arg3 = args[3].(*storage.FrameTable)
+		}
 		run(
 			arg0,
 			arg1,
 			arg2,
+			arg3,
 		)
 	})
 	return _c
 }
 
-func (_c *MockDiff_ReadAt_Call) Return(n int, err error) *MockDiff_ReadAt_Call {
+func (_c *MockDiff_ReadBlock_Call) Return(n int, err error) *MockDiff_ReadBlock_Call {
 	_c.Call.Return(n, err)
 	return _c
 }
 
-func (_c *MockDiff_ReadAt_Call) RunAndReturn(run func(ctx context.Context, buffer []byte, off int64) (int, error)) *MockDiff_ReadAt_Call {
+func (_c *MockDiff_ReadBlock_Call) RunAndReturn(run func(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error)) *MockDiff_ReadBlock_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// Size provides a mock function for the type MockDiff
-func (_mock *MockDiff) Size(ctx context.Context) (int64, error) {
-	ret := _mock.Called(ctx)
+// SliceBlock provides a mock function for the type MockDiff
+func (_mock *MockDiff) SliceBlock(ctx context.Context, off int64, length int64, ft *storage.FrameTable) ([]byte, error) {
+	ret := _mock.Called(ctx, off, length, ft)
 
 	if len(ret) == 0 {
-		panic("no return value specified for Size")
-	}
-
-	var r0 int64
-	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context) (int64, error)); ok {
-		return returnFunc(ctx)
-	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context) int64); ok {
-		r0 = returnFunc(ctx)
-	} else {
-		r0 = ret.Get(0).(int64)
-	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
-		r1 = returnFunc(ctx)
-	} else {
-		r1 = ret.Error(1)
-	}
-	return r0, r1
-}
-
-// MockDiff_Size_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Size'
-type MockDiff_Size_Call struct {
-	*mock.Call
-}
-
-// Size is a helper method to define mock.On call
-//   - ctx context.Context
-func (_e *MockDiff_Expecter) Size(ctx interface{}) *MockDiff_Size_Call {
-	return &MockDiff_Size_Call{Call: _e.mock.On("Size", ctx)}
-}
-
-func (_c *MockDiff_Size_Call) Run(run func(ctx context.Context)) *MockDiff_Size_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		run(
-			arg0,
-		)
-	})
-	return _c
-}
-
-func (_c *MockDiff_Size_Call) Return(n int64, err error) *MockDiff_Size_Call {
-	_c.Call.Return(n, err)
-	return _c
-}
-
-func (_c *MockDiff_Size_Call) RunAndReturn(run func(ctx context.Context) (int64, error)) *MockDiff_Size_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// Slice provides a mock function for the type MockDiff
-func (_mock *MockDiff) Slice(ctx context.Context, off int64, length int64) ([]byte, error) {
-	ret := _mock.Called(ctx, off, length)
-
-	if len(ret) == 0 {
-		panic("no return value specified for Slice")
+		panic("no return value specified for SliceBlock")
 	}
 
 	var r0 []byte
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) ([]byte, error)); ok {
-		return returnFunc(ctx, off, length)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, *storage.FrameTable) ([]byte, error)); ok {
+		return returnFunc(ctx, off, length, ft)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) []byte); ok {
-		r0 = returnFunc(ctx, off, length)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, *storage.FrameTable) []byte); ok {
+		r0 = returnFunc(ctx, off, length, ft)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).([]byte)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64) error); ok {
-		r1 = returnFunc(ctx, off, length)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64, *storage.FrameTable) error); ok {
+		r1 = returnFunc(ctx, off, length, ft)
 	} else {
 		r1 = ret.Error(1)
 	}
 	return r0, r1
 }
 
-// MockDiff_Slice_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Slice'
-type MockDiff_Slice_Call struct {
+// MockDiff_SliceBlock_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SliceBlock'
+type MockDiff_SliceBlock_Call struct {
 	*mock.Call
 }
 
-// Slice is a helper method to define mock.On call
+// SliceBlock is a helper method to define mock.On call
 //   - ctx context.Context
 //   - off int64
 //   - length int64
-func (_e *MockDiff_Expecter) Slice(ctx interface{}, off interface{}, length interface{}) *MockDiff_Slice_Call {
-	return &MockDiff_Slice_Call{Call: _e.mock.On("Slice", ctx, off, length)}
+//   - ft *storage.FrameTable
+func (_e *MockDiff_Expecter) SliceBlock(ctx interface{}, off interface{}, length interface{}, ft interface{}) *MockDiff_SliceBlock_Call {
+	return &MockDiff_SliceBlock_Call{Call: _e.mock.On("SliceBlock", ctx, off, length, ft)}
 }
 
-func (_c *MockDiff_Slice_Call) Run(run func(ctx context.Context, off int64, length int64)) *MockDiff_Slice_Call {
+func (_c *MockDiff_SliceBlock_Call) Run(run func(ctx context.Context, off int64, length int64, ft *storage.FrameTable)) *MockDiff_SliceBlock_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -514,21 +462,26 @@ func (_c *MockDiff_Slice_Call) Run(run func(ctx context.Context, off int64, leng
 		if args[2] != nil {
 			arg2 = args[2].(int64)
 		}
+		var arg3 *storage.FrameTable
+		if args[3] != nil {
+			arg3 = args[3].(*storage.FrameTable)
+		}
 		run(
 			arg0,
 			arg1,
 			arg2,
+			arg3,
 		)
 	})
 	return _c
 }
 
-func (_c *MockDiff_Slice_Call) Return(bytes []byte, err error) *MockDiff_Slice_Call {
+func (_c *MockDiff_SliceBlock_Call) Return(bytes []byte, err error) *MockDiff_SliceBlock_Call {
 	_c.Call.Return(bytes, err)
 	return _c
 }
 
-func (_c *MockDiff_Slice_Call) RunAndReturn(run func(ctx context.Context, off int64, length int64) ([]byte, error)) *MockDiff_Slice_Call {
+func (_c *MockDiff_SliceBlock_Call) RunAndReturn(run func(ctx context.Context, off int64, length int64, ft *storage.FrameTable) ([]byte, error)) *MockDiff_SliceBlock_Call {
 	_c.Call.Return(run)
 	return _c
 }

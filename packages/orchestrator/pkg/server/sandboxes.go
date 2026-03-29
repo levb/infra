@@ -32,6 +32,7 @@ import (
 	sbxlogger "github.com/e2b-dev/infra/packages/shared/pkg/logger/sandbox"
 	sandbox_network "github.com/e2b-dev/infra/packages/shared/pkg/sandbox-network"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
+	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
 	"github.com/e2b-dev/infra/packages/shared/pkg/telemetry"
 	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
@@ -639,9 +640,13 @@ func (s *Server) Checkpoint(ctx context.Context, in *orchestrator.SandboxCheckpo
 		// be paused or resumed later.
 		uploadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), uploadTimeout)
 		defer cancel()
-		defer res.completeUpload(uploadCtx)
+		defer func() {
+			if err := res.completeUpload(uploadCtx); err != nil {
+				telemetry.ReportCriticalError(uploadCtx, "error completing upload", err, telemetry.WithSandboxID(in.GetSandboxId()))
+			}
+		}()
 
-		if err := res.snapshot.Upload(uploadCtx, s.persistence, res.templateFiles); err != nil {
+		if err := res.uploadSnapshot(uploadCtx, s.persistence, s.config.CompressConfig, s.featureFlags); err != nil {
 			telemetry.ReportCriticalError(ctx, "error uploading snapshot for checkpoint", err, telemetry.WithSandboxID(in.GetSandboxId()))
 
 			s.sandboxFactory.Sandboxes.MarkStopping(ctx, resumedSbx.Runtime.SandboxID, resumedSbx.LifecycleID)
@@ -695,12 +700,24 @@ type snapshotResult struct {
 	meta           metadata.Template
 	snapshot       *sandbox.Snapshot
 	templateFiles  storage.TemplateFiles
-	completeUpload func(ctx context.Context)
+	completeUpload func(ctx context.Context) error
+}
+
+// uploadSnapshot uploads snapshot files to GCS.
+func (r *snapshotResult) uploadSnapshot(ctx context.Context, persistence storage.StorageProvider, baseCompressCfg storage.CompressConfig, flags *featureflags.Client) error {
+	cfg := storage.ResolveCompressConfig(ctx, baseCompressCfg, flags, storage.FileTypeMemfile, storage.UseCasePause)
+	uploader := sandbox.NewBuildUploader(r.snapshot, persistence, r.templateFiles, cfg, nil)
+
+	if err := uploader.UploadData(ctx); err != nil {
+		return err
+	}
+
+	return uploader.FinalizeHeaders(ctx)
 }
 
 // snapshotAndCacheSandbox creates a snapshot of a sandbox and adds it to the local
 // template cache. The caller is responsible for starting the GCS upload via
-// startSnapshotUploadAsync or uploadSnapshotWithPrefetchAsync.
+// uploadSnapshotAsync.
 func (s *Server) snapshotAndCacheSandbox(
 	ctx context.Context,
 	sbx *sandbox.Sandbox,
@@ -746,14 +763,22 @@ func (s *Server) snapshotAndCacheSandbox(
 			logger.L().Warn(ctx, "failed to register peer address for routing", zap.String("build_id", meta.Template.BuildID), zap.Error(err))
 		}
 
-		completeUpload := func(ctx context.Context) {
-			// Signal in-flight peer streams to switch to GCS.
-			s.uploadedBuilds.Set(meta.Template.BuildID, struct{}{}, ttlcache.DefaultTTL)
+		completeUpload := func(ctx context.Context) error {
+			// Signal in-flight peer streams to switch to GCS, including
+			// serialized V4 headers so peers can transition to compressed reads.
+			hdrs, err := serializeUploadedHeaders(snapshot)
+			if err != nil {
+				return fmt.Errorf("serialize uploaded headers for build %s: %w", meta.Template.BuildID, err)
+			}
+
+			s.uploadedBuilds.Set(meta.Template.BuildID, hdrs, ttlcache.DefaultTTL)
 
 			// Remove from Redis so new nodes go directly to GCS.
 			if err := s.peerRegistry.Unregister(ctx, meta.Template.BuildID); err != nil {
 				logger.L().Warn(ctx, "failed to unregister peer address from routing", zap.String("build_id", meta.Template.BuildID), zap.Error(err))
 			}
+
+			return nil
 		}
 
 		return &snapshotResult{
@@ -768,7 +793,36 @@ func (s *Server) snapshotAndCacheSandbox(
 		meta:           meta,
 		snapshot:       snapshot,
 		templateFiles:  templateFiles,
-		completeUpload: func(context.Context) {},
+		completeUpload: func(context.Context) error { return nil },
+	}, nil
+}
+
+// serializeUploadedHeaders extracts and serializes V4 headers from a snapshot
+// for the peer transition protocol.
+func serializeUploadedHeaders(snapshot *sandbox.Snapshot) (*uploadedBuildHeaders, error) {
+	var memHdrBytes, rootHdrBytes []byte
+
+	if snapshot.MemfileDiffHeader != nil {
+		data, err := header.Serialize(snapshot.MemfileDiffHeader)
+		if err != nil {
+			return nil, fmt.Errorf("serialize memfile header: %w", err)
+		}
+
+		memHdrBytes = data
+	}
+
+	if snapshot.RootfsDiffHeader != nil {
+		data, err := header.Serialize(snapshot.RootfsDiffHeader)
+		if err != nil {
+			return nil, fmt.Errorf("serialize rootfs header: %w", err)
+		}
+
+		rootHdrBytes = data
+	}
+
+	return &uploadedBuildHeaders{
+		memfileHeader: memHdrBytes,
+		rootfsHeader:  rootHdrBytes,
 	}, nil
 }
 
@@ -780,10 +834,13 @@ func (s *Server) uploadSnapshotAsync(ctx context.Context, sbx *sandbox.Sandbox, 
 
 	go func() {
 		defer cancel()
-		defer res.completeUpload(ctx)
+		defer func() {
+			if err := res.completeUpload(ctx); err != nil {
+				sbxlogger.I(sbx).Error(ctx, "error completing upload", zap.Error(err))
+			}
+		}()
 
-		err := res.snapshot.Upload(ctx, s.persistence, res.templateFiles)
-		if err != nil {
+		if err := res.uploadSnapshot(ctx, s.persistence, s.config.CompressConfig, s.featureFlags); err != nil {
 			sbxlogger.I(sbx).Error(ctx, "error uploading snapshot files", zap.Error(err))
 
 			return
