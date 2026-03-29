@@ -192,15 +192,11 @@ func (b *File) swapHeader(transErr *storage.PeerTransitionedError) error {
 // BuildFiles map. Returns 0 if unknown (V3/legacy), which signals the read path
 // to fall back to a Size() call.
 func (b *File) buildFileSize(h *header.Header, buildID uuid.UUID) int64 {
-	if h.BuildFiles == nil {
-		return 0
-	}
-	info, ok := h.BuildFiles[buildID]
-	if !ok {
-		return 0
+	if info, ok := h.BuildFiles[buildID]; ok {
+		return info.Size
 	}
 
-	return info.Size
+	return 0
 }
 
 func (b *File) getBuild(ctx context.Context, buildID uuid.UUID, uncompressedSize int64) (Diff, error) {

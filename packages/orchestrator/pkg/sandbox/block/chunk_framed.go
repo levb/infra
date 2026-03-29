@@ -100,8 +100,7 @@ func precomputedGetFrameAttrs(compressed bool) precomputedAttrs {
 }
 
 type Chunker struct {
-	buildID     string
-	fileType    string // e.g. "memfile", "rootfs.ext4"
+	storagePath string // e.g. "buildID/memfile"
 	persistence storage.StorageProvider
 	size        int64 // uncompressed size
 
@@ -115,12 +114,10 @@ type Chunker struct {
 var _ FramedBlockReader = (*Chunker)(nil)
 
 // NewChunker creates a Chunker backed by a new mmap cache at cachePath.
-// The storage path is derived per-fetch from the FrameTable passed to
-// SliceBlock/ReadBlock, so the Chunker survives header swaps (P2P → GCS
-// transition) without holding a stale path.
+// storagePath is the base GCS path (e.g. "buildID/memfile"); for compressed
+// reads the compression suffix is appended per-fetch from the FrameTable.
 func NewChunker(
-	buildID string,
-	fileType string,
+	storagePath string,
 	persistence storage.StorageProvider,
 	size int64,
 	blockSize int64,
@@ -133,8 +130,7 @@ func NewChunker(
 	}
 
 	return &Chunker{
-		buildID:     buildID,
-		fileType:    fileType,
+		storagePath: storagePath,
 		persistence: persistence,
 		size:        size,
 		cache:       cache,
@@ -273,9 +269,7 @@ func (c *Chunker) runFetch(ctx context.Context, session *fetchSession, offsetU i
 		prevTotal = totalWritten
 	}
 
-	// Derive the storage path from the FrameTable at fetch time. This ensures
-	// the correct path is used even after a header swap (P2P → GCS transition).
-	path := fmt.Sprintf("%s/%s", c.buildID, c.fileType)
+	path := c.storagePath
 	if compressed {
 		path = storage.CompressedPath(path, ft.CompressionType())
 	}
