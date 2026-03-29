@@ -80,10 +80,10 @@ func (p *routingProvider) resolveProvider(ctx context.Context, buildID string) s
 	return newPeerStorageProvider(p.base, res.client, res.uploaded)
 }
 
-func (p *routingProvider) OpenBlob(ctx context.Context, path string) (storage.Blob, error) {
+func (p *routingProvider) OpenBlob(ctx context.Context, path string, objType storage.ObjectType) (storage.Blob, error) {
 	buildID, _ := storage.ParseStoragePath(path)
 
-	return p.resolveProvider(ctx, buildID).OpenBlob(ctx, path)
+	return p.resolveProvider(ctx, buildID).OpenBlob(ctx, path, objType)
 }
 
 func (p *routingProvider) OpenFramedFile(ctx context.Context, path string) (storage.FramedFile, error) {
@@ -128,7 +128,7 @@ func newPeerStorageProvider(
 	}
 }
 
-func (p *peerStorageProvider) OpenBlob(_ context.Context, path string) (storage.Blob, error) {
+func (p *peerStorageProvider) OpenBlob(_ context.Context, path string, objType storage.ObjectType) (storage.Blob, error) {
 	buildID, fileName := storage.ParseStoragePath(path)
 
 	return &peerBlob{peerHandle: peerHandle[storage.Blob]{
@@ -137,7 +137,7 @@ func (p *peerStorageProvider) OpenBlob(_ context.Context, path string) (storage.
 		fileName: fileName,
 		uploaded: p.uploaded,
 		openFn: func(ctx context.Context) (storage.Blob, error) {
-			return p.base.OpenBlob(ctx, path)
+			return p.base.OpenBlob(ctx, path, objType)
 		},
 	}}, nil
 }

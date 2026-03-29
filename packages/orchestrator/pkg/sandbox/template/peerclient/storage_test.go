@@ -12,6 +12,7 @@ import (
 
 	"github.com/e2b-dev/infra/packages/shared/pkg/grpc/orchestrator"
 	orchestratormocks "github.com/e2b-dev/infra/packages/shared/pkg/grpc/orchestrator/mocks"
+	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	providermocks "github.com/e2b-dev/infra/packages/shared/pkg/storage/mocks/provider"
 )
 
@@ -30,7 +31,7 @@ func TestPeerStorageProvider_OpenBlob_ExtractsFileName(t *testing.T) {
 	base := providermocks.NewMockStorageProvider(t)
 
 	p := newPeerStorageProvider(base, client, &atomic.Pointer[UploadedHeaders]{})
-	blob, err := p.OpenBlob(t.Context(), "build-1/snapfile")
+	blob, err := p.OpenBlob(t.Context(), "build-1/snapfile", storage.SnapfileObjectType)
 	require.NoError(t, err)
 
 	var buf bytes.Buffer

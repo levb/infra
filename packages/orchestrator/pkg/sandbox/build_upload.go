@@ -85,7 +85,7 @@ func (b *buildUploader) uploadUncompressedFile(ctx context.Context, localPath, f
 
 // Snap-file is small enough so we don't use composite upload.
 func (b *buildUploader) uploadSnapfile(ctx context.Context, path string) error {
-	object, err := b.persistence.OpenBlob(ctx, b.files.StorageSnapfilePath())
+	object, err := b.persistence.OpenBlob(ctx, b.files.StorageSnapfilePath(), storage.SnapfileObjectType)
 	if err != nil {
 		return err
 	}
@@ -99,7 +99,7 @@ func (b *buildUploader) uploadSnapfile(ctx context.Context, path string) error {
 
 // Metadata is small enough so we don't use composite upload.
 func (b *buildUploader) uploadMetadata(ctx context.Context, path string) error {
-	object, err := b.persistence.OpenBlob(ctx, b.files.StorageMetadataPath())
+	object, err := b.persistence.OpenBlob(ctx, b.files.StorageMetadataPath(), storage.MetadataObjectType)
 	if err != nil {
 		return err
 	}

@@ -321,7 +321,7 @@ func SerializeHeader(h *Header) ([]byte, error) {
 // LoadHeader fetches a serialized header from storage and deserializes it.
 // Errors (including storage.ErrObjectNotExist) are returned as-is.
 func LoadHeader(ctx context.Context, s storage.StorageProvider, path string) (*Header, error) {
-	blob, err := s.OpenBlob(ctx, path) // TODO: restore storage.MetadataObjectType param
+	blob, err := s.OpenBlob(ctx, path, storage.MetadataObjectType)
 	if err != nil {
 		return nil, fmt.Errorf("open blob %s: %w", path, err)
 	}
@@ -342,7 +342,7 @@ func StoreHeader(ctx context.Context, s storage.StorageProvider, path string, h 
 		return fmt.Errorf("serialize header: %w", err)
 	}
 
-	blob, err := s.OpenBlob(ctx, path) // TODO: restore storage.MetadataObjectType param
+	blob, err := s.OpenBlob(ctx, path, storage.MetadataObjectType)
 	if err != nil {
 		return fmt.Errorf("open blob %s: %w", path, err)
 	}

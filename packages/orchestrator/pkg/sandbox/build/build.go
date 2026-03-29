@@ -25,7 +25,7 @@ type File struct {
 }
 
 func NewFile(
-	h *header.Header,
+	header *header.Header,
 	store *DiffStore,
 	fileType DiffType,
 	persistence storage.StorageProvider,
@@ -37,7 +37,7 @@ func NewFile(
 		persistence: persistence,
 		metrics:     metrics,
 	}
-	f.header.Store(h)
+	f.header.Store(header)
 
 	return f
 }

@@ -62,7 +62,7 @@ func TestPeerBlob_WriteTo_PeerNotAvailable_FallsBackToBase(t *testing.T) {
 		return int64(n), err
 	})
 	base := providermocks.NewMockStorageProvider(t)
-	base.EXPECT().OpenBlob(mock.Anything, "build-1/snapfile").Return(baseBlob, nil)
+	base.EXPECT().OpenBlob(mock.Anything, "build-1/snapfile", mock.Anything).Return(baseBlob, nil)
 
 	blob := &peerBlob{peerHandle: peerHandle[storage.Blob]{
 		client:   client,
@@ -70,7 +70,7 @@ func TestPeerBlob_WriteTo_PeerNotAvailable_FallsBackToBase(t *testing.T) {
 		fileName: "snapfile",
 		uploaded: &atomic.Pointer[UploadedHeaders]{},
 		openFn: func(ctx context.Context) (storage.Blob, error) {
-			return base.OpenBlob(ctx, "build-1/snapfile")
+			return base.OpenBlob(ctx, "build-1/snapfile", storage.SnapfileObjectType)
 		},
 	}}
 
@@ -94,7 +94,7 @@ func TestPeerBlob_WriteTo_PeerError_FallsBackToBase(t *testing.T) {
 		return int64(n), err
 	})
 	base := providermocks.NewMockStorageProvider(t)
-	base.EXPECT().OpenBlob(mock.Anything, "build-1/snapfile").Return(baseBlob, nil)
+	base.EXPECT().OpenBlob(mock.Anything, "build-1/snapfile", mock.Anything).Return(baseBlob, nil)
 
 	blob := &peerBlob{peerHandle: peerHandle[storage.Blob]{
 		client:   client,
@@ -102,7 +102,7 @@ func TestPeerBlob_WriteTo_PeerError_FallsBackToBase(t *testing.T) {
 		fileName: "snapfile",
 		uploaded: &atomic.Pointer[UploadedHeaders]{},
 		openFn: func(ctx context.Context) (storage.Blob, error) {
-			return base.OpenBlob(ctx, "build-1/snapfile")
+			return base.OpenBlob(ctx, "build-1/snapfile", storage.SnapfileObjectType)
 		},
 	}}
 
@@ -139,7 +139,7 @@ func TestPeerBlob_WriteTo_UploadedSetMidStream_CompletesFromPeerThenFallsBack(t 
 		return int64(n), err
 	})
 	base := providermocks.NewMockStorageProvider(t)
-	base.EXPECT().OpenBlob(mock.Anything, "build-1/snapfile").Return(baseBlob, nil)
+	base.EXPECT().OpenBlob(mock.Anything, "build-1/snapfile", mock.Anything).Return(baseBlob, nil)
 
 	blob := &peerBlob{peerHandle: peerHandle[storage.Blob]{
 		client:   client,
@@ -147,7 +147,7 @@ func TestPeerBlob_WriteTo_UploadedSetMidStream_CompletesFromPeerThenFallsBack(t 
 		fileName: "snapfile",
 		uploaded: uploaded,
 		openFn: func(ctx context.Context) (storage.Blob, error) {
-			return base.OpenBlob(ctx, "build-1/snapfile")
+			return base.OpenBlob(ctx, "build-1/snapfile", storage.SnapfileObjectType)
 		},
 	}}
 
@@ -190,7 +190,7 @@ func TestPeerBlob_Exists_PeerNotAvailable_FallsBackToBase(t *testing.T) {
 	baseBlob := storagemocks.NewMockBlob(t)
 	baseBlob.EXPECT().Exists(mock.Anything).Return(true, nil)
 	base := providermocks.NewMockStorageProvider(t)
-	base.EXPECT().OpenBlob(mock.Anything, "build-1/snapfile").Return(baseBlob, nil)
+	base.EXPECT().OpenBlob(mock.Anything, "build-1/snapfile", mock.Anything).Return(baseBlob, nil)
 
 	blob := &peerBlob{peerHandle: peerHandle[storage.Blob]{
 		client:   client,
@@ -198,7 +198,7 @@ func TestPeerBlob_Exists_PeerNotAvailable_FallsBackToBase(t *testing.T) {
 		fileName: "snapfile",
 		uploaded: &atomic.Pointer[UploadedHeaders]{},
 		openFn: func(ctx context.Context) (storage.Blob, error) {
-			return base.OpenBlob(ctx, "build-1/snapfile")
+			return base.OpenBlob(ctx, "build-1/snapfile", storage.SnapfileObjectType)
 		},
 	}}
 
@@ -216,7 +216,7 @@ func TestPeerBlob_Exists_UseStorage_FallsBackToBase(t *testing.T) {
 	baseBlob := storagemocks.NewMockBlob(t)
 	baseBlob.EXPECT().Exists(mock.Anything).Return(true, nil)
 	base := providermocks.NewMockStorageProvider(t)
-	base.EXPECT().OpenBlob(mock.Anything, "build-1/snapfile").Return(baseBlob, nil)
+	base.EXPECT().OpenBlob(mock.Anything, "build-1/snapfile", mock.Anything).Return(baseBlob, nil)
 
 	uploaded := &atomic.Pointer[UploadedHeaders]{}
 	blob := &peerBlob{peerHandle: peerHandle[storage.Blob]{
@@ -225,7 +225,7 @@ func TestPeerBlob_Exists_UseStorage_FallsBackToBase(t *testing.T) {
 		fileName: "snapfile",
 		uploaded: uploaded,
 		openFn: func(ctx context.Context) (storage.Blob, error) {
-			return base.OpenBlob(ctx, "build-1/snapfile")
+			return base.OpenBlob(ctx, "build-1/snapfile", storage.SnapfileObjectType)
 		},
 	}}
 

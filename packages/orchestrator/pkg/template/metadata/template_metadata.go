@@ -204,7 +204,7 @@ func fromTemplate(ctx context.Context, s storage.StorageProvider, files storage.
 	ctx, span := tracer.Start(ctx, "from template")
 	defer span.End()
 
-	data, err := storage.LoadBlob(ctx, s, files.StorageMetadataPath())
+	data, err := storage.LoadBlob(ctx, s, files.StorageMetadataPath(), storage.MetadataObjectType)
 	if err != nil {
 		return Template{}, fmt.Errorf("error reading template metadata: %w", err)
 	}

@@ -86,7 +86,7 @@ func (s *fsStorage) OpenFramedFile(_ context.Context, path string) (FramedFile, 
 	}, nil
 }
 
-func (s *fsStorage) OpenBlob(_ context.Context, path string) (Blob, error) {
+func (s *fsStorage) OpenBlob(_ context.Context, path string, _ ObjectType) (Blob, error) {
 	dir := filepath.Dir(s.getPath(path))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
