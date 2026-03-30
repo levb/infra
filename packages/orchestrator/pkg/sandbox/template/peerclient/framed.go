@@ -56,17 +56,17 @@ func (f *peerFramedFile) GetFrame(ctx context.Context, offsetU int64, frameTable
 				BuildId:  f.buildID,
 				FileName: f.fileName,
 				Offset:   offsetU,
-				Length:   readSize,
+				Length:   int64(len(buf)),
 			}, f.uploaded)
 			if err != nil {
-				logger.L().Warn(ctx, "failed to read build file from peer", logger.WithBuildID(f.buildID), zap.Int64("off", offsetU), zap.Int64("read_size", readSize), zap.Error(err))
+				logger.L().Warn(ctx, "failed to read build file from peer", logger.WithBuildID(f.buildID), zap.Int64("off", offsetU), zap.Int("buf_len", len(buf)), zap.Error(err))
 
 				return peerAttempt[storage.Range]{}, nil
 			}
 
 			n := 0
 
-			for n < int(readSize) && n < len(buf) {
+			for n < len(buf) {
 				data, recvErr := recv()
 				if errors.Is(recvErr, io.EOF) {
 					break
@@ -88,7 +88,7 @@ func (f *peerFramedFile) GetFrame(ctx context.Context, offsetU int64, frameTable
 				onRead(int64(n))
 			}
 
-			if n < int(readSize) {
+			if n < len(buf) {
 				return peerAttempt[storage.Range]{value: storage.Range{Start: offsetU, Length: n}, bytes: int64(n), hit: true},
 					io.ErrUnexpectedEOF
 			}

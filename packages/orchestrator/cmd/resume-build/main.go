@@ -641,7 +641,7 @@ func (r *runner) pauseOnce(ctx context.Context, opts pauseOptions, verbose bool)
 		if err := uploader.UploadData(ctx); err != nil {
 			return timings, fmt.Errorf("failed to upload snapshot: %w", err)
 		}
-		if err := uploader.FinalizeHeaders(ctx); err != nil {
+		if _, _, err := uploader.FinalizeHeaders(ctx); err != nil {
 			return timings, fmt.Errorf("failed to finalize headers: %w", err)
 		}
 		if opts.isRemoteStorage {

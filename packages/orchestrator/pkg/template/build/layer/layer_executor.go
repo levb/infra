@@ -310,7 +310,7 @@ func (lb *LayerExecutor) PauseAndUpload(
 			return fmt.Errorf("error waiting for previous uploads: %w", err)
 		}
 
-		if err := uploader.FinalizeHeaders(ctx); err != nil {
+		if _, _, err := uploader.FinalizeHeaders(ctx); err != nil {
 			return fmt.Errorf("error finalizing headers: %w", err)
 		}
 

@@ -336,18 +336,18 @@ func LoadHeader(ctx context.Context, s storage.StorageProvider, path string) (*H
 
 // StoreHeader serializes a header and uploads it to storage.
 // Inverse of LoadHeader.
-func StoreHeader(ctx context.Context, s storage.StorageProvider, path string, h *Header) error {
+func StoreHeader(ctx context.Context, s storage.StorageProvider, path string, h *Header) ([]byte, error) {
 	data, err := SerializeHeader(h)
 	if err != nil {
-		return fmt.Errorf("serialize header: %w", err)
+		return nil, fmt.Errorf("serialize header: %w", err)
 	}
 
 	blob, err := s.OpenBlob(ctx, path, storage.MetadataObjectType)
 	if err != nil {
-		return fmt.Errorf("open blob %s: %w", path, err)
+		return nil, fmt.Errorf("open blob %s: %w", path, err)
 	}
 
-	return blob.Put(ctx, data)
+	return data, blob.Put(ctx, data)
 }
 
 // Deserialize reads a header from a storage Blob (legacy API).
