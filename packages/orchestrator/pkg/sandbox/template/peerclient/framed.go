@@ -88,6 +88,11 @@ func (f *peerFramedFile) GetFrame(ctx context.Context, offsetU int64, frameTable
 				onRead(int64(n))
 			}
 
+			if n < int(readSize) {
+				return peerAttempt[storage.Range]{value: storage.Range{Start: offsetU, Length: n}, bytes: int64(n), hit: true},
+					io.ErrUnexpectedEOF
+			}
+
 			return peerAttempt[storage.Range]{
 				value: storage.Range{Start: offsetU, Length: n},
 				bytes: int64(n),
@@ -95,9 +100,7 @@ func (f *peerFramedFile) GetFrame(ctx context.Context, offsetU int64, frameTable
 			}, nil
 		},
 		func(ctx context.Context, base storage.FramedFile) (storage.Range, error) {
-			// If the upload completed and V4 headers are available, signal the
-			// caller to swap its header and retry. When headers are empty
-			// (uncompressed builds), fall through to base — no swap needed.
+			// Signal the caller to swap to V4 headers if compressed headers are available.
 			if f.uploaded != nil {
 				if hdrs := f.uploaded.Load(); hdrs != nil && (len(hdrs.MemfileHeader) > 0 || len(hdrs.RootfsHeader) > 0) {
 					return storage.Range{}, &storage.PeerTransitionedError{

@@ -259,6 +259,8 @@ func runBuild(
 
 	uploadTracker := layer.NewUploadTracker()
 
+	compressCfg := storage.ResolveCompressConfig(ctx, builder.config.CompressConfig, builder.featureFlags, storage.FileTypeMemfile, storage.UseCaseBuild)
+
 	layerExecutor := layer.NewLayerExecutor(
 		bc,
 		builder.logger,
@@ -269,8 +271,7 @@ func runBuild(
 		builder.buildStorage,
 		index,
 		uploadTracker,
-		builder.featureFlags,
-		builder.config.CompressConfig,
+		compressCfg,
 	)
 
 	baseBuilder := base.New(

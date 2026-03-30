@@ -64,7 +64,7 @@ func (h *HashIndex) LayerMetaFromHash(ctx context.Context, hash string) (LayerMe
 
 	data, err := storage.LoadBlob(ctx, h.indexStorage, paths.HashToPath(h.cacheScope, hash), storage.LayerMetadataObjectType)
 	if err != nil {
-		return LayerMetadata{}, fmt.Errorf("error reading layer metadata: %w", err)
+		return LayerMetadata{}, fmt.Errorf("error reading layer metadata from object: %w", err)
 	}
 
 	var layerMetadata LayerMetadata

@@ -82,7 +82,7 @@ func (p *fakeProvider) OpenFramedFile(_ context.Context, _ string) (storage.Fram
 
 func newTestChunker(t *testing.T, file storage.FramedFile, size int64) *Chunker {
 	t.Helper()
-	c, err := NewChunker("test-build", "memfile", &fakeProvider{file: file}, size, testBlockSize, t.TempDir()+"/cache", newTestMetrics(t))
+	c, err := NewChunker("test-build/memfile", &fakeProvider{file: file}, size, testBlockSize, t.TempDir()+"/cache", newTestMetrics(t))
 	require.NoError(t, err)
 
 	return c

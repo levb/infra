@@ -107,13 +107,12 @@ func (p *routingProvider) GetDetails() string {
 var _ storage.StorageProvider = (*peerStorageProvider)(nil)
 
 // peerStorageProvider tries the peer first for reads. Writes are always delegated to base.
-// uploaded doubles as the "uploaded" flag: when non-nil, the build is in GCS
-// and all reads skip the peer. The UploadedHeaders value contains serialized V4
-// headers for compressed builds (empty for uncompressed).
 type peerStorageProvider struct {
 	base       storage.StorageProvider
 	peerClient orchestrator.ChunkServiceClient
-	uploaded   *atomic.Pointer[UploadedHeaders]
+	// uploaded is set when the peer signals GCS upload is complete (use_storage=true).
+	// Once non-nil, all subsequent reads skip the peer and go to base.
+	uploaded *atomic.Pointer[UploadedHeaders]
 }
 
 func newPeerStorageProvider(
@@ -144,14 +143,11 @@ func (p *peerStorageProvider) OpenBlob(_ context.Context, path string, objType s
 
 func (p *peerStorageProvider) OpenFramedFile(_ context.Context, path string) (storage.FramedFile, error) {
 	buildID, fileName := storage.ParseStoragePath(path)
-	// Strip compression suffix for peer gRPC requests — the peer serves
-	// uncompressed data under the base file name.
-	peerFileName := storage.BaseFileName(fileName)
 
 	return &peerFramedFile{peerHandle: peerHandle[storage.FramedFile]{
 		client:   p.peerClient,
 		buildID:  buildID,
-		fileName: peerFileName,
+		fileName: fileName,
 		uploaded: p.uploaded,
 		openFn: func(ctx context.Context) (storage.FramedFile, error) {
 			return p.base.OpenFramedFile(ctx, path)
@@ -172,8 +168,6 @@ func (p *peerStorageProvider) GetDetails() string {
 }
 
 // checkPeerAvailability marks the build as uploaded when UseStorage is set.
-// A single atomic store on uploaded serves as both the "uploaded" flag
-// and the V4 header carrier — no ordering concern between separate atomics.
 func checkPeerAvailability(avail *orchestrator.PeerAvailability, uploaded *atomic.Pointer[UploadedHeaders]) bool {
 	if avail.GetNotAvailable() {
 		return false
