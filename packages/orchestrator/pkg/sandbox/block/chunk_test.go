@@ -3,9 +3,9 @@ package block
 import (
 	"bytes"
 	"context"
-	"math/rand/v2"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"testing"

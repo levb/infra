@@ -115,6 +115,17 @@ type FramedFile interface {
 	StoreFile(ctx context.Context, path string, cfg *CompressConfig) (*FrameTable, [32]byte, error)
 }
 
+// PeerTransitionedError is returned by the peer FramedFile when the GCS upload
+// has completed and serialized V4 headers are available.
+type PeerTransitionedError struct {
+	MemfileHeader []byte
+	RootfsHeader  []byte
+}
+
+func (e *PeerTransitionedError) Error() string {
+	return "peer upload completed, headers available"
+}
+
 // StorageConfig holds the configuration for creating a storage provider.
 // Both GetLocalBasePath and GetBucketName are evaluated lazily so that
 // callers who set environment variables at runtime (e.g. via os.Setenv
