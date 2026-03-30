@@ -124,30 +124,26 @@ func (o *fsObject) Put(_ context.Context, data []byte) error {
 	return err
 }
 
-func (o *fsObject) StoreFile(ctx context.Context, path string, cfg *CompressConfig) (_ *FrameTable, _ [32]byte, e error) {
+func (o *fsObject) StoreFile(ctx context.Context, path string, cfg *CompressConfig) (*FrameTable, [32]byte, error) {
 	if cfg.IsEnabled() {
 		return o.storeFileCompressed(ctx, path, cfg)
 	}
 
 	r, err := os.Open(path)
 	if err != nil {
-		e = fmt.Errorf("failed to open file %s: %w", path, err)
-
-		return
+		return nil, [32]byte{}, fmt.Errorf("failed to open file %s: %w", path, err)
 	}
 	defer r.Close()
 
 	handle, err := o.getHandle(false)
 	if err != nil {
-		e = err
-
-		return
+		return nil, [32]byte{}, err
 	}
 	defer handle.Close()
 
-	_, e = io.Copy(handle, r)
+	_, err = io.Copy(handle, r)
 
-	return
+	return nil, [32]byte{}, err
 }
 
 func (o *fsObject) storeFileCompressed(ctx context.Context, localPath string, cfg *CompressConfig) (*FrameTable, [32]byte, error) {
