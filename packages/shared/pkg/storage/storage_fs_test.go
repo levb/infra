@@ -26,7 +26,7 @@ func TestOpenObject_Write_Exists_WriteTo(t *testing.T) {
 	p := newTempProvider(t)
 	ctx := t.Context()
 
-	obj, err := p.OpenBlob(ctx, filepath.Join("sub", "file.txt"), UnknownObjectType)
+	obj, err := p.OpenBlob(ctx, filepath.Join("sub", "file.txt"), MetadataObjectType)
 	require.NoError(t, err)
 
 	contents := []byte("hello world")
@@ -70,7 +70,7 @@ func TestDelete(t *testing.T) {
 	p := newTempProvider(t)
 	ctx := t.Context()
 
-	obj, err := p.OpenBlob(ctx, "to/delete.txt", UnknownObjectType)
+	obj, err := p.OpenBlob(ctx, "to/delete.txt", 0)
 	require.NoError(t, err)
 
 	err = obj.Put(t.Context(), []byte("bye"))
