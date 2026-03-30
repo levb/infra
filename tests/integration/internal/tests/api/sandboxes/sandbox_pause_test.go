@@ -1,7 +1,6 @@
 package sandboxes
 
 import (
-	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -108,6 +107,8 @@ func TestSandboxPause(t *testing.T) {
 // pauses, resumes, and verifies SHA-256 hash integrity.
 // Exercises both memfile and rootfs paths under the active compression config.
 func TestLargeMemoryPauseResume(t *testing.T) {
+	t.Parallel()
+
 	c := setup.GetAPIClient()
 	ctx := t.Context()
 	envdClient := setup.GetEnvdClient(t, ctx)
@@ -158,5 +159,5 @@ for path, n in [('/tmp/large_data', 200), ('/dev/shm/mem_data', 100)]:
 	t.Logf("SHA-256 after resume: %s", hashAfter)
 
 	require.Equal(t, hashBefore, hashAfter,
-		fmt.Sprintf("Data integrity failed: before=%s, after=%s", hashBefore, hashAfter))
+		"Data integrity failed: before=%s, after=%s", hashBefore, hashAfter)
 }
