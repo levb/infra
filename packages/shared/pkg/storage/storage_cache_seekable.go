@@ -73,94 +73,45 @@ var (
 	_ StreamingReader = (*cachedSeekable)(nil)
 )
 
-// OpenRangeReader returns a reader for data at offsetU with NFS caching.
-//
-// Compressed path (frameTable != nil): NFS stores compressed frames (.frm).
-//   - Cache hit → open NFS file → decompress → return reader.
-//   - Cache miss → fetch raw compressed bytes via compressedRangeOpener →
-//     TeeReader captures compressed bytes → decompress → on Close, write to NFS.
-//
-// Uncompressed path (frameTable == nil): NFS stores raw chunks (.bin).
-//   - Cache hit → open NFS file → return reader.
-//   - Cache miss → inner.OpenRangeReader → cacheWriteThroughReader writes on Close.
-func (c *cachedSeekable) OpenRangeReader(ctx context.Context, offsetU int64, length int64, frameTable *FrameTable) (io.ReadCloser, error) {
+func (c *cachedSeekable) OpenRangeReader(ctx context.Context, off int64, length int64, frameTable *FrameTable) (io.ReadCloser, error) {
 	if frameTable.IsCompressed() {
-		return c.openReaderCompressed(ctx, offsetU, length, frameTable)
+		return c.openReaderCompressed(ctx, off, length, frameTable)
 	}
 
-	return c.openReaderUncompressed(ctx, offsetU, length)
-}
+	// Try NFS cache file first
+	chunkPath := c.makeChunkFilename(off)
 
-func (c *cachedSeekable) validateReadParams(length, offset int64) error {
-	if length == 0 {
-		return ErrBufferTooSmall
-	}
-	if length > c.chunkSize {
-		return ErrBufferTooLarge
-	}
-	if offset%c.chunkSize != 0 {
-		return ErrOffsetUnaligned
-	}
-	if (offset%c.chunkSize)+length > c.chunkSize {
-		return ErrMultipleChunks
-	}
-
-	return nil
-}
-
-func (c *cachedSeekable) openReaderUncompressed(ctx context.Context, offsetU int64, length int64) (_ io.ReadCloser, e error) {
-	if err := c.validateReadParams(length, offsetU); err != nil {
-		return nil, err
-	}
-
-	ctx, span := c.tracer.Start(ctx, "open_reader at offset", trace.WithAttributes(
-		attribute.Int64("offset", offsetU),
-		attribute.Int64("length", length),
-		attribute.Bool("compressed", false),
-	))
-	defer func() {
-		recordError(span, e)
-		span.End()
-	}()
-
-	chunkPath := c.makeChunkFilename(offsetU)
-	timer := cacheSlabReadTimerFactory.Begin(attribute.String(nfsCacheOperationAttr, nfsCacheOperationAttrOpenReader))
-
-	// Cache hit: read from NFS chunk file.
-	if f, readErr := os.Open(chunkPath); readErr == nil {
+	fp, err := os.Open(chunkPath)
+	if err == nil {
 		recordCacheRead(ctx, true, length, cacheTypeSeekable, cacheOpOpenRangeReader)
-		timer.Success(ctx, length)
 
-		return f, nil
-	} else if !os.IsNotExist(readErr) {
-		recordCacheReadError(ctx, cacheTypeSeekable, cacheOpOpenRangeReader, readErr)
+		return fp, nil
 	}
 
-	logger.L().Debug(ctx, "cache miss for uncompressed chunk, falling back to remote read",
-		zap.String("chunk_path", chunkPath),
-		zap.Int64("offset", offsetU))
+	if !os.IsNotExist(err) {
+		recordCacheReadError(ctx, cacheTypeSeekable, cacheOpOpenRangeReader, err)
+	}
 
-	// Cache miss: fetch from inner.
-	inner, err := c.inner.OpenRangeReader(ctx, offsetU, length, nil)
+	// Cache miss: delegate to the inner backend (Seekable embeds StreamingReader).
+	inner, err := c.inner.OpenRangeReader(ctx, off, length, nil)
 	if err != nil {
-		timer.Failure(ctx, 0)
-
-		return nil, fmt.Errorf("cache OpenRangeReader uncompressed: inner at %d: %w", offsetU, err)
+		return nil, fmt.Errorf("failed to open inner range reader: %w", err)
 	}
 
 	recordCacheRead(ctx, false, length, cacheTypeSeekable, cacheOpOpenRangeReader)
-	timer.Success(ctx, length)
 
+	// Skip write-through when the caller has opted out of cache writeback.
 	if skipCacheWriteback(ctx) {
 		return inner, nil
 	}
 
+	// Wrap in a write-through reader that caches data on Close
 	return &cacheWriteThroughReader{
 		inner:       inner,
 		buf:         bytes.NewBuffer(make([]byte, 0, length)),
 		cache:       c,
 		ctx:         ctx,
-		off:         offsetU,
+		off:         off,
 		expectedLen: length,
 		chunkPath:   chunkPath,
 	}, nil
@@ -168,7 +119,7 @@ func (c *cachedSeekable) openReaderUncompressed(ctx context.Context, offsetU int
 
 // cacheWriteThroughReader wraps an inner reader, buffering all data read through it.
 // On Close, it asynchronously writes the buffered data to the NFS cache only
-// if the total bytes read match the expected length.
+// if the total bytes read match the expected length (to avoid caching truncated data).
 type cacheWriteThroughReader struct {
 	inner       io.ReadCloser
 	buf         *bytes.Buffer
@@ -191,7 +142,11 @@ func (r *cacheWriteThroughReader) Read(p []byte) (int, error) {
 func (r *cacheWriteThroughReader) Close() error {
 	closeErr := r.inner.Close()
 
-	if closeErr == nil && isCompleteRead(r.buf.Len(), int(r.expectedLen)) {
+	// Only cache when the total bytes read match the expected length.
+	// Unlike ReadAt where io.EOF can justify a short read (last chunk),
+	// a streaming reader always ends with EOF regardless of whether the
+	// data was truncated, so the byte count is the only reliable check.
+	if closeErr == nil && r.buf.Len() > 0 && int64(r.buf.Len()) == r.expectedLen && !skipCacheWriteback(r.ctx) {
 		data := make([]byte, r.buf.Len())
 		copy(data, r.buf.Bytes())
 
@@ -205,7 +160,7 @@ func (r *cacheWriteThroughReader) Close() error {
 	return closeErr
 }
 
-func (c *cachedSeekable) Size(ctx context.Context) (size int64, e error) {
+func (c *cachedSeekable) Size(ctx context.Context) (n int64, e error) {
 	ctx, span := c.tracer.Start(ctx, "get size of object")
 	defer func() {
 		recordError(span, e)
@@ -214,29 +169,28 @@ func (c *cachedSeekable) Size(ctx context.Context) (size int64, e error) {
 
 	readTimer := cacheSlabReadTimerFactory.Begin(attribute.String(nfsCacheOperationAttr, nfsCacheOperationAttrSize))
 
-	u, err := c.readLocalSize(ctx)
+	size, err := c.readLocalSize(ctx)
 	if err == nil {
 		recordCacheRead(ctx, true, 0, cacheTypeSeekable, cacheOpSize)
 		readTimer.Success(ctx, 0)
 
-		return u, nil
+		return size, nil
 	}
 	readTimer.Failure(ctx, 0)
 
 	recordCacheReadError(ctx, cacheTypeSeekable, cacheOpSize, err)
 
-	u, err = c.inner.Size(ctx)
+	size, err = c.inner.Size(ctx)
 	if err != nil {
-		return u, err
+		return size, err
 	}
 
-	finalU := u
 	if !skipCacheWriteback(ctx) {
 		c.goCtx(ctx, func(ctx context.Context) {
 			ctx, span := c.tracer.Start(ctx, "write size of object to cache")
 			defer span.End()
 
-			if err := c.writeLocalSize(ctx, finalU); err != nil {
+			if err := c.writeLocalSize(ctx, size); err != nil {
 				recordError(span, err)
 				recordCacheWriteError(ctx, cacheTypeSeekable, cacheOpSize, err)
 			}
@@ -245,7 +199,7 @@ func (c *cachedSeekable) Size(ctx context.Context) (size int64, e error) {
 
 	recordCacheRead(ctx, false, 0, cacheTypeSeekable, cacheOpSize)
 
-	return u, nil
+	return size, nil
 }
 
 func (c *cachedSeekable) StoreFile(ctx context.Context, path string, cfg *CompressConfig) (_ *FrameTable, _ [32]byte, e error) {
@@ -296,10 +250,105 @@ func (c *cachedSeekable) makeChunkFilename(offset int64) string {
 	return fmt.Sprintf("%s/%012d-%d.bin", c.path, offset/c.chunkSize, c.chunkSize)
 }
 
-func (c *cachedSeekable) makeTempChunkFilename(offset int64) string {
-	tempFilename := uuid.NewString()
+func (c *cachedSeekable) sizeFilename() string {
+	return filepath.Join(c.path, "size.txt")
+}
 
-	return fmt.Sprintf("%s/.temp.%012d-%d.bin.%s", c.path, offset/c.chunkSize, c.chunkSize, tempFilename)
+func (c *cachedSeekable) readLocalSize(context.Context) (int64, error) {
+	filename := c.sizeFilename()
+	content, readErr := os.ReadFile(filename)
+	if readErr != nil {
+		return 0, fmt.Errorf("failed to read cached size: %w", readErr)
+	}
+
+	parts := strings.Fields(string(content))
+	if len(parts) == 0 {
+		return 0, fmt.Errorf("empty cached size file")
+	}
+
+	u, parseErr := strconv.ParseInt(parts[0], 10, 64)
+	if parseErr != nil {
+		return 0, fmt.Errorf("failed to parse cached uncompressed size: %w", parseErr)
+	}
+
+	return u, nil
+}
+
+// writeToCache writes data to the NFS cache using lock + atomic rename.
+func (c *cachedSeekable) writeToCache(ctx context.Context, offset int64, finalPath string, data []byte) error {
+	writeTimer := cacheSlabWriteTimerFactory.Begin()
+
+	lockFile, err := lock.TryAcquireLock(ctx, finalPath)
+	if err != nil {
+		recordCacheWriteError(ctx, cacheTypeSeekable, cacheOpOpenRangeReader, err)
+
+		writeTimer.Failure(ctx, 0)
+
+		return nil
+	}
+
+	defer func() {
+		err := lock.ReleaseLock(ctx, lockFile)
+		if err != nil {
+			logger.L().Warn(ctx, "failed to release lock after writing to cache",
+				zap.Int64("offset", offset),
+				zap.String("path", finalPath),
+				zap.Error(err))
+		}
+	}()
+
+	tempPath := finalPath + ".tmp." + uuid.NewString()
+
+	if err := os.WriteFile(tempPath, data, cacheFilePermissions); err != nil {
+		go safelyRemoveFile(ctx, tempPath)
+
+		writeTimer.Failure(ctx, int64(len(data)))
+
+		return fmt.Errorf("failed to write temp cache file: %w", err)
+	}
+
+	if err := utils.RenameOrDeleteFile(ctx, tempPath, finalPath); err != nil {
+		writeTimer.Failure(ctx, int64(len(data)))
+
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	writeTimer.Success(ctx, int64(len(data)))
+
+	return nil
+}
+
+func (c *cachedSeekable) writeLocalSize(ctx context.Context, size int64) error {
+	finalFilename := c.sizeFilename()
+
+	lockFile, err := lock.TryAcquireLock(ctx, finalFilename)
+	if err != nil {
+		return fmt.Errorf("failed to acquire lock for local size: %w", err)
+	}
+
+	defer func() {
+		err := lock.ReleaseLock(ctx, lockFile)
+		if err != nil {
+			logger.L().Warn(ctx, "failed to release lock after writing chunk to cache",
+				zap.Int64("size", size),
+				zap.String("path", finalFilename),
+				zap.Error(err))
+		}
+	}()
+
+	tempFilename := filepath.Join(c.path, fmt.Sprintf(".size.bin.%s", uuid.NewString()))
+
+	if err := os.WriteFile(tempFilename, fmt.Appendf(nil, "%d", size), cacheFilePermissions); err != nil {
+		go safelyRemoveFile(ctx, tempFilename)
+
+		return fmt.Errorf("failed to write temp local size file: %w", err)
+	}
+
+	if err := utils.RenameOrDeleteFile(ctx, tempFilename, finalFilename); err != nil {
+		return fmt.Errorf("failed to rename local size temp file: %w", err)
+	}
+
+	return nil
 }
 
 func (c *cachedSeekable) createCacheBlocksFromFile(ctx context.Context, inputPath string) (count int64, err error) {
@@ -380,107 +429,6 @@ func (c *cachedSeekable) writeChunkFromFile(ctx context.Context, offset int64, i
 	}
 
 	writeTimer.Success(ctx, count)
-
-	return nil
-}
-
-// writeToCache writes data to the NFS cache using lock + atomic rename.
-func (c *cachedSeekable) writeToCache(ctx context.Context, offset int64, finalPath string, data []byte) error {
-	writeTimer := cacheSlabWriteTimerFactory.Begin()
-
-	lockFile, err := lock.TryAcquireLock(ctx, finalPath)
-	if err != nil {
-		recordCacheWriteError(ctx, cacheTypeSeekable, cacheOpOpenRangeReader, err)
-
-		writeTimer.Failure(ctx, 0)
-
-		return nil
-	}
-
-	defer func() {
-		err := lock.ReleaseLock(ctx, lockFile)
-		if err != nil {
-			logger.L().Warn(ctx, "failed to release lock after writing to cache",
-				zap.Int64("offset", offset),
-				zap.String("path", finalPath),
-				zap.Error(err))
-		}
-	}()
-
-	tempPath := finalPath + ".tmp." + uuid.NewString()
-
-	if err := os.WriteFile(tempPath, data, cacheFilePermissions); err != nil {
-		go safelyRemoveFile(ctx, tempPath)
-
-		writeTimer.Failure(ctx, int64(len(data)))
-
-		return fmt.Errorf("failed to write temp cache file: %w", err)
-	}
-
-	if err := utils.RenameOrDeleteFile(ctx, tempPath, finalPath); err != nil {
-		writeTimer.Failure(ctx, int64(len(data)))
-
-		return fmt.Errorf("failed to rename temp file: %w", err)
-	}
-
-	writeTimer.Success(ctx, int64(len(data)))
-
-	return nil
-}
-
-func (c *cachedSeekable) sizeFilename() string {
-	return filepath.Join(c.path, "size.txt")
-}
-
-func (c *cachedSeekable) readLocalSize(context.Context) (int64, error) {
-	filename := c.sizeFilename()
-	content, readErr := os.ReadFile(filename)
-	if readErr != nil {
-		return 0, fmt.Errorf("failed to read cached size: %w", readErr)
-	}
-
-	parts := strings.Fields(string(content))
-	if len(parts) == 0 {
-		return 0, fmt.Errorf("empty cached size file")
-	}
-
-	u, parseErr := strconv.ParseInt(parts[0], 10, 64)
-	if parseErr != nil {
-		return 0, fmt.Errorf("failed to parse cached uncompressed size: %w", parseErr)
-	}
-
-	return u, nil
-}
-
-func (c *cachedSeekable) writeLocalSize(ctx context.Context, size int64) error {
-	finalFilename := c.sizeFilename()
-
-	lockFile, err := lock.TryAcquireLock(ctx, finalFilename)
-	if err != nil {
-		return fmt.Errorf("failed to acquire lock for local size: %w", err)
-	}
-
-	defer func() {
-		err := lock.ReleaseLock(ctx, lockFile)
-		if err != nil {
-			logger.L().Warn(ctx, "failed to release lock after writing chunk to cache",
-				zap.Int64("size", size),
-				zap.String("path", finalFilename),
-				zap.Error(err))
-		}
-	}()
-
-	tempFilename := filepath.Join(c.path, fmt.Sprintf(".size.bin.%s", uuid.NewString()))
-
-	if err := os.WriteFile(tempFilename, fmt.Appendf(nil, "%d", size), cacheFilePermissions); err != nil {
-		go safelyRemoveFile(ctx, tempFilename)
-
-		return fmt.Errorf("failed to write temp local size file: %w", err)
-	}
-
-	if err := utils.RenameOrDeleteFile(ctx, tempFilename, finalFilename); err != nil {
-		return fmt.Errorf("failed to rename local size temp file: %w", err)
-	}
 
 	return nil
 }
