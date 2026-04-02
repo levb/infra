@@ -3,8 +3,6 @@ package sandbox
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"sync"
 
 	"github.com/google/uuid"
@@ -106,26 +104,6 @@ func (b *buildUploader) uploadMetadata(ctx context.Context, path string) error {
 
 	if err := uploadFileAsBlob(ctx, object, path); err != nil {
 		return fmt.Errorf("error when uploading metadata: %w", err)
-	}
-
-	return nil
-}
-
-func uploadFileAsBlob(ctx context.Context, b storage.Blob, path string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("failed to open file %s: %w", path, err)
-	}
-	defer f.Close()
-
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return fmt.Errorf("failed to read file %s: %w", path, err)
-	}
-
-	err = b.Put(ctx, data)
-	if err != nil {
-		return fmt.Errorf("failed to write data to object: %w", err)
 	}
 
 	return nil
