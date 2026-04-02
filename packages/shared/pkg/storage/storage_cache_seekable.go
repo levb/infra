@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -78,6 +77,10 @@ func (c *cachedSeekable) OpenRangeReader(ctx context.Context, off int64, length 
 		return c.openReaderCompressed(ctx, off, length, frameTable)
 	}
 
+	if err := c.validateReadParams(length, off); err != nil {
+		return nil, err
+	}
+
 	// Try NFS cache file first
 	chunkPath := c.makeChunkFilename(off)
 
@@ -85,7 +88,10 @@ func (c *cachedSeekable) OpenRangeReader(ctx context.Context, off int64, length 
 	if err == nil {
 		recordCacheRead(ctx, true, length, cacheTypeSeekable, cacheOpOpenRangeReader)
 
-		return fp, nil
+		return &fsRangeReadCloser{
+			Reader: io.NewSectionReader(fp, 0, length),
+			file:   fp,
+		}, nil
 	}
 
 	if !os.IsNotExist(err) {
@@ -146,7 +152,7 @@ func (r *cacheWriteThroughReader) Close() error {
 	// Unlike ReadAt where io.EOF can justify a short read (last chunk),
 	// a streaming reader always ends with EOF regardless of whether the
 	// data was truncated, so the byte count is the only reliable check.
-	if closeErr == nil && r.buf.Len() > 0 && int64(r.buf.Len()) == r.expectedLen && !skipCacheWriteback(r.ctx) {
+	if r.buf.Len() > 0 && int64(r.buf.Len()) == r.expectedLen {
 		data := make([]byte, r.buf.Len())
 		copy(data, r.buf.Bytes())
 
@@ -214,7 +220,7 @@ func (c *cachedSeekable) StoreFile(ctx context.Context, path string, cfg *Compre
 	// write the file to the disk and the remote system at the same time.
 	// this opens the file twice, but the API makes it difficult to use a MultiWriter
 
-	if cfg == nil && c.flags.BoolFlag(ctx, featureflags.EnableWriteThroughCacheFlag) {
+	if !cfg.IsEnabled() && c.flags.BoolFlag(ctx, featureflags.EnableWriteThroughCacheFlag) {
 		c.goCtx(ctx, func(ctx context.Context) {
 			ctx, span := c.tracer.Start(ctx, "write cache object from file system",
 				trace.WithAttributes(attribute.String("path", path)))
@@ -250,36 +256,53 @@ func (c *cachedSeekable) makeChunkFilename(offset int64) string {
 	return fmt.Sprintf("%s/%012d-%d.bin", c.path, offset/c.chunkSize, c.chunkSize)
 }
 
+func (c *cachedSeekable) makeTempFilename(path string) string {
+	return path + ".tmp." + uuid.NewString()
+}
+
 func (c *cachedSeekable) sizeFilename() string {
 	return filepath.Join(c.path, "size.txt")
 }
 
 func (c *cachedSeekable) readLocalSize(context.Context) (int64, error) {
 	filename := c.sizeFilename()
-	content, readErr := os.ReadFile(filename)
-	if readErr != nil {
-		return 0, fmt.Errorf("failed to read cached size: %w", readErr)
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read cached size: %w", err)
 	}
 
-	parts := strings.Fields(string(content))
-	if len(parts) == 0 {
-		return 0, fmt.Errorf("empty cached size file")
+	size, err := strconv.ParseInt(string(content), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse cached size: %w", err)
 	}
 
-	u, parseErr := strconv.ParseInt(parts[0], 10, 64)
-	if parseErr != nil {
-		return 0, fmt.Errorf("failed to parse cached uncompressed size: %w", parseErr)
-	}
-
-	return u, nil
+	return size, nil
 }
 
-// writeToCache writes data to the NFS cache using lock + atomic rename.
-func (c *cachedSeekable) writeToCache(ctx context.Context, offset int64, finalPath string, data []byte) error {
+func (c *cachedSeekable) validateReadParams(buffSize, offset int64) error {
+	if buffSize == 0 {
+		return ErrBufferTooSmall
+	}
+	if buffSize > c.chunkSize {
+		return ErrBufferTooLarge
+	}
+	if offset%c.chunkSize != 0 {
+		return ErrOffsetUnaligned
+	}
+	if (offset%c.chunkSize)+buffSize > c.chunkSize {
+		return ErrMultipleChunks
+	}
+
+	return nil
+}
+
+func (c *cachedSeekable) writeToCache(ctx context.Context, offset int64, finalPath string, bytes []byte) error {
 	writeTimer := cacheSlabWriteTimerFactory.Begin()
 
+	// Try to acquire lock for this chunk write to NFS cache
 	lockFile, err := lock.TryAcquireLock(ctx, finalPath)
 	if err != nil {
+		// failed to acquire lock, which is a different category of failure than "write failed"
 		recordCacheWriteError(ctx, cacheTypeSeekable, cacheOpOpenRangeReader, err)
 
 		writeTimer.Failure(ctx, 0)
@@ -287,6 +310,7 @@ func (c *cachedSeekable) writeToCache(ctx context.Context, offset int64, finalPa
 		return nil
 	}
 
+	// Release lock after write completes
 	defer func() {
 		err := lock.ReleaseLock(ctx, lockFile)
 		if err != nil {
@@ -297,23 +321,23 @@ func (c *cachedSeekable) writeToCache(ctx context.Context, offset int64, finalPa
 		}
 	}()
 
-	tempPath := finalPath + ".tmp." + uuid.NewString()
+	tempPath := c.makeTempFilename(finalPath)
 
-	if err := os.WriteFile(tempPath, data, cacheFilePermissions); err != nil {
+	if err := os.WriteFile(tempPath, bytes, cacheFilePermissions); err != nil {
 		go safelyRemoveFile(ctx, tempPath)
 
-		writeTimer.Failure(ctx, int64(len(data)))
+		writeTimer.Failure(ctx, int64(len(bytes)))
 
 		return fmt.Errorf("failed to write temp cache file: %w", err)
 	}
 
 	if err := utils.RenameOrDeleteFile(ctx, tempPath, finalPath); err != nil {
-		writeTimer.Failure(ctx, int64(len(data)))
+		writeTimer.Failure(ctx, int64(len(bytes)))
 
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
-	writeTimer.Success(ctx, int64(len(data)))
+	writeTimer.Success(ctx, int64(len(bytes)))
 
 	return nil
 }
@@ -321,11 +345,13 @@ func (c *cachedSeekable) writeToCache(ctx context.Context, offset int64, finalPa
 func (c *cachedSeekable) writeLocalSize(ctx context.Context, size int64) error {
 	finalFilename := c.sizeFilename()
 
+	// Try to acquire lock for this chunk write to NFS cache
 	lockFile, err := lock.TryAcquireLock(ctx, finalFilename)
 	if err != nil {
 		return fmt.Errorf("failed to acquire lock for local size: %w", err)
 	}
 
+	// Release lock after write completes
 	defer func() {
 		err := lock.ReleaseLock(ctx, lockFile)
 		if err != nil {
