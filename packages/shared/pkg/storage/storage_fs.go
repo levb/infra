@@ -29,8 +29,9 @@ type fsObject struct {
 }
 
 var (
-	_ Seekable = (*fsObject)(nil)
-	_ Blob     = (*fsObject)(nil)
+	_ Seekable        = (*fsObject)(nil)
+	_ Blob            = (*fsObject)(nil)
+	_ StreamingReader = (*fsObject)(nil)
 )
 
 type fsRangeReadCloser struct {

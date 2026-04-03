@@ -88,8 +88,9 @@ type gcpObject struct {
 }
 
 var (
-	_ Seekable = (*gcpObject)(nil)
-	_ Blob     = (*gcpObject)(nil)
+	_ Seekable        = (*gcpObject)(nil)
+	_ Blob            = (*gcpObject)(nil)
+	_ StreamingReader = (*gcpObject)(nil)
 )
 
 func NewGCP(ctx context.Context, bucketName string, limiter *limit.Limiter) (StorageProvider, error) {
@@ -393,23 +394,6 @@ func (o *gcpObject) WriteTo(ctx context.Context, dst io.Writer) (int64, error) {
 }
 
 func (o *gcpObject) StoreFile(ctx context.Context, path string, cfg *CompressConfig) (_ *FrameTable, _ [32]byte, e error) {
-	maxConcurrency := gcloudDefaultUploadConcurrency
-	if o.limiter != nil {
-		uploadLimiter := o.limiter.GCloudUploadLimiter()
-		if uploadLimiter != nil {
-			if err := uploadLimiter.Acquire(ctx, 1); err != nil {
-				return nil, [32]byte{}, fmt.Errorf("failed to acquire upload semaphore: %w", err)
-			}
-			defer uploadLimiter.Release(1)
-		}
-
-		maxConcurrency = o.limiter.GCloudMaxTasks(ctx)
-	}
-
-	if cfg.IsEnabled() {
-		return o.storeFileCompressed(ctx, path, cfg, maxConcurrency)
-	}
-
 	ctx, span := tracer.Start(ctx, "write to gcp from file system")
 	defer func() {
 		recordError(span, e)
@@ -457,6 +441,23 @@ func (o *gcpObject) StoreFile(ctx context.Context, path string, cfg *CompressCon
 	timer := googleWriteTimerFactory.Begin(
 		attribute.String(gcsOperationAttr, gcsOperationAttrWriteFromFileSystem),
 	)
+
+	maxConcurrency := gcloudDefaultUploadConcurrency
+	if o.limiter != nil {
+		uploadLimiter := o.limiter.GCloudUploadLimiter()
+		if uploadLimiter != nil {
+			if err := uploadLimiter.Acquire(ctx, 1); err != nil {
+				return nil, [32]byte{}, fmt.Errorf("failed to acquire upload semaphore: %w", err)
+			}
+			defer uploadLimiter.Release(1)
+		}
+
+		maxConcurrency = o.limiter.GCloudMaxTasks(ctx)
+	}
+
+	if cfg.IsEnabled() {
+		return o.storeFileCompressed(ctx, path, cfg, maxConcurrency)
+	}
 
 	uploader, err := NewMultipartUploaderWithRetryConfig(
 		ctx,

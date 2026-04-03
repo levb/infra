@@ -25,7 +25,7 @@ func testReadAt(ctx context.Context, c *cachedSeekable, buff []byte, off int64) 
 	n, err := io.ReadFull(rc, buff)
 
 	closeErr := rc.Close()
-	if err == io.ErrUnexpectedEOF {
+	if errors.Is(err, io.ErrUnexpectedEOF) {
 		err = io.EOF
 	}
 
