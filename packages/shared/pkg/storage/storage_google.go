@@ -446,8 +446,11 @@ func (o *gcpObject) StoreFile(ctx context.Context, path string, cfg *CompressCon
 	if o.limiter != nil {
 		uploadLimiter := o.limiter.GCloudUploadLimiter()
 		if uploadLimiter != nil {
-			if err := uploadLimiter.Acquire(ctx, 1); err != nil {
-				return nil, [32]byte{}, fmt.Errorf("failed to acquire upload semaphore: %w", err)
+			semaphoreErr := uploadLimiter.Acquire(ctx, 1)
+			if semaphoreErr != nil {
+				timer.Failure(ctx, 0)
+
+				return nil, [32]byte{}, fmt.Errorf("failed to acquire semaphore: %w", semaphoreErr)
 			}
 			defer uploadLimiter.Release(1)
 		}
