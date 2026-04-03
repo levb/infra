@@ -405,9 +405,7 @@ func (o *gcpObject) StoreFile(ctx context.Context, path string, cfg *CompressCon
 
 	fileInfo, err := os.Stat(path)
 	if err != nil {
-		e = fmt.Errorf("failed to get file size: %w", err)
-
-		return nil, [32]byte{}, e
+		return nil, [32]byte{}, fmt.Errorf("failed to get file size: %w", err)
 	}
 
 	// If the file is too small, the overhead of writing in parallel isn't worth the effort.
@@ -420,17 +418,15 @@ func (o *gcpObject) StoreFile(ctx context.Context, path string, cfg *CompressCon
 		data, err := os.ReadFile(path)
 		if err != nil {
 			timer.Failure(ctx, 0)
-			e = fmt.Errorf("failed to read file: %w", err)
 
-			return nil, [32]byte{}, e
+			return nil, [32]byte{}, fmt.Errorf("failed to read file: %w", err)
 		}
 
 		err = o.Put(ctx, data)
 		if err != nil {
 			timer.Failure(ctx, int64(len(data)))
-			e = fmt.Errorf("failed to write file (%d bytes): %w", len(data), err)
 
-			return nil, [32]byte{}, e
+			return nil, [32]byte{}, fmt.Errorf("failed to write file (%d bytes): %w", len(data), err)
 		}
 
 		timer.Success(ctx, int64(len(data)))
@@ -471,18 +467,16 @@ func (o *gcpObject) StoreFile(ctx context.Context, path string, cfg *CompressCon
 	)
 	if err != nil {
 		timer.Failure(ctx, 0)
-		e = fmt.Errorf("failed to create multipart uploader: %w", err)
 
-		return nil, [32]byte{}, e
+		return nil, [32]byte{}, fmt.Errorf("failed to create multipart uploader: %w", err)
 	}
 
 	start := time.Now()
 	count, err := uploader.UploadFileInParallel(ctx, path, maxConcurrency)
 	if err != nil {
 		timer.Failure(ctx, count)
-		e = fmt.Errorf("failed to upload file in parallel: %w", err)
 
-		return nil, [32]byte{}, e
+		return nil, [32]byte{}, fmt.Errorf("failed to upload file in parallel: %w", err)
 	}
 
 	logger.L().Debug(ctx, "Uploaded file in parallel",
@@ -574,7 +568,7 @@ func (o *gcpObject) OpenRangeReader(ctx context.Context, offsetU int64, length i
 		return nil, err
 	}
 
-	dec, err := NewDecompressingReader(raw, frameTable.CompressionType())
+	decompressed, err := newDecompressingReadCloser(raw, frameTable.CompressionType())
 	if err != nil {
 		raw.Close()
 		timer.Failure(ctx, 0)
@@ -582,7 +576,7 @@ func (o *gcpObject) OpenRangeReader(ctx context.Context, offsetU int64, length i
 		return nil, err
 	}
 
-	return &timedReadCloser{inner: compositeReadCloser{dec, raw}, timer: timer, ctx: ctx}, nil
+	return &timedReadCloser{inner: decompressed, timer: timer, ctx: ctx}, nil
 }
 
 func isResourceExhausted(err error) bool {

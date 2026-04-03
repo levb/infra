@@ -74,7 +74,7 @@ var (
 
 func (c *cachedSeekable) OpenRangeReader(ctx context.Context, off int64, length int64, frameTable *FrameTable) (io.ReadCloser, error) {
 	if frameTable.IsCompressed() {
-		return c.openReaderCompressed(ctx, off, length, frameTable)
+		return c.openReaderCompressed(ctx, off, frameTable)
 	}
 
 	if err := c.validateReadParams(length, off); err != nil {
@@ -152,7 +152,7 @@ func (r *cacheWriteThroughReader) Close() error {
 	// Unlike ReadAt where io.EOF can justify a short read (last chunk),
 	// a streaming reader always ends with EOF regardless of whether the
 	// data was truncated, so the byte count is the only reliable check.
-	if r.buf.Len() > 0 && int64(r.buf.Len()) == r.expectedLen {
+	if isCompleteRead(r.buf.Len(), int(r.expectedLen), nil) {
 		data := make([]byte, r.buf.Len())
 		copy(data, r.buf.Bytes())
 
