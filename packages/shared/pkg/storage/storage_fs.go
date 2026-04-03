@@ -169,14 +169,14 @@ func (o *fsObject) storeFileCompressed(ctx context.Context, localPath string, cf
 	return compressStream(ctx, file, cfg, uploader, 4)
 }
 
-func (o *fsObject) openRangeReader(_ context.Context, off int64, length int) (io.ReadCloser, error) {
+func (o *fsObject) openRangeReader(_ context.Context, off, length int64) (io.ReadCloser, error) {
 	f, err := o.getHandle(true)
 	if err != nil {
 		return nil, err
 	}
 
 	return &fsRangeReadCloser{
-		Reader: io.NewSectionReader(f, off, int64(length)),
+		Reader: io.NewSectionReader(f, off, length),
 		file:   f,
 	}, nil
 }
@@ -286,7 +286,7 @@ func (o *fsObject) OpenRangeReader(ctx context.Context, offsetU int64, length in
 			return nil, fmt.Errorf("get frame for offset %d, FS:%s: %w", offsetU, o.path, err)
 		}
 
-		raw, err := o.openRangeReader(ctx, frameStart.C, int(frameSize.C))
+		raw, err := o.openRangeReader(ctx, frameStart.C, int64(frameSize.C))
 		if err != nil {
 			return nil, err
 		}
@@ -301,5 +301,5 @@ func (o *fsObject) OpenRangeReader(ctx context.Context, offsetU int64, length in
 		return compositeReadCloser{dec, raw}, nil
 	}
 
-	return o.openRangeReader(ctx, offsetU, int(length))
+	return o.openRangeReader(ctx, offsetU, length)
 }

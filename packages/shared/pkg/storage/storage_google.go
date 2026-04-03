@@ -256,10 +256,10 @@ func (o *gcpObject) Size(ctx context.Context) (int64, error) {
 	return attrs.Size, nil
 }
 
-func (o *gcpObject) openRangeReader(ctx context.Context, off int64, length int) (io.ReadCloser, error) {
+func (o *gcpObject) openRangeReader(ctx context.Context, off, length int64) (io.ReadCloser, error) {
 	ctx, cancel := context.WithTimeout(ctx, googleReadTimeout)
 
-	reader, err := o.handle.NewRangeReader(ctx, off, int64(length))
+	reader, err := o.handle.NewRangeReader(ctx, off, length)
 	if err != nil {
 		cancel()
 
@@ -546,7 +546,7 @@ func (o *gcpObject) OpenRangeReader(ctx context.Context, offsetU int64, length i
 	timer := googleReadTimerFactory.Begin(attribute.String(gcsOperationAttr, gcsOperationAttrOpenReader))
 
 	if !frameTable.IsCompressed() {
-		rc, err := o.openRangeReader(ctx, offsetU, int(length))
+		rc, err := o.openRangeReader(ctx, offsetU, length)
 		if err != nil {
 			timer.Failure(ctx, 0)
 
@@ -563,7 +563,7 @@ func (o *gcpObject) OpenRangeReader(ctx context.Context, offsetU int64, length i
 		return nil, fmt.Errorf("get frame for offset %d, GCS:%s: %w", offsetU, o.path, err)
 	}
 
-	raw, err := o.openRangeReader(ctx, frameStart.C, int(frameSize.C))
+	raw, err := o.openRangeReader(ctx, frameStart.C, int64(frameSize.C))
 	if err != nil {
 		timer.Failure(ctx, 0)
 

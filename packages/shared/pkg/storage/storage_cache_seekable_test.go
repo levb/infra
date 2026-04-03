@@ -14,6 +14,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testReadAt emulates the removed cachedSeekable.ReadAt via OpenRangeReader.
+// This preserves the base test structure after ReadAt was removed from the Seekable interface.
+func testReadAt(ctx context.Context, c *cachedSeekable, buff []byte, off int64) (int, error) {
+	rc, err := c.OpenRangeReader(ctx, off, int64(len(buff)), nil)
+	if err != nil {
+		return 0, err
+	}
+
+	n, err := io.ReadFull(rc, buff)
+
+	closeErr := rc.Close()
+	if err == io.ErrUnexpectedEOF {
+		err = io.EOF
+	}
+
+	if err == nil {
+		err = closeErr
+	}
+
+	return n, err
+}
+
 func TestCachedFileObjectProvider_MakeChunkFilename(t *testing.T) {
 	t.Parallel()
 
@@ -94,14 +116,12 @@ func TestCachedFileObjectProvider_WriteFromFileSystem(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(len(data)), size)
 
-		// verify that the data has been cached via OpenRangeReader
-		rc, err := c.OpenRangeReader(t.Context(), 0, int64(len(data)), nil)
+		// verify that the size has been cached
+		buff := make([]byte, len(data))
+		bytesRead, err := testReadAt(t.Context(), &c, buff, 0)
 		require.NoError(t, err)
-
-		got, err := io.ReadAll(rc)
-		require.NoError(t, err)
-		require.NoError(t, rc.Close())
-		assert.Equal(t, data, got)
+		assert.Equal(t, data, buff)
+		assert.Equal(t, len(data), bytesRead)
 	})
 }
 
@@ -124,16 +144,36 @@ func TestCachedFileObjectProvider_WriteTo(t *testing.T) {
 		err = os.WriteFile(cacheFilename, []byte{1, 2, 3}, 0o600)
 		require.NoError(t, err)
 
-		rc, err := c.OpenRangeReader(t.Context(), 0, 3, nil)
+		buffer := make([]byte, 3)
+		read, err := testReadAt(t.Context(), &c, buffer, 0)
 		require.NoError(t, err)
-
-		got, err := io.ReadAll(rc)
-		require.NoError(t, err)
-		require.NoError(t, rc.Close())
-		assert.Equal(t, []byte{1, 2, 3}, got)
+		assert.Equal(t, []byte{1, 2, 3}, buffer)
+		assert.Equal(t, 3, read)
 	})
 
-	t.Run("consecutive reads should cache", func(t *testing.T) {
+	t.Run("short cache file returns EOF via ReadAt", func(t *testing.T) {
+		t.Parallel()
+
+		tempDir := t.TempDir()
+
+		c := cachedSeekable{path: tempDir, chunkSize: 10, tracer: noopTracer}
+
+		// Plant a 3-byte cache file (valid last chunk).
+		chunkPath := c.makeChunkFilename(0)
+		require.NoError(t, os.MkdirAll(filepath.Dir(chunkPath), 0o755))
+		require.NoError(t, os.WriteFile(chunkPath, []byte{1, 2, 3}, 0o600))
+
+		// ReadAt on a file shorter than the buffer returns (n, io.EOF)
+		// per the io.ReaderAt contract. This is a cache hit — the caller
+		// sees the data with EOF indicating end of file.
+		buffer := make([]byte, 10)
+		read, err := testReadAt(t.Context(), &c, buffer, 0)
+		require.ErrorIs(t, err, io.EOF)
+		assert.Equal(t, 3, read)
+		assert.Equal(t, []byte{1, 2, 3}, buffer[:read])
+	})
+
+	t.Run("consecutive ReadAt calls should cache", func(t *testing.T) {
 		t.Parallel()
 
 		fakeData := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
@@ -156,24 +196,22 @@ func TestCachedFileObjectProvider_WriteTo(t *testing.T) {
 		}
 
 		// first read goes to source
-		rc, err := c.OpenRangeReader(t.Context(), 3, 3, nil)
+		buffer := make([]byte, 3)
+		read, err := testReadAt(t.Context(), &c, buffer, 3)
 		require.NoError(t, err)
-		got, err := io.ReadAll(rc)
-		require.NoError(t, err)
-		require.NoError(t, rc.Close())
-		assert.Equal(t, []byte{4, 5, 6}, got)
+		assert.Equal(t, []byte{4, 5, 6}, buffer)
+		assert.Equal(t, 3, read)
 
 		// we write asynchronously, so let's wait until we're done
 		c.wg.Wait()
 
 		// second read pulls from cache
 		c.inner = nil // prevent remote reads, force cache read
-		rc, err = c.OpenRangeReader(t.Context(), 3, 3, nil)
+		buffer = make([]byte, 3)
+		read, err = testReadAt(t.Context(), &c, buffer, 3)
 		require.NoError(t, err)
-		got, err = io.ReadAll(rc)
-		require.NoError(t, err)
-		require.NoError(t, rc.Close())
-		assert.Equal(t, []byte{4, 5, 6}, got)
+		assert.Equal(t, []byte{4, 5, 6}, buffer)
+		assert.Equal(t, 3, read)
 	})
 
 	t.Run("WriteTo calls should read from cache", func(t *testing.T) {
@@ -214,7 +252,7 @@ func TestCachedFileObjectProvider_WriteTo(t *testing.T) {
 	})
 }
 
-func TestCachedFileObjectProvider_validateReadParams(t *testing.T) {
+func TestCachedFileObjectProvider_validateReadAtParams(t *testing.T) {
 	t.Parallel()
 
 	testcases := map[string]struct {
@@ -268,6 +306,69 @@ func TestCachedFileObjectProvider_validateReadParams(t *testing.T) {
 	}
 }
 
+func TestCachedSeekableObjectProvider_ReadAt(t *testing.T) {
+	t.Parallel()
+
+	t.Run("zero byte read with EOF is not cached", func(t *testing.T) {
+		t.Parallel()
+
+		tempDir := t.TempDir()
+		inner := NewMockSeekable(t)
+		inner.EXPECT().
+			OpenRangeReader(mock.Anything, mock.Anything, mock.Anything, (*FrameTable)(nil)).
+			Return(io.NopCloser(bytes.NewReader(nil)), nil)
+
+		c := cachedSeekable{
+			path:      tempDir,
+			chunkSize: 10,
+			inner:     inner,
+			tracer:    noopTracer,
+		}
+
+		buff := make([]byte, 10)
+		count, err := testReadAt(t.Context(), &c, buff, 0)
+		require.ErrorIs(t, err, io.EOF)
+		assert.Equal(t, 0, count)
+
+		c.wg.Wait()
+
+		chunkPath := c.makeChunkFilename(0)
+		_, err = os.Stat(chunkPath)
+		assert.True(t, os.IsNotExist(err), "zero-byte read should not be cached")
+	})
+
+	t.Run("full read without EOF is cached", func(t *testing.T) {
+		t.Parallel()
+
+		tempDir := t.TempDir()
+		data := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+		inner := NewMockSeekable(t)
+		inner.EXPECT().
+			OpenRangeReader(mock.Anything, mock.Anything, mock.Anything, (*FrameTable)(nil)).
+			Return(io.NopCloser(bytes.NewReader(data)), nil)
+
+		c := cachedSeekable{
+			path:      tempDir,
+			chunkSize: 10,
+			inner:     inner,
+			tracer:    noopTracer,
+		}
+
+		buff := make([]byte, 10)
+		count, err := testReadAt(t.Context(), &c, buff, 0)
+		require.NoError(t, err)
+		assert.Equal(t, 10, count)
+
+		c.wg.Wait()
+
+		// Verify the data was cached.
+		chunkPath := c.makeChunkFilename(0)
+		cached, err := os.ReadFile(chunkPath)
+		require.NoError(t, err)
+		assert.Equal(t, data, cached)
+	})
+}
+
 func TestIsCompleteRead(t *testing.T) {
 	t.Parallel()
 
@@ -296,7 +397,59 @@ func TestIsCompleteRead(t *testing.T) {
 	}
 }
 
-func TestCachedSeekable_OpenRangeReader_SkipCacheWriteback(t *testing.T) {
+func TestCachedSeekable_ReadAt_PreservesEOF(t *testing.T) {
+	t.Parallel()
+
+	t.Run("EOF from inner is returned to caller unchanged", func(t *testing.T) {
+		t.Parallel()
+
+		tempDir := t.TempDir()
+		inner := NewMockSeekable(t)
+		inner.EXPECT().
+			OpenRangeReader(mock.Anything, mock.Anything, mock.Anything, (*FrameTable)(nil)).
+			Return(io.NopCloser(bytes.NewReader([]byte{1, 2, 3})), nil)
+
+		c := cachedSeekable{
+			path:      tempDir,
+			chunkSize: 10,
+			inner:     inner,
+			tracer:    noopTracer,
+		}
+
+		buff := make([]byte, 10)
+		n, err := testReadAt(t.Context(), &c, buff, 0)
+		assert.Equal(t, 3, n)
+		require.ErrorIs(t, err, io.EOF, "cachedSeekable must not swallow io.EOF")
+
+		c.wg.Wait()
+	})
+
+	t.Run("nil error from inner is returned to caller unchanged", func(t *testing.T) {
+		t.Parallel()
+
+		tempDir := t.TempDir()
+		inner := NewMockSeekable(t)
+		inner.EXPECT().
+			OpenRangeReader(mock.Anything, mock.Anything, mock.Anything, (*FrameTable)(nil)).
+			Return(io.NopCloser(bytes.NewReader([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10})), nil)
+
+		c := cachedSeekable{
+			path:      tempDir,
+			chunkSize: 10,
+			inner:     inner,
+			tracer:    noopTracer,
+		}
+
+		buff := make([]byte, 10)
+		n, err := testReadAt(t.Context(), &c, buff, 0)
+		assert.Equal(t, 10, n)
+		require.NoError(t, err, "cachedSeekable must not inject errors on full read")
+
+		c.wg.Wait()
+	})
+}
+
+func TestCachedSeekable_ReadAt_SkipCacheWriteback(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
@@ -316,12 +469,10 @@ func TestCachedSeekable_OpenRangeReader_SkipCacheWriteback(t *testing.T) {
 	}
 
 	ctx := WithSkipCacheWriteback(t.Context())
-	rc, err := c.OpenRangeReader(ctx, 0, 10, nil)
+	buff := make([]byte, 10)
+	n, err := testReadAt(ctx, &c, buff, 0)
 	require.NoError(t, err)
-	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.NoError(t, rc.Close())
-	assert.Equal(t, data, got)
+	assert.Equal(t, 10, n)
 
 	c.wg.Wait()
 
