@@ -1,24 +1,66 @@
 package header
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/bits-and-blooms/bitset"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
+	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
+
+// BuildFileInfo holds metadata about a build's data file, stored in the header
+// so the read path can avoid network round-trips (e.g. Size() calls to GCS).
+type BuildFileInfo struct {
+	Size     int64    // uncompressed file size
+	Checksum [32]byte // SHA-256 of uncompressed data; zero value means unknown
+}
 
 const NormalizeFixVersion = 3
 
 type Header struct {
-	Metadata    *Metadata
+	Metadata *Metadata
+	// BuildFiles maps build IDs to their file metadata (size + checksum).
+	// Each layer's upload adds its own entry via applyToHeader, and inherits
+	// all parent entries via ToDiffHeader (which copies originalHeader.BuildFiles).
+	// This means every V4 header has a complete map of all builds referenced
+	// in its Mapping. V3 headers have no BuildFiles; the read path falls back
+	// to a Size() RPC for those.
+	BuildFiles  map[uuid.UUID]BuildFileInfo
 	blockStarts *bitset.BitSet
 	startMap    map[int64]*BuildMap
 
 	Mapping []*BuildMap
+}
+
+// CloneForUpload returns a clone with copied Mapping and BuildFiles, safe to
+// mutate for serialization without racing with concurrent readers of the
+// original. Only serialization-relevant fields are populated (Metadata,
+// Mapping, BuildFiles); lookup indices (blockStarts, startMap) are left nil.
+func (t *Header) CloneForUpload() *Header {
+	mappings := make([]*BuildMap, len(t.Mapping))
+	for i, m := range t.Mapping {
+		mappings[i] = m.Copy()
+	}
+
+	metaCopy := *t.Metadata
+	clone := &Header{
+		Metadata: &metaCopy,
+		Mapping:  mappings,
+	}
+
+	if t.BuildFiles != nil {
+		clone.BuildFiles = make(map[uuid.UUID]BuildFileInfo, len(t.BuildFiles))
+		maps.Copy(clone.BuildFiles, t.BuildFiles)
+	}
+
+	return clone
 }
 
 func NewHeader(metadata *Metadata, mapping []*BuildMap) (*Header, error) {
@@ -40,11 +82,11 @@ func NewHeader(metadata *Metadata, mapping []*BuildMap) (*Header, error) {
 	intervals := bitset.New(uint(blocks))
 	startMap := make(map[int64]*BuildMap, len(mapping))
 
-	for _, mapping := range mapping {
-		block := BlockIdx(int64(mapping.Offset), int64(metadata.BlockSize))
+	for _, m := range mapping {
+		block := BlockIdx(int64(m.Offset), int64(metadata.BlockSize))
 
 		intervals.Set(uint(block))
-		startMap[block] = mapping
+		startMap[block] = m
 	}
 
 	return &Header{
@@ -55,27 +97,81 @@ func NewHeader(metadata *Metadata, mapping []*BuildMap) (*Header, error) {
 	}, nil
 }
 
+func (t *Header) String() string {
+	if t == nil {
+		return "[nil Header]"
+	}
+
+	return fmt.Sprintf("[Header: version=%d, size=%d, blockSize=%d, generation=%d, buildId=%s, mappings=%d]",
+		t.Metadata.Version,
+		t.Metadata.Size,
+		t.Metadata.BlockSize,
+		t.Metadata.Generation,
+		t.Metadata.BuildId.String(),
+		len(t.Mapping),
+	)
+}
+
+func (t *Header) Mappings(all bool) string {
+	if t == nil {
+		return "[nil Header, no mappings]"
+	}
+	n := 0
+	for _, m := range t.Mapping {
+		if all || m.BuildId == t.Metadata.BuildId {
+			n++
+		}
+	}
+	result := fmt.Sprintf("All mappings: %d\n", n)
+	if !all {
+		result = fmt.Sprintf("Mappings for build %s: %d\n", t.Metadata.BuildId.String(), n)
+	}
+	for _, m := range t.Mapping {
+		if !all && m.BuildId != t.Metadata.BuildId {
+			continue
+		}
+		frames := 0
+		if m.FrameTable != nil {
+			frames = len(m.FrameTable.Frames)
+		}
+		result += fmt.Sprintf("  - Offset: %d, Length: %d, BuildId: %s, BuildStorageOffset: %d, numFrames: %d\n",
+			m.Offset,
+			m.Length,
+			m.BuildId.String(),
+			m.BuildStorageOffset,
+			frames,
+		)
+	}
+
+	return result
+}
+
 // IsNormalizeFixApplied is a helper method to soft fail for older versions of the header where fix for normalization was not applied.
 // This should be removed in the future.
 func (t *Header) IsNormalizeFixApplied() bool {
 	return t.Metadata.Version >= NormalizeFixVersion
 }
 
-func (t *Header) GetShiftedMapping(ctx context.Context, offset int64) (mappedOffset int64, mappedLength int64, buildID *uuid.UUID, err error) {
+func (t *Header) GetShiftedMapping(ctx context.Context, offset int64) (BuildMap, error) {
 	mapping, shift, err := t.getMapping(ctx, offset)
 	if err != nil {
-		return 0, 0, nil, err
+		return BuildMap{}, err
 	}
+	mappedLength := int64(mapping.Length) - shift
 
-	mappedOffset = int64(mapping.BuildStorageOffset) + shift
-	mappedLength = int64(mapping.Length) - shift
-	buildID = &mapping.BuildId
+	b := BuildMap{
+		Offset:     mapping.BuildStorageOffset + uint64(shift),
+		Length:     uint64(mappedLength),
+		BuildId:    mapping.BuildId,
+		FrameTable: mapping.FrameTable,
+	}
 
 	if mappedLength < 0 {
 		if t.IsNormalizeFixApplied() {
-			return 0, 0, nil, fmt.Errorf("mapped length for offset %d is negative: %d", offset, mappedLength)
+			return BuildMap{}, fmt.Errorf("mapped length for offset %d is negative: %d", offset, mappedLength)
 		}
 
+		b.Length = 0
 		logger.L().Warn(ctx, "mapped length is negative, but normalize fix is not applied",
 			zap.Int64("offset", offset),
 			zap.Int64("mappedLength", mappedLength),
@@ -83,7 +179,7 @@ func (t *Header) GetShiftedMapping(ctx context.Context, offset int64) (mappedOff
 		)
 	}
 
-	return mappedOffset, mappedLength, buildID, nil
+	return b, nil
 }
 
 // TODO: Maybe we can optimize mapping by automatically assuming the mapping is uuid.Nil if we don't find it + stopping storing the nil mapping.
@@ -142,4 +238,102 @@ func (t *Header) getMapping(ctx context.Context, offset int64) (*BuildMap, int64
 	}
 
 	return mapping, shift, nil
+}
+
+// ValidateHeader checks header integrity and returns an error if corruption is detected.
+// This verifies:
+// 1. Header and metadata are valid
+// 2. Mappings cover the entire file [0, Size) with no gaps
+// 3. Mappings don't extend beyond file size (with block alignment tolerance)
+func ValidateHeader(h *Header) error {
+	if h == nil {
+		return fmt.Errorf("header is nil")
+	}
+	if h.Metadata == nil {
+		return fmt.Errorf("header metadata is nil")
+	}
+	if h.Metadata.BlockSize == 0 {
+		return fmt.Errorf("header has zero block size")
+	}
+	if h.Metadata.Size == 0 {
+		return fmt.Errorf("header has zero size")
+	}
+	if len(h.Mapping) == 0 {
+		return fmt.Errorf("header has no mappings")
+	}
+
+	// Sort mappings by offset to check for gaps/overlaps
+	sortedMappings := make([]*BuildMap, len(h.Mapping))
+	copy(sortedMappings, h.Mapping)
+	slices.SortFunc(sortedMappings, func(a, b *BuildMap) int {
+		return cmp.Compare(a.Offset, b.Offset)
+	})
+
+	// Check that first mapping starts at 0
+	if sortedMappings[0].Offset != 0 {
+		return fmt.Errorf("mappings don't start at 0: first mapping starts at %d for buildId %s",
+			sortedMappings[0].Offset, h.Metadata.BuildId.String())
+	}
+
+	// Check for gaps and overlaps between consecutive mappings
+	for i := range len(sortedMappings) - 1 {
+		currentEnd := sortedMappings[i].Offset + sortedMappings[i].Length
+		nextStart := sortedMappings[i+1].Offset
+
+		if currentEnd < nextStart {
+			return fmt.Errorf("gap in mappings: mapping[%d] ends at %d but mapping[%d] starts at %d (gap=%d bytes) for buildId %s",
+				i, currentEnd, i+1, nextStart, nextStart-currentEnd, h.Metadata.BuildId.String())
+		}
+		if currentEnd > nextStart {
+			return fmt.Errorf("overlap in mappings: mapping[%d] ends at %d but mapping[%d] starts at %d (overlap=%d bytes) for buildId %s",
+				i, currentEnd, i+1, nextStart, currentEnd-nextStart, h.Metadata.BuildId.String())
+		}
+	}
+
+	// Check that last mapping covers up to (at least) Size
+	lastMapping := sortedMappings[len(sortedMappings)-1]
+	lastEnd := lastMapping.Offset + lastMapping.Length
+	if lastEnd < h.Metadata.Size {
+		return fmt.Errorf("mappings don't cover entire file: last mapping ends at %d but file size is %d (missing %d bytes) for buildId %s",
+			lastEnd, h.Metadata.Size, h.Metadata.Size-lastEnd, h.Metadata.BuildId.String())
+	}
+
+	// Allow last mapping to extend up to one block past size (for alignment)
+	if lastEnd > h.Metadata.Size+h.Metadata.BlockSize {
+		return fmt.Errorf("last mapping extends too far: ends at %d but file size is %d (overhang=%d bytes, max allowed=%d) for buildId %s",
+			lastEnd, h.Metadata.Size, lastEnd-h.Metadata.Size, h.Metadata.BlockSize, h.Metadata.BuildId.String())
+	}
+
+	// Validate individual mapping bounds
+	for i, m := range h.Mapping {
+		if m.Offset > h.Metadata.Size {
+			return fmt.Errorf("mapping[%d] has Offset %d beyond header size %d for buildId %s",
+				i, m.Offset, h.Metadata.Size, m.BuildId.String())
+		}
+		if m.Length == 0 {
+			return fmt.Errorf("mapping[%d] has zero length at offset %d for buildId %s",
+				i, m.Offset, m.BuildId.String())
+		}
+	}
+
+	return nil
+}
+
+// SetFrames associates compression frame information with this header's mappings.
+//
+// Only mappings matching this header's BuildId will be updated. Returns nil if frameTable is nil.
+func (t *Header) SetFrames(frameTable *storage.FrameTable) error {
+	if frameTable == nil {
+		return nil
+	}
+
+	for _, mapping := range t.Mapping {
+		if mapping.BuildId == t.Metadata.BuildId {
+			if err := mapping.SetFrames(frameTable); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }

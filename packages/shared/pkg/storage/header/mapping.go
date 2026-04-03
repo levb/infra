@@ -6,6 +6,8 @@ import (
 
 	"github.com/bits-and-blooms/bitset"
 	"github.com/google/uuid"
+
+	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
 // Start, Length and SourceStart are in bytes of the data file
@@ -17,6 +19,7 @@ type BuildMap struct {
 	Length             uint64
 	BuildId            uuid.UUID
 	BuildStorageOffset uint64
+	FrameTable         *storage.FrameTable
 }
 
 func (mapping *BuildMap) Copy() *BuildMap {
@@ -25,7 +28,47 @@ func (mapping *BuildMap) Copy() *BuildMap {
 		Length:             mapping.Length,
 		BuildId:            mapping.BuildId,
 		BuildStorageOffset: mapping.BuildStorageOffset,
+		FrameTable:         mapping.FrameTable,
 	}
+}
+
+// SetFrames associates compression frame information with this mapping.
+//
+// When a file is uploaded with compression, the compressor produces a FrameTable
+// that describes how the compressed data is organized into frames. This method
+// computes which compressed frames cover this mapping's data within the build's
+// storage file based on BuildStorageOffset and Length.
+//
+// Returns nil if frameTable is nil. Returns an error if the mapping's range
+// cannot be found in the frame table.
+func (mapping *BuildMap) SetFrames(frameTable *storage.FrameTable) error {
+	_, err := mapping.SetFramesFrom(frameTable, 0)
+
+	return err
+}
+
+// SetFramesFrom is like SetFrames but starts scanning from frame index `from`,
+// returning the next cursor position. Use this when applying frames to a
+// sorted sequence of mappings to avoid O(N²) rescanning.
+func (mapping *BuildMap) SetFramesFrom(frameTable *storage.FrameTable, from int) (int, error) {
+	if frameTable == nil {
+		return from, nil
+	}
+
+	mappedRange := storage.Range{
+		Start:  int64(mapping.BuildStorageOffset),
+		Length: int(mapping.Length),
+	}
+
+	subset, next := frameTable.SubsetFrom(mappedRange, from)
+	if subset == nil && mapping.Length > 0 {
+		return next, fmt.Errorf("mapping at virtual offset %d (storage offset %d, length %d): no frames found from index %d",
+			mapping.Offset, mapping.BuildStorageOffset, mapping.Length, from)
+	}
+
+	mapping.FrameTable = subset
+
+	return next, nil
 }
 
 func CreateMapping(
@@ -84,9 +127,9 @@ func CreateMapping(
 func MergeMappings(
 	baseMapping []*BuildMap,
 	diffMapping []*BuildMap,
-) []*BuildMap {
+) ([]*BuildMap, error) {
 	if len(diffMapping) == 0 {
-		return baseMapping
+		return baseMapping, nil
 	}
 
 	baseMappingCopy := make([]*BuildMap, len(baseMapping))
@@ -160,6 +203,9 @@ func MergeMappings(
 					// the build storage offset is the same as the base mapping
 					BuildStorageOffset: base.BuildStorageOffset,
 				}
+				if err := leftBase.SetFrames(base.FrameTable); err != nil {
+					return nil, fmt.Errorf("set frames for left split at offset %d: %w", leftBase.Offset, err)
+				}
 
 				mappings = append(mappings, leftBase)
 			}
@@ -177,6 +223,9 @@ func MergeMappings(
 					Length:             uint64(rightBaseLength),
 					BuildId:            base.BuildId,
 					BuildStorageOffset: base.BuildStorageOffset + uint64(rightBaseShift),
+				}
+				if err := rightBase.SetFrames(base.FrameTable); err != nil {
+					return nil, fmt.Errorf("set frames for right split at offset %d: %w", rightBase.Offset, err)
 				}
 
 				baseMapping[baseIdx] = rightBase
@@ -205,6 +254,9 @@ func MergeMappings(
 					BuildId:            base.BuildId,
 					BuildStorageOffset: base.BuildStorageOffset + uint64(rightBaseShift),
 				}
+				if err := rightBase.SetFrames(base.FrameTable); err != nil {
+					return nil, fmt.Errorf("set frames for right split at offset %d: %w", rightBase.Offset, err)
+				}
 
 				baseMapping[baseIdx] = rightBase
 			} else {
@@ -226,6 +278,9 @@ func MergeMappings(
 					BuildId:            base.BuildId,
 					BuildStorageOffset: base.BuildStorageOffset,
 				}
+				if err := leftBase.SetFrames(base.FrameTable); err != nil {
+					return nil, fmt.Errorf("set frames for left split at offset %d: %w", leftBase.Offset, err)
+				}
 
 				mappings = append(mappings, leftBase)
 			}
@@ -241,10 +296,12 @@ func MergeMappings(
 	mappings = append(mappings, baseMapping[baseIdx:]...)
 	mappings = append(mappings, diffMapping[diffIdx:]...)
 
-	return mappings
+	return mappings, nil
 }
 
 // NormalizeMappings joins adjacent mappings that have the same buildId.
+// When merging mappings, FrameTables are also merged by extending the first
+// mapping's FrameTable with frames from subsequent mappings.
 func NormalizeMappings(mappings []*BuildMap) []*BuildMap {
 	if len(mappings) == 0 {
 		return nil
@@ -252,7 +309,7 @@ func NormalizeMappings(mappings []*BuildMap) []*BuildMap {
 
 	result := make([]*BuildMap, 0, len(mappings))
 
-	// Start with a copy of the first mapping
+	// Start with a copy of the first mapping (Copy() now includes FrameTable)
 	current := mappings[0].Copy()
 
 	for i := 1; i < len(mappings); i++ {
@@ -260,10 +317,22 @@ func NormalizeMappings(mappings []*BuildMap) []*BuildMap {
 		if mp.BuildId != current.BuildId {
 			// BuildId changed, add the current map to results and start a new one
 			result = append(result, current)
-			current = mp.Copy() // New copy
+			current = mp.Copy() // New copy (includes FrameTable)
 		} else {
-			// Same BuildId, just add the length
+			// Same BuildId, merge: add the length and extend FrameTable
 			current.Length += mp.Length
+
+			// Extend FrameTable if the mapping being merged has one
+			if mp.FrameTable != nil {
+				if current.FrameTable == nil {
+					// Current has no FrameTable but merged one does - take it
+					current.FrameTable = mp.FrameTable
+				} else {
+					// Both have FrameTables - extend current's with mp's frames
+					// The frames are contiguous subsets, so we append non-overlapping frames
+					current.FrameTable = mergeFrameTables(current.FrameTable, mp.FrameTable)
+				}
+			}
 		}
 	}
 
@@ -271,4 +340,64 @@ func NormalizeMappings(mappings []*BuildMap) []*BuildMap {
 	result = append(result, current)
 
 	return result
+}
+
+// mergeFrameTables extends ft1 with frames from ft2. The FrameTables are
+// assumed to be contiguous subsets from the same original, so ft2's frames
+// follow ft1's frames (with possible overlap at the boundary). this function
+// returns either an reference to one of the input tables, unchanged, or a new
+// FrameTable with frames from both tables.
+func mergeFrameTables(ft1, ft2 *storage.FrameTable) *storage.FrameTable {
+	if ft1 == nil {
+		return ft2
+	}
+	if ft2 == nil {
+		return ft1
+	}
+
+	// Calculate where ft1 ends (uncompressed offset)
+	ft1EndU := ft1.StartAt.U
+	for _, frame := range ft1.Frames {
+		ft1EndU += int64(frame.U)
+	}
+
+	// Find where to start appending from ft2 (skip frames already covered by ft1)
+	ft2CurrentU := ft2.StartAt.U
+	startIdx := 0
+	for i, frame := range ft2.Frames {
+		frameEndU := ft2CurrentU + int64(frame.U)
+		if frameEndU <= ft1EndU {
+			// This frame is already covered by ft1
+			ft2CurrentU = frameEndU
+			startIdx = i + 1
+
+			continue
+		}
+		if ft2CurrentU < ft1EndU {
+			// This frame overlaps with ft1's last frame - it's the same frame, skip it
+			ft2CurrentU = frameEndU
+			startIdx = i + 1
+
+			continue
+		}
+		// This frame is beyond ft1's coverage
+		break
+	}
+
+	// Append remaining frames from ft2
+	if startIdx < len(ft2.Frames) {
+		// Create a new FrameTable with extended frames
+		newFrames := make([]storage.FrameSize, len(ft1.Frames), len(ft1.Frames)+len(ft2.Frames)-startIdx)
+		copy(newFrames, ft1.Frames)
+		newFrames = append(newFrames, ft2.Frames[startIdx:]...)
+
+		result := storage.NewFrameTable(ft1.CompressionType())
+		result.StartAt = ft1.StartAt
+		result.Frames = newFrames
+
+		return result
+	}
+
+	// All of ft2's frames were already covered by ft1
+	return ft1
 }

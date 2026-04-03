@@ -30,6 +30,11 @@ jobs:
 
       - name: Start Services
         uses: ./.github/actions/start-services
+        with:
+          compress_enabled: "true"
+          compress_type: "lz4"
+          compress_level: "0"
+          compress_workers: "8"
 
       - name: Run Integration Tests
         env:
@@ -38,9 +43,7 @@ jobs:
           TESTS_ORCHESTRATOR_HOST: "localhost:5008"
           TESTS_ENVD_PROXY: "http://localhost:3002"
           TESTS_CLIENT_PROXY: "http://localhost:3002"
-        run: |
-          # Run the integration tests
-          make test-integration
+        run: make test-integration
 
       - name: Check for Data Races in Service Logs
         if: always()
@@ -75,12 +78,12 @@ jobs:
         if: ${{ always() && inputs.publish == true }}
         uses: actions/upload-artifact@v6
         with:
-          name: Integration Tests Results
-          path: ./tests/integration/test-results.xml
+          name: ${{ inputs.compression && 'Compressed ' || '' }}Integration Tests Results
+          path: ./tests/integration/test-results*.xml
 
       - name: Upload Service Logs
         if: ${{ always() && inputs.publish == true }}
         uses: actions/upload-artifact@v6
         with:
-          name: Service Logs
+          name: ${{ inputs.compression && 'Compressed ' || '' }}Service Logs
           path: ~/logs/*.log

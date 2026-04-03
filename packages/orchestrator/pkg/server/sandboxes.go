@@ -639,9 +639,13 @@ func (s *Server) Checkpoint(ctx context.Context, in *orchestrator.SandboxCheckpo
 		// be paused or resumed later.
 		uploadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), uploadTimeout)
 		defer cancel()
-		defer res.completeUpload(uploadCtx)
 
-		if err := res.snapshot.Upload(uploadCtx, s.persistence, res.paths); err != nil {
+		memHdr, rootHdr, err := res.uploadSnapshot(uploadCtx, s.persistence, s.config.CompressConfig, s.featureFlags)
+		if completeErr := res.completeUpload(uploadCtx, memHdr, rootHdr); completeErr != nil {
+			telemetry.ReportCriticalError(uploadCtx, "error completing upload", completeErr, telemetry.WithSandboxID(in.GetSandboxId()))
+		}
+
+		if err != nil {
 			telemetry.ReportCriticalError(ctx, "error uploading snapshot for checkpoint", err, telemetry.WithSandboxID(in.GetSandboxId()))
 
 			s.sandboxFactory.Sandboxes.MarkStopping(ctx, resumedSbx.Runtime.SandboxID, resumedSbx.LifecycleID)
@@ -695,12 +699,25 @@ type snapshotResult struct {
 	meta           metadata.Template
 	snapshot       *sandbox.Snapshot
 	paths          storage.Paths
-	completeUpload func(ctx context.Context)
+	completeUpload func(ctx context.Context, memfileHdr, rootfsHdr []byte) error
+}
+
+// uploadSnapshot uploads snapshot files to GCS and returns serialized V4
+// header bytes for peer transition (nil for uncompressed builds).
+func (r *snapshotResult) uploadSnapshot(ctx context.Context, persistence storage.StorageProvider, baseCompressCfg storage.CompressConfig, flags *featureflags.Client) (memfileHdr, rootfsHdr []byte, err error) {
+	cfg := storage.ResolveCompressConfig(ctx, baseCompressCfg, flags, storage.FileTypeMemfile, storage.UseCasePause)
+	uploader := sandbox.NewBuildUploader(r.snapshot, persistence, r.paths, cfg, nil)
+
+	if err := uploader.UploadData(ctx); err != nil {
+		return nil, nil, err
+	}
+
+	return uploader.FinalizeHeaders(ctx)
 }
 
 // snapshotAndCacheSandbox creates a snapshot of a sandbox and adds it to the local
 // template cache. The caller is responsible for starting the GCS upload via
-// startSnapshotUploadAsync or uploadSnapshotWithPrefetchAsync.
+// uploadSnapshotAsync.
 func (s *Server) snapshotAndCacheSandbox(
 	ctx context.Context,
 	sbx *sandbox.Sandbox,
@@ -746,14 +763,19 @@ func (s *Server) snapshotAndCacheSandbox(
 			logger.L().Warn(ctx, "failed to register peer address for routing", zap.String("build_id", meta.Template.BuildID), zap.Error(err))
 		}
 
-		completeUpload := func(ctx context.Context) {
+		completeUpload := func(ctx context.Context, memfileHdr, rootfsHdr []byte) error {
 			// Signal in-flight peer streams to switch to GCS.
-			s.uploadedBuilds.Set(meta.Template.BuildID, struct{}{}, ttlcache.DefaultTTL)
+			s.uploadedBuilds.Set(meta.Template.BuildID, &uploadedBuildHeaders{
+				memfileHeader: memfileHdr,
+				rootfsHeader:  rootfsHdr,
+			}, ttlcache.DefaultTTL)
 
 			// Remove from Redis so new nodes go directly to GCS.
 			if err := s.peerRegistry.Unregister(ctx, meta.Template.BuildID); err != nil {
 				logger.L().Warn(ctx, "failed to unregister peer address from routing", zap.String("build_id", meta.Template.BuildID), zap.Error(err))
 			}
+
+			return nil
 		}
 
 		return &snapshotResult{
@@ -768,7 +790,7 @@ func (s *Server) snapshotAndCacheSandbox(
 		meta:           meta,
 		snapshot:       snapshot,
 		paths:          paths,
-		completeUpload: func(context.Context) {},
+		completeUpload: func(context.Context, []byte, []byte) error { return nil },
 	}, nil
 }
 
@@ -780,16 +802,17 @@ func (s *Server) uploadSnapshotAsync(ctx context.Context, sbx *sandbox.Sandbox, 
 
 	go func() {
 		defer cancel()
-		defer res.completeUpload(ctx)
 
-		err := res.snapshot.Upload(ctx, s.persistence, res.paths)
+		memHdr, rootHdr, err := res.uploadSnapshot(ctx, s.persistence, s.config.CompressConfig, s.featureFlags)
 		if err != nil {
 			sbxlogger.I(sbx).Error(ctx, "error uploading snapshot files", zap.Error(err))
-
-			return
+		} else {
+			sbxlogger.E(sbx).Info(ctx, "Snapshot files uploaded to GCS")
 		}
 
-		sbxlogger.E(sbx).Info(ctx, "Snapshot files uploaded to GCS")
+		if completeErr := res.completeUpload(ctx, memHdr, rootHdr); completeErr != nil {
+			sbxlogger.I(sbx).Error(ctx, "error completing upload", zap.Error(completeErr))
+		}
 	}()
 }
 

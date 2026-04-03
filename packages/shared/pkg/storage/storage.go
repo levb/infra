@@ -14,6 +14,7 @@ import (
 
 	"github.com/e2b-dev/infra/packages/shared/pkg/env"
 	"github.com/e2b-dev/infra/packages/shared/pkg/limit"
+	"github.com/e2b-dev/infra/packages/shared/pkg/telemetry"
 	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
 
@@ -41,6 +42,10 @@ const (
 
 	// MemoryChunkSize must always be bigger or equal to the block size.
 	MemoryChunkSize = 4 * 1024 * 1024 // 4 MB
+
+	// MetadataKeyUncompressedSize stores the original size so that Size()
+	// returns the uncompressed size for compressed objects.
+	MetadataKeyUncompressedSize = "uncompressed-size"
 )
 
 // GetProviderType returns the configured storage provider type from the
@@ -91,24 +96,35 @@ type Blob interface {
 
 type SeekableReader interface {
 	// Random slice access, off and buffer length must be aligned to block size
-	ReadAt(ctx context.Context, buffer []byte, off int64) (int, error)
+	ReadAt(ctx context.Context, buffer []byte, off int64, ft *FrameTable) (int, error)
 	Size(ctx context.Context) (int64, error)
 }
 
 // StreamingReader supports progressive reads via a streaming range reader.
 type StreamingReader interface {
-	OpenRangeReader(ctx context.Context, off, length int64) (io.ReadCloser, error)
+	OpenRangeReader(ctx context.Context, offsetU int64, length int64, frameTable *FrameTable) (io.ReadCloser, error)
 }
 
 type SeekableWriter interface {
 	// Store entire file
-	StoreFile(ctx context.Context, path string) error
+	StoreFile(ctx context.Context, path string, cfg *CompressConfig) (*FrameTable, [32]byte, error)
 }
 
 type Seekable interface {
-	SeekableReader
-	SeekableWriter
 	StreamingReader
+	SeekableWriter
+	Size(ctx context.Context) (int64, error)
+}
+
+// PeerTransitionedError is returned by the peer Seekable when the GCS upload
+// has completed and serialized V4 headers are available.
+type PeerTransitionedError struct {
+	MemfileHeader []byte
+	RootfsHeader  []byte
+}
+
+func (e *PeerTransitionedError) Error() string {
+	return "peer upload completed, headers available"
 }
 
 // StorageConfig holds the configuration for creating a storage provider.
@@ -196,4 +212,47 @@ func GetBlob(ctx context.Context, b Blob) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+// LoadBlob opens a blob by path and reads its contents.
+func LoadBlob(ctx context.Context, s StorageProvider, path string, objectType ObjectType) ([]byte, error) {
+	blob, err := s.OpenBlob(ctx, path, objectType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open blob %s: %w", path, err)
+	}
+
+	return GetBlob(ctx, blob)
+}
+
+// timedReadCloser wraps a reader with OTEL timer metrics.
+// Close records success (with total bytes read) or failure on the timer.
+type timedReadCloser struct {
+	inner     io.ReadCloser
+	timer     *telemetry.Stopwatch
+	ctx       context.Context //nolint:containedctx // needed for timer recording in Close
+	bytesRead int64
+	closeErr  error
+}
+
+func (r *timedReadCloser) Read(p []byte) (int, error) {
+	n, err := r.inner.Read(p)
+	r.bytesRead += int64(n)
+
+	if err != nil && err != io.EOF {
+		r.closeErr = err
+	}
+
+	return n, err
+}
+
+func (r *timedReadCloser) Close() error {
+	err := r.inner.Close()
+
+	if r.closeErr != nil || err != nil {
+		r.timer.Failure(r.ctx, r.bytesRead)
+	} else {
+		r.timer.Success(r.ctx, r.bytesRead)
+	}
+
+	return err
 }

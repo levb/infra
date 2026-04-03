@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -124,28 +125,52 @@ func (o *fsObject) Put(_ context.Context, data []byte) error {
 	return err
 }
 
-func (o *fsObject) StoreFile(_ context.Context, path string) error {
+func (o *fsObject) StoreFile(ctx context.Context, path string, cfg *CompressConfig) (*FrameTable, [32]byte, error) {
+	if cfg.IsEnabled() {
+		return o.storeFileCompressed(ctx, path, cfg)
+	}
+
 	r, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("failed to open file %s: %w", path, err)
+		return nil, [32]byte{}, fmt.Errorf("failed to open file %s: %w", path, err)
 	}
 	defer r.Close()
 
 	handle, err := o.getHandle(false)
 	if err != nil {
-		return err
+		return nil, [32]byte{}, err
 	}
 	defer handle.Close()
 
 	_, err = io.Copy(handle, r)
-	if err != nil {
-		return err
-	}
 
-	return nil
+	return nil, [32]byte{}, err
 }
 
-func (o *fsObject) OpenRangeReader(_ context.Context, off, length int64) (io.ReadCloser, error) {
+func (o *fsObject) storeFileCompressed(ctx context.Context, localPath string, cfg *CompressConfig) (*FrameTable, [32]byte, error) {
+	file, err := os.Open(localPath)
+	if err != nil {
+		return nil, [32]byte{}, fmt.Errorf("failed to open local file %s: %w", localPath, err)
+	}
+	defer file.Close()
+
+	fi, err := file.Stat()
+	if err != nil {
+		return nil, [32]byte{}, fmt.Errorf("failed to stat local file %s: %w", localPath, err)
+	}
+
+	// Write .uncompressed-size sidecar so Size() returns the correct value.
+	sidecarPath := o.path + "." + MetadataKeyUncompressedSize
+	if writeErr := os.WriteFile(sidecarPath, []byte(strconv.FormatInt(fi.Size(), 10)), 0o644); writeErr != nil {
+		return nil, [32]byte{}, fmt.Errorf("failed to write uncompressed-size sidecar for %s: %w", o.path, writeErr)
+	}
+
+	uploader := &fsPartUploader{fullPath: o.path}
+
+	return compressStream(ctx, file, cfg, uploader, 4)
+}
+
+func (o *fsObject) openRangeReader(_ context.Context, off, length int64) (io.ReadCloser, error) {
 	f, err := o.getHandle(true)
 	if err != nil {
 		return nil, err
@@ -155,16 +180,6 @@ func (o *fsObject) OpenRangeReader(_ context.Context, off, length int64) (io.Rea
 		Reader: io.NewSectionReader(f, off, length),
 		file:   f,
 	}, nil
-}
-
-func (o *fsObject) ReadAt(_ context.Context, buff []byte, off int64) (n int, err error) {
-	handle, err := o.getHandle(true)
-	if err != nil {
-		return 0, err
-	}
-	defer handle.Close()
-
-	return handle.ReadAt(buff, off)
 }
 
 func (o *fsObject) Exists(_ context.Context) (bool, error) {
@@ -186,6 +201,14 @@ func (o *fsObject) Size(_ context.Context) (int64, error) {
 	fileInfo, err := handle.Stat()
 	if err != nil {
 		return 0, err
+	}
+
+	// Check for .uncompressed-size sidecar file
+	sidecarPath := o.path + "." + MetadataKeyUncompressedSize
+	if sidecarData, sidecarErr := os.ReadFile(sidecarPath); sidecarErr == nil {
+		if parsed, parseErr := strconv.ParseInt(strings.TrimSpace(string(sidecarData)), 10, 64); parseErr == nil {
+			return parsed, nil
+		}
 	}
 
 	return fileInfo.Size(), nil
@@ -238,4 +261,39 @@ func (o *fsObject) getHandle(checkExistence bool) (*os.File, error) {
 	}
 
 	return handle, nil
+}
+
+// fsPartUploader implements partUploader for local filesystem.
+// Embeds memPartUploader for concurrent-safe part collection,
+// then writes atomically on Complete.
+type fsPartUploader struct {
+	memPartUploader
+
+	fullPath string
+}
+
+func (u *fsPartUploader) Complete(_ context.Context) error {
+	if err := os.MkdirAll(filepath.Dir(u.fullPath), 0o755); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	return os.WriteFile(u.fullPath, u.Assemble(), 0o644)
+}
+
+func (o *fsObject) OpenRangeReader(ctx context.Context, offsetU int64, length int64, frameTable *FrameTable) (io.ReadCloser, error) {
+	if frameTable.IsCompressed() {
+		frameStart, frameSize, err := frameTable.FrameFor(offsetU)
+		if err != nil {
+			return nil, fmt.Errorf("get frame for offset %d, FS:%s: %w", offsetU, o.path, err)
+		}
+
+		raw, err := o.openRangeReader(ctx, frameStart.C, int64(frameSize.C))
+		if err != nil {
+			return nil, err
+		}
+
+		return newDecompressingReadCloser(raw, frameTable.CompressionType())
+	}
+
+	return o.openRangeReader(ctx, offsetU, length)
 }

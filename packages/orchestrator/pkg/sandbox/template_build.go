@@ -45,7 +45,7 @@ func (t *TemplateBuild) uploadMemfileHeader(ctx context.Context, h *headers.Head
 		return err
 	}
 
-	serialized, err := headers.Serialize(h.Metadata, h.Mapping)
+	serialized, err := headers.SerializeHeader(h)
 	if err != nil {
 		return fmt.Errorf("error when serializing memfile header: %w", err)
 	}
@@ -64,8 +64,7 @@ func (t *TemplateBuild) uploadMemfile(ctx context.Context, memfilePath string) e
 		return err
 	}
 
-	err = object.StoreFile(ctx, memfilePath)
-	if err != nil {
+	if _, _, err = object.StoreFile(ctx, memfilePath, nil); err != nil {
 		return fmt.Errorf("error when uploading memfile: %w", err)
 	}
 
@@ -78,14 +77,14 @@ func (t *TemplateBuild) uploadRootfsHeader(ctx context.Context, h *headers.Heade
 		return err
 	}
 
-	serialized, err := headers.Serialize(h.Metadata, h.Mapping)
+	serialized, err := headers.SerializeHeader(h)
 	if err != nil {
-		return fmt.Errorf("error when serializing memfile header: %w", err)
+		return fmt.Errorf("error when serializing rootfs header: %w", err)
 	}
 
 	err = object.Put(ctx, serialized)
 	if err != nil {
-		return fmt.Errorf("error when uploading memfile header: %w", err)
+		return fmt.Errorf("error when uploading rootfs header: %w", err)
 	}
 
 	return nil
@@ -97,8 +96,7 @@ func (t *TemplateBuild) uploadRootfs(ctx context.Context, rootfsPath string) err
 		return err
 	}
 
-	err = object.StoreFile(ctx, rootfsPath)
-	if err != nil {
+	if _, _, err = object.StoreFile(ctx, rootfsPath, nil); err != nil {
 		return fmt.Errorf("error when uploading rootfs: %w", err)
 	}
 

@@ -29,6 +29,11 @@ import (
 // templates they refer to and are cleaned up automatically.
 const uploadedBuildsTTL = 1 * time.Hour
 
+type uploadedBuildHeaders struct {
+	memfileHeader []byte
+	rootfsHeader  []byte
+}
+
 type Server struct {
 	orchestrator.UnimplementedSandboxServiceServer
 	orchestrator.UnimplementedChunkServiceServer
@@ -46,7 +51,7 @@ type Server struct {
 	sbxEventsService      *events.EventsService
 	startingSandboxes     *semaphore.Weighted
 	peerRegistry          peerclient.Registry
-	uploadedBuilds        *ttlcache.Cache[string, struct{}]
+	uploadedBuilds        *ttlcache.Cache[string, *uploadedBuildHeaders]
 	sandboxCreateDuration metric.Int64Histogram
 }
 
@@ -66,8 +71,8 @@ type ServiceConfig struct {
 }
 
 func New(cfg ServiceConfig) (*Server, error) {
-	uploadedBuilds := ttlcache.New[string, struct{}](
-		ttlcache.WithTTL[string, struct{}](uploadedBuildsTTL),
+	uploadedBuilds := ttlcache.New(
+		ttlcache.WithTTL[string, *uploadedBuildHeaders](uploadedBuildsTTL),
 	)
 	go uploadedBuilds.Start()
 
