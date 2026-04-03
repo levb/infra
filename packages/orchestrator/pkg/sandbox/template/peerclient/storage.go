@@ -305,43 +305,29 @@ func newPeerStreamReader(recv func() ([]byte, error), cancel context.CancelFunc)
 }
 
 func (r *peerStreamReader) Read(p []byte) (int, error) {
-	n := 0
-
-	for n < len(p) {
-		// Drain any leftover data from the previous gRPC message.
+	for {
 		if r.current != nil && r.current.Len() > 0 {
-			nn, _ := r.current.Read(p[n:])
-			n += nn
-
-			continue
+			return r.current.Read(p)
 		}
 
 		if r.done {
-			break
+			return 0, io.EOF
 		}
 
+		// gRPC Recv returns (nil, io.EOF) separately from the last data message,
+		// so no data is lost here.
 		data, err := r.recv()
 		if errors.Is(err, io.EOF) {
 			r.done = true
 
-			break
+			return 0, io.EOF
 		}
 		if err != nil {
-			if n > 0 {
-				return n, fmt.Errorf("failed to receive chunk from peer: %w", err)
-			}
-
 			return 0, fmt.Errorf("failed to receive chunk from peer: %w", err)
 		}
 
 		r.current = bytes.NewReader(data)
 	}
-
-	if n == 0 && r.done {
-		return 0, io.EOF
-	}
-
-	return n, nil
 }
 
 func (r *peerStreamReader) Close() error {
