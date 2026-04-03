@@ -112,7 +112,7 @@ func (r *compressedCacheReader) Close() error {
 	fmt.Printf("// DEBUG: compressedCacheReader.Close decErr=%v rawErr=%v bufLen=%d expected=%d skip=%v path=%s\n", decErr, rawErr, r.compressedBuf.Len(), r.expectedSize, skipCacheWriteback(r.ctx), r.framePath) // DEBUG: remove before merge
 
 	// Only cache when compressed bytes are complete.
-	if decErr == nil && rawErr == nil && isCompleteRead(r.compressedBuf.Len(), r.expectedSize) && !skipCacheWriteback(r.ctx) {
+	if decErr == nil && rawErr == nil && isCompleteRead(r.compressedBuf.Len(), r.expectedSize, nil) && !skipCacheWriteback(r.ctx) {
 		data := make([]byte, r.compressedBuf.Len())
 		copy(data, r.compressedBuf.Bytes())
 
