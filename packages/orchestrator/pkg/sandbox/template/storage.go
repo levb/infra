@@ -22,8 +22,15 @@ type Storage struct {
 	source *build.File
 }
 
-func isKnownDiffType(diffType build.DiffType) bool {
-	return diffType == build.Memfile || diffType == build.Rootfs
+func objectType(diffType build.DiffType) (storage.SeekableObjectType, bool) {
+	switch diffType {
+	case build.Memfile:
+		return storage.MemfileObjectType, true
+	case build.Rootfs:
+		return storage.RootFSObjectType, true
+	default:
+		return storage.UnknownSeekableObjectType, false
+	}
 }
 
 func NewStorage(
@@ -38,7 +45,7 @@ func NewStorage(
 	paths := storage.Paths{BuildID: buildId}
 
 	if h == nil {
-		if !isKnownDiffType(fileType) {
+		if _, ok := objectType(fileType); !ok {
 			return nil, build.UnknownDiffTypeError{DiffType: fileType}
 		}
 
@@ -59,11 +66,12 @@ func NewStorage(
 
 	// If we can't find the diff header in storage, we try to find the "old" style template without a header as a fallback.
 	if h == nil {
-		if !isKnownDiffType(fileType) {
+		var dataPath string
+		objectType, ok := objectType(fileType)
+		if !ok {
 			return nil, build.UnknownDiffTypeError{DiffType: fileType}
 		}
 
-		var dataPath string
 		switch fileType {
 		case build.Memfile:
 			dataPath = paths.Memfile()
@@ -71,7 +79,7 @@ func NewStorage(
 			dataPath = paths.Rootfs()
 		}
 
-		object, err := persistence.OpenSeekable(ctx, dataPath)
+		object, err := persistence.OpenSeekable(ctx, dataPath, objectType)
 		if err != nil {
 			return nil, err
 		}

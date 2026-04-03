@@ -84,7 +84,7 @@ type StorageProvider interface {
 	DeleteObjectsWithPrefix(ctx context.Context, prefix string) error
 	UploadSignedURL(ctx context.Context, path string, ttl time.Duration) (string, error)
 	OpenBlob(ctx context.Context, path string, objectType ObjectType) (Blob, error)
-	OpenSeekable(ctx context.Context, path string) (Seekable, error)
+	OpenSeekable(ctx context.Context, path string, seekableObjectType SeekableObjectType) (Seekable, error)
 	GetDetails() string
 }
 

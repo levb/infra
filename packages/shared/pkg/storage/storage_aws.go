@@ -128,7 +128,7 @@ func (s *awsStorage) UploadSignedURL(ctx context.Context, path string, ttl time.
 	return resp.URL, nil
 }
 
-func (s *awsStorage) OpenSeekable(_ context.Context, path string) (Seekable, error) {
+func (s *awsStorage) OpenSeekable(_ context.Context, path string, _ SeekableObjectType) (Seekable, error) {
 	return &awsObject{
 		client:     s.client,
 		bucketName: s.bucketName,

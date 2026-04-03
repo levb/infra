@@ -42,7 +42,7 @@ func TemplateRootfs(ctx context.Context, buildID string) (*BuildDevice, *Cleaner
 			return nil, &cleaner, fmt.Errorf("failed to parse build id: %w", err)
 		}
 
-		r, err := s.OpenSeekable(ctx, files.Rootfs())
+		r, err := s.OpenSeekable(ctx, files.Rootfs(), storage.RootFSObjectType)
 		if err != nil {
 			return nil, &cleaner, fmt.Errorf("failed to open object: %w", err)
 		}

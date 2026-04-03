@@ -75,7 +75,7 @@ func (s *fsStorage) UploadSignedURL(_ context.Context, path string, ttl time.Dur
 	return u, nil
 }
 
-func (s *fsStorage) OpenSeekable(_ context.Context, path string) (Seekable, error) {
+func (s *fsStorage) OpenSeekable(_ context.Context, path string, _ SeekableObjectType) (Seekable, error) {
 	dir := filepath.Dir(s.getPath(path))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err

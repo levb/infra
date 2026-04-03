@@ -105,8 +105,8 @@ func (c cache) OpenBlob(ctx context.Context, path string, objectType ObjectType)
 	}, nil
 }
 
-func (c cache) OpenSeekable(ctx context.Context, path string) (Seekable, error) {
-	innerObject, err := c.inner.OpenSeekable(ctx, path)
+func (c cache) OpenSeekable(ctx context.Context, path string, objectType SeekableObjectType) (Seekable, error) {
+	innerObject, err := c.inner.OpenSeekable(ctx, path, objectType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open object: %w", err)
 	}

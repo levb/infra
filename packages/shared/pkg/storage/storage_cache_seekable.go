@@ -157,7 +157,11 @@ func (r *cacheWriteThroughReader) Close() error {
 		copy(data, r.buf.Bytes())
 
 		r.cache.goCtx(r.ctx, func(ctx context.Context) {
+			ctx, span := r.cache.tracer.Start(ctx, "write range reader chunk back to cache")
+			defer span.End()
+
 			if err := r.cache.writeToCache(ctx, r.off, r.chunkPath, data); err != nil {
+				recordError(span, err)
 				recordCacheWriteError(ctx, cacheTypeSeekable, cacheOpOpenRangeReader, err)
 			}
 		})

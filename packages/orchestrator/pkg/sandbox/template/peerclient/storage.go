@@ -87,10 +87,10 @@ func (p *routingProvider) OpenBlob(ctx context.Context, path string, objType sto
 	return p.resolveProvider(ctx, buildID).OpenBlob(ctx, path, objType)
 }
 
-func (p *routingProvider) OpenSeekable(ctx context.Context, path string) (storage.Seekable, error) {
+func (p *routingProvider) OpenSeekable(ctx context.Context, path string, objType storage.SeekableObjectType) (storage.Seekable, error) {
 	buildID, _ := storage.SplitPath(path)
 
-	return p.resolveProvider(ctx, buildID).OpenSeekable(ctx, path)
+	return p.resolveProvider(ctx, buildID).OpenSeekable(ctx, path, objType)
 }
 
 func (p *routingProvider) DeleteObjectsWithPrefix(ctx context.Context, prefix string) error {
@@ -142,7 +142,7 @@ func (p *peerStorageProvider) OpenBlob(_ context.Context, path string, objType s
 	}}, nil
 }
 
-func (p *peerStorageProvider) OpenSeekable(_ context.Context, path string) (storage.Seekable, error) {
+func (p *peerStorageProvider) OpenSeekable(_ context.Context, path string, objType storage.SeekableObjectType) (storage.Seekable, error) {
 	buildID, fileName := storage.SplitPath(path)
 
 	return &peerSeekable{peerHandle: peerHandle[storage.Seekable]{
@@ -151,7 +151,7 @@ func (p *peerStorageProvider) OpenSeekable(_ context.Context, path string) (stor
 		fileName: fileName,
 		uploaded: p.uploaded,
 		openFn: func(ctx context.Context) (storage.Seekable, error) {
-			return p.base.OpenSeekable(ctx, path)
+			return p.base.OpenSeekable(ctx, path, objType)
 		},
 	}}, nil
 }

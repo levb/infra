@@ -68,8 +68,8 @@ func diffPath(d build.Diff) (*string, error) {
 	return &p, nil
 }
 
-func (b *buildUploader) uploadUncompressedFile(ctx context.Context, local, remote string) error {
-	object, err := b.persistence.OpenSeekable(ctx, remote)
+func (b *buildUploader) uploadUncompressedFile(ctx context.Context, local, remote string, objType storage.SeekableObjectType) error {
+	object, err := b.persistence.OpenSeekable(ctx, remote, objType)
 	if err != nil {
 		return err
 	}
@@ -109,8 +109,8 @@ func (b *buildUploader) uploadMetadata(ctx context.Context, path string) error {
 	return nil
 }
 
-func (b *buildUploader) uploadCompressedFile(ctx context.Context, local, remote string, cfg *storage.CompressConfig) (*storage.FrameTable, [32]byte, error) {
-	object, err := b.persistence.OpenSeekable(ctx, remote)
+func (b *buildUploader) uploadCompressedFile(ctx context.Context, local, remote string, objType storage.SeekableObjectType, cfg *storage.CompressConfig) (*storage.FrameTable, [32]byte, error) {
+	object, err := b.persistence.OpenSeekable(ctx, remote, objType)
 	if err != nil {
 		return nil, [32]byte{}, fmt.Errorf("error opening framed file for %s: %w", remote, err)
 	}
