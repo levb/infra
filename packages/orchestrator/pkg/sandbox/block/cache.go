@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/bits"
 	"math/rand"
 	"os"
 	"sync"
@@ -52,7 +53,7 @@ type Cache struct {
 	blockSize int64
 	mmap      *mmap.MMap
 	mu        sync.RWMutex
-	dirty     sync.Map
+	dirty     []uint64 // atomic bitmap, one bit per block
 	dirtyFile bool
 	closed    atomic.Bool
 }
@@ -65,6 +66,9 @@ func NewCache(size, blockSize int64, filePath string, dirtyFile bool) (*Cache, e
 	}
 
 	defer f.Close()
+
+	nblocks := (size + blockSize - 1) / blockSize
+	nwords := (nblocks + 63) / 64
 
 	if size == 0 {
 		return &Cache{
@@ -92,6 +96,7 @@ func NewCache(size, blockSize int64, filePath string, dirtyFile bool) (*Cache, e
 
 	return &Cache{
 		mmap:      &mm,
+		dirty:     make([]uint64, nwords),
 		filePath:  filePath,
 		size:      size,
 		blockSize: blockSize,
@@ -141,12 +146,14 @@ func (c *Cache) ExportToDiff(ctx context.Context, out *os.File) (*header.DiffMet
 	buildStart := time.Now()
 	builder := header.NewDiffMetadataBuilder(c.size, c.blockSize)
 
-	// We don't need to sort the keys as the bitset handles the ordering.
-	c.dirty.Range(func(key, _ any) bool {
-		builder.AddDirtyOffset(key.(int64))
-
-		return true
-	})
+	for i := range c.dirty {
+		word := atomic.LoadUint64(&c.dirty[i])
+		for word != 0 {
+			bit := bits.TrailingZeros64(word)
+			builder.AddDirtyOffset(int64(i*64+bit) * c.blockSize)
+			word &^= 1 << uint(bit)
+		}
+	}
 
 	diffMetadata := builder.Build()
 	telemetry.SetAttributes(ctx, attribute.Int64("build_metadata_ms", time.Since(buildStart).Milliseconds()))
@@ -298,33 +305,42 @@ func (c *Cache) Slice(off, length int64) ([]byte, error) {
 		return (*c.mmap)[off:end], nil
 	}
 
-	return nil, BytesNotAvailableError{}
+	return nil, ErrNotCached
+}
+
+// sliceDirect returns a slice of the mmap without checking the dirty bitmap.
+// Used after the fetch waiter has confirmed data availability.
+func (c *Cache) sliceDirect(off, length int64) ([]byte, error) {
+	if c.isClosed() {
+		return nil, NewErrCacheClosed(c.filePath)
+	}
+	if c.mmap == nil {
+		return nil, nil
+	}
+	return (*c.mmap)[off:min(off+length, c.size)], nil
 }
 
 func (c *Cache) isCached(off, length int64) bool {
-	// Make sure the offset is within the cache size
 	if off >= c.size {
 		return false
 	}
-
-	// Cap if the length goes beyond the cache size, so we don't check for blocks that are out of bounds.
 	end := min(off+length, c.size)
-	// Recalculate the length based on the capped end, so we check for the correct blocks in case of capping.
-	length = end - off
-
-	for _, blockOff := range header.BlocksOffsets(length, c.blockSize) {
-		_, dirty := c.dirty.Load(off + blockOff)
-		if !dirty {
+	lo := off / c.blockSize
+	hi := (end - 1) / c.blockSize
+	for i := lo; i <= hi; i++ {
+		if atomic.LoadUint64(&c.dirty[i/64])&(1<<uint(i%64)) == 0 {
 			return false
 		}
 	}
-
 	return true
 }
 
 func (c *Cache) setIsCached(off, length int64) {
-	for _, blockOff := range header.BlocksOffsets(length, c.blockSize) {
-		c.dirty.Store(off+blockOff, struct{}{})
+	end := off + length
+	lo := off / c.blockSize
+	hi := (end - 1) / c.blockSize
+	for i := lo; i <= hi; i++ {
+		atomic.OrUint64(&c.dirty[i/64], 1<<uint(i%64))
 	}
 }
 
@@ -533,9 +549,7 @@ func (c *Cache) copyProcessMemory(
 				return fmt.Errorf("failed to read memory: expected %d bytes, got %d", segmentSize, n)
 			}
 
-			for _, blockOff := range header.BlocksOffsets(segmentSize, c.blockSize) {
-				c.dirty.Store(offset+blockOff, struct{}{})
-			}
+			c.setIsCached(offset, segmentSize)
 
 			offset += segmentSize
 

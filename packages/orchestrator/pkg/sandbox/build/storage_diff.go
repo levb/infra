@@ -7,7 +7,6 @@ import (
 
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/block"
 	blockmetrics "github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/block/metrics"
-	"github.com/e2b-dev/infra/packages/shared/pkg/featureflags"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
@@ -17,16 +16,15 @@ func storagePath(buildId string, diffType DiffType) string {
 }
 
 type StorageDiff struct {
-	chunker           *utils.SetOnce[block.Chunker]
+	chunker           *utils.SetOnce[*block.Chunker]
 	cachePath         string
 	cacheKey          DiffStoreKey
 	storagePath       string
 	storageObjectType storage.SeekableObjectType
 
-	blockSize    int64
-	metrics      blockmetrics.Metrics
-	persistence  storage.StorageProvider
-	featureFlags *featureflags.Client
+	blockSize   int64
+	metrics     blockmetrics.Metrics
+	persistence storage.StorageProvider
 }
 
 var _ Diff = (*StorageDiff)(nil)
@@ -46,7 +44,6 @@ func newStorageDiff(
 	blockSize int64,
 	metrics blockmetrics.Metrics,
 	persistence storage.StorageProvider,
-	featureFlags *featureflags.Client,
 ) (*StorageDiff, error) {
 	storagePath := storagePath(buildId, diffType)
 	storageObjectType, ok := storageObjectType(diffType)
@@ -60,11 +57,10 @@ func newStorageDiff(
 		storagePath:       storagePath,
 		storageObjectType: storageObjectType,
 		cachePath:         cachePath,
-		chunker:           utils.NewSetOnce[block.Chunker](),
+		chunker:           utils.NewSetOnce[*block.Chunker](),
 		blockSize:         blockSize,
 		metrics:           metrics,
 		persistence:       persistence,
-		featureFlags:      featureFlags,
 		cacheKey:          GetDiffStoreKey(buildId, diffType),
 	}, nil
 }
@@ -98,7 +94,7 @@ func (b *StorageDiff) Init(ctx context.Context) error {
 		return errMsg
 	}
 
-	c, err := block.NewChunker(ctx, b.featureFlags, size, b.blockSize, obj, b.cachePath, b.metrics)
+	c, err := block.NewChunker(size, b.blockSize, obj, b.cachePath)
 	if err != nil {
 		errMsg := fmt.Errorf("failed to create chunker: %w", err)
 		b.chunker.SetError(errMsg)

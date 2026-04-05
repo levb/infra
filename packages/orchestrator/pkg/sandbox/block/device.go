@@ -2,17 +2,14 @@ package block
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
 )
 
-type BytesNotAvailableError struct{}
-
-func (BytesNotAvailableError) Error() string {
-	return "The requested bytes are not available on the device"
-}
+var ErrNotCached = errors.New("bytes not cached")
 
 type Slicer interface {
 	Slice(ctx context.Context, off, length int64) ([]byte, error)
