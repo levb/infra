@@ -188,11 +188,11 @@ func GetImageSize(img containerregistry.Image) (int64, error) {
 	return imageSize, nil
 }
 
-func ToExt4(ctx context.Context, logger logger.Logger, img containerregistry.Image, rootfsPath string, maxSize int64, blockSize int64) (int64, error) {
+func ToExt4(ctx context.Context, logger logger.Logger, img containerregistry.Image, rootfsPath string, maxSize int64, blockSize int) (int64, error) {
 	ctx, childSpan := tracer.Start(ctx, "oci-to-ext4")
 	defer childSpan.End()
 
-	err := filesystem.Make(ctx, rootfsPath, units.BytesToMB(maxSize), blockSize)
+	err := filesystem.Make(ctx, rootfsPath, units.BytesToMB(maxSize), int64(blockSize))
 	if err != nil {
 		return 0, fmt.Errorf("error creating ext4 file: %w", err)
 	}

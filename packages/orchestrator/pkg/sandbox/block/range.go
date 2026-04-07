@@ -11,17 +11,17 @@ import (
 type Range struct {
 	// Start is the start address of the range in bytes.
 	// Start is inclusive.
-	Start int64
+	Start int
 	// Size is the size of the range in bytes.
-	Size int64
+	Size int
 }
 
-func (r *Range) End() int64 {
+func (r *Range) End() int {
 	return r.Start + r.Size
 }
 
 // NewRange creates a new range from a start address and size in bytes.
-func NewRange(start int64, size int64) Range {
+func NewRange(start int, size int) Range {
 	return Range{
 		Start: start,
 		Size:  size,
@@ -29,7 +29,7 @@ func NewRange(start int64, size int64) Range {
 }
 
 // NewRangeFromBlocks creates a new range from a start index and number of blocks.
-func NewRangeFromBlocks(startIdx, numberOfBlocks, blockSize int64) Range {
+func NewRangeFromBlocks(startIdx, numberOfBlocks, blockSize int) Range {
 	return Range{
 		Start: header.BlockOffset(startIdx, blockSize),
 		Size:  header.BlockOffset(numberOfBlocks, blockSize),
@@ -37,19 +37,19 @@ func NewRangeFromBlocks(startIdx, numberOfBlocks, blockSize int64) Range {
 }
 
 // bitsetRanges returns a sequence of the ranges of the set bits of the bitset.
-func BitsetRanges(b *bitset.BitSet, blockSize int64) iter.Seq[Range] {
+func BitsetRanges(b *bitset.BitSet, blockSize int) iter.Seq[Range] {
 	return func(yield func(Range) bool) {
 		start, found := b.NextSet(0)
 
 		for found {
 			end, endOk := b.NextClear(start)
 			if !endOk {
-				yield(NewRangeFromBlocks(int64(start), int64(b.Len()-start), blockSize))
+				yield(NewRangeFromBlocks(int(start), int(b.Len()-start), blockSize))
 
 				return
 			}
 
-			if !yield(NewRangeFromBlocks(int64(start), int64(end-start), blockSize)) {
+			if !yield(NewRangeFromBlocks(int(start), int(end-start), blockSize)) {
 				return
 			}
 
@@ -58,7 +58,7 @@ func BitsetRanges(b *bitset.BitSet, blockSize int64) iter.Seq[Range] {
 	}
 }
 
-func GetSize(rs []Range) (size int64) {
+func GetSize(rs []Range) (size int) {
 	for _, r := range rs {
 		size += r.Size
 	}

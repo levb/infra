@@ -17,7 +17,7 @@ func NewLoggerOverlay(overlay *block.Overlay) *LoggerOverlay {
 	return &LoggerOverlay{overlay: overlay}
 }
 
-func (l *LoggerOverlay) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
+func (l *LoggerOverlay) ReadAt(ctx context.Context, p []byte, off int) (int, error) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stdout, "[read panic recovered]: [%d, %d] -> %v\n", off, len(p), r)
@@ -33,6 +33,7 @@ func (l *LoggerOverlay) ReadAt(ctx context.Context, p []byte, off int64) (int, e
 	return n, err
 }
 
+// WriteAt implements io.WriterAt — off stays int64.
 func (l *LoggerOverlay) WriteAt(p []byte, off int64) (int, error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -49,11 +50,11 @@ func (l *LoggerOverlay) WriteAt(p []byte, off int64) (int, error) {
 	return n, err
 }
 
-func (l *LoggerOverlay) Size(ctx context.Context) (int64, error) {
+func (l *LoggerOverlay) Size(ctx context.Context) (int, error) {
 	return l.overlay.Size(ctx)
 }
 
-func (l *LoggerOverlay) BlockSize() int64 {
+func (l *LoggerOverlay) BlockSize() int {
 	return l.overlay.BlockSize()
 }
 
@@ -69,6 +70,6 @@ func (l *LoggerOverlay) EjectCache() (*block.Cache, error) {
 	return l.overlay.EjectCache()
 }
 
-func (l *LoggerOverlay) Slice(ctx context.Context, off, length int64) ([]byte, error) {
+func (l *LoggerOverlay) Slice(ctx context.Context, off, length int) ([]byte, error) {
 	return l.overlay.Slice(ctx, off, length)
 }

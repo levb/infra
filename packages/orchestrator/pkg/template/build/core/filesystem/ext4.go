@@ -186,7 +186,7 @@ func Shrink(ctx context.Context, rootfsPath string) (int64, error) {
 	return stat.Size(), err
 }
 
-func GetFreeSpace(ctx context.Context, rootfsPath string, blockSize int64) (int64, error) {
+func GetFreeSpace(ctx context.Context, rootfsPath string, blockSize int) (int64, error) {
 	_, statSpan := tracer.Start(ctx, "stat-ext4-file")
 	defer statSpan.End()
 
@@ -212,7 +212,7 @@ func GetFreeSpace(ctx context.Context, rootfsPath string, blockSize int64) (int6
 		return 0, fmt.Errorf("could not parse reserved blocks: %w", err)
 	}
 
-	freeBytes := (freeBlocks - reservedBlocks) * blockSize
+	freeBytes := (freeBlocks - reservedBlocks) * int64(blockSize)
 
 	return freeBytes, nil
 }

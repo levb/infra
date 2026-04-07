@@ -86,7 +86,7 @@ func main() {
 	fmt.Printf("========\n")
 
 	for _, mapping := range baseHeader.Mapping {
-		fmt.Println(mapping.Format(baseHeader.Metadata.BlockSize))
+		fmt.Println(mapping.Format(int(baseHeader.Metadata.BlockSize)))
 	}
 
 	if *visualize {
@@ -97,8 +97,8 @@ func main() {
 		fmt.Println(
 			header.Visualize(
 				baseHeader.Mapping,
-				baseHeader.Metadata.Size,
-				baseHeader.Metadata.BlockSize,
+				int(baseHeader.Metadata.Size),
+				int(baseHeader.Metadata.BlockSize),
 				128,
 				bottomLayers,
 				&map[uuid.UUID]struct{}{
@@ -108,7 +108,7 @@ func main() {
 		)
 	}
 
-	if err := header.ValidateMappings(baseHeader.Mapping, baseHeader.Metadata.Size, baseHeader.Metadata.BlockSize); err != nil {
+	if err := header.ValidateMappings(baseHeader.Mapping, int(baseHeader.Metadata.Size), int(baseHeader.Metadata.BlockSize)); err != nil {
 		log.Fatalf("failed to validate base header: %s", err)
 	}
 
@@ -125,7 +125,7 @@ func main() {
 	}
 
 	for _, mapping := range onlyDiffMappings {
-		fmt.Println(mapping.Format(baseHeader.Metadata.BlockSize))
+		fmt.Println(mapping.Format(int(baseHeader.Metadata.BlockSize)))
 	}
 
 	if *visualize {
@@ -133,8 +133,8 @@ func main() {
 		fmt.Println(
 			header.Visualize(
 				onlyDiffMappings,
-				baseHeader.Metadata.Size,
-				baseHeader.Metadata.BlockSize,
+				int(baseHeader.Metadata.Size),
+				int(baseHeader.Metadata.BlockSize),
 				128,
 				nil,
 				header.Layers(onlyDiffMappings),
@@ -151,7 +151,7 @@ func main() {
 	fmt.Printf("========\n")
 
 	for _, mapping := range mergedHeader {
-		fmt.Println(mapping.Format(baseHeader.Metadata.BlockSize))
+		fmt.Println(mapping.Format(int(baseHeader.Metadata.BlockSize)))
 	}
 
 	if *visualize {
@@ -162,8 +162,8 @@ func main() {
 		fmt.Println(
 			header.Visualize(
 				mergedHeader,
-				baseHeader.Metadata.Size,
-				baseHeader.Metadata.BlockSize,
+				int(baseHeader.Metadata.Size),
+				int(baseHeader.Metadata.BlockSize),
 				128,
 				bottomLayers,
 				header.Layers(onlyDiffMappings),
@@ -171,7 +171,7 @@ func main() {
 		)
 	}
 
-	if err := header.ValidateMappings(mergedHeader, baseHeader.Metadata.Size, baseHeader.Metadata.BlockSize); err != nil {
+	if err := header.ValidateMappings(mergedHeader, int(baseHeader.Metadata.Size), int(baseHeader.Metadata.BlockSize)); err != nil {
 		fmt.Fprintf(os.Stderr, "\n\n[VALIDATION ERROR]: failed to validate merged header: %s", err)
 	}
 }

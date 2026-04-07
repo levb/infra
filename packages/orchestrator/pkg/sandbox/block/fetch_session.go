@@ -9,8 +9,8 @@ import (
 
 type fetchSession struct {
 	// chunk is what we are fetching, can be >= 1 block. chunkOff/chunkLen are absolute offsets in U-space.
-	chunkOff int64
-	chunkLen int64
+	chunkOff int
+	chunkLen int
 	cache    *Cache
 
 	mu   sync.Mutex
@@ -31,7 +31,7 @@ func (s *fetchSession) terminated() bool {
 	return s.done
 }
 
-func newFetchSession(chunkOff, chunkLen int64, cache *Cache) *fetchSession {
+func newFetchSession(chunkOff, chunkLen int, cache *Cache) *fetchSession {
 	s := &fetchSession{
 		chunkOff: chunkOff,
 		chunkLen: chunkLen,
@@ -44,13 +44,13 @@ func newFetchSession(chunkOff, chunkLen int64, cache *Cache) *fetchSession {
 
 // registerAndWait blocks until the block at blockOff is cached, the session
 // terminates, or ctx is cancelled. Each caller requests exactly one block.
-func (s *fetchSession) registerAndWait(ctx context.Context, blockOff int64) error {
+func (s *fetchSession) registerAndWait(ctx context.Context, blockOff int) error {
 	blockSize := s.cache.blockSize
 
 	// endByte is the byte offset (relative to chunkOff) that must be ready
 	// for our block to be fully written.
 	relEnd := blockOff + blockSize - s.chunkOff
-	endByte := min(relEnd, s.chunkLen)
+	endByte := int64(min(relEnd, s.chunkLen))
 
 	// Lock-free fast path: bytesReady only increases, so >= endByte
 	// guarantees data is available.
@@ -112,7 +112,7 @@ func (s *fetchSession) advance(bytesReady int64) {
 // setDone marks the session as successfully completed and wakes all waiters.
 func (s *fetchSession) setDone() {
 	s.mu.Lock()
-	s.bytesReady.Store(s.chunkLen)
+	s.bytesReady.Store(int64(s.chunkLen))
 	s.done = true
 	s.mu.Unlock()
 

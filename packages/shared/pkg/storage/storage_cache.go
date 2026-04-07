@@ -41,7 +41,7 @@ func skipCacheWriteback(ctx context.Context) bool {
 
 type cache struct {
 	rootPath  string
-	chunkSize int64
+	chunkSize int
 	inner     StorageProvider
 	flags     *featureflags.Client
 

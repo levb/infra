@@ -50,7 +50,7 @@ func (f *LocalDiffFile) Close() error {
 }
 
 func (f *LocalDiffFile) CloseToDiff(
-	blockSize int64,
+	blockSize int,
 ) (Diff, error) {
 	defer f.File.Close()
 
@@ -71,7 +71,7 @@ func (f *LocalDiffFile) CloseToDiff(
 	return newLocalDiff(
 		f.cacheKey,
 		f.cachePath,
-		size.Size(),
+		int(size.Size()),
 		blockSize,
 	)
 }
@@ -97,7 +97,7 @@ func newLocalDiff(
 	cacheKey DiffStoreKey,
 	cachePath string,
 	size,
-	blockSize int64,
+	blockSize int,
 ) (Diff, error) {
 	cache, err := block.NewCache(size, blockSize, cachePath, true)
 	if err != nil {
@@ -115,19 +115,19 @@ func (b *localDiff) Close() error {
 	return b.cache.Close()
 }
 
-func (b *localDiff) ReadAt(_ context.Context, p []byte, off int64, _ *storage.FrameTable) (int, error) {
+func (b *localDiff) ReadAt(_ context.Context, p []byte, off int, _ *storage.FrameTable) (int, error) {
 	return b.cache.ReadAt(p, off)
 }
 
-func (b *localDiff) Slice(_ context.Context, off, length int64, _ *storage.FrameTable) ([]byte, error) {
+func (b *localDiff) Slice(_ context.Context, off, length int, _ *storage.FrameTable) ([]byte, error) {
 	return b.cache.Slice(off, length)
 }
 
-func (b *localDiff) Size(_ context.Context) (int64, error) {
+func (b *localDiff) Size(_ context.Context) (int, error) {
 	return b.FileSize()
 }
 
-func (b *localDiff) FileSize() (int64, error) {
+func (b *localDiff) FileSize() (int, error) {
 	return b.cache.FileSize()
 }
 
@@ -139,6 +139,6 @@ func (b *localDiff) Init(context.Context) error {
 	return nil
 }
 
-func (b *localDiff) BlockSize() int64 {
+func (b *localDiff) BlockSize() int {
 	return b.cache.BlockSize()
 }

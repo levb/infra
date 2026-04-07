@@ -12,15 +12,15 @@ import (
 )
 
 type NoopMemory struct {
-	size      int64
-	blockSize int64
+	size      int
+	blockSize int
 
 	exit *utils.ErrorOnce
 }
 
 var _ MemoryBackend = (*NoopMemory)(nil)
 
-func NewNoopMemory(size, blockSize int64) *NoopMemory {
+func NewNoopMemory(size, blockSize int) *NoopMemory {
 	return &NoopMemory{
 		size:      size,
 		blockSize: blockSize,

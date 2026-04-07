@@ -20,7 +20,7 @@ type Local struct {
 
 var _ ReadonlyDevice = (*Local)(nil)
 
-func NewLocal(path string, blockSize int64, buildID uuid.UUID) (*Local, error) {
+func NewLocal(path string, blockSize int, buildID uuid.UUID) (*Local, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
@@ -35,8 +35,8 @@ func NewLocal(path string, blockSize int64, buildID uuid.UUID) (*Local, error) {
 
 	h, err := header.NewHeader(header.NewTemplateMetadata(
 		buildID,
-		uint64(blockSize),
-		uint64(info.Size()),
+		blockSize,
+		int(info.Size()),
 	), nil)
 	if err != nil {
 		err = errors.Join(err, f.Close())
@@ -55,8 +55,8 @@ func (d *Local) Path() string {
 	return d.path
 }
 
-func (d *Local) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
-	slice, err := d.Slice(ctx, off, int64(len(p)))
+func (d *Local) ReadAt(ctx context.Context, p []byte, off int) (int, error) {
+	slice, err := d.Slice(ctx, off, len(p))
 	if err != nil {
 		return 0, fmt.Errorf("failed to slice mmap: %w", err)
 	}
@@ -64,12 +64,12 @@ func (d *Local) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
 	return copy(p, slice), nil
 }
 
-func (d *Local) Size(_ context.Context) (int64, error) {
-	return int64(d.header.Metadata.Size), nil
+func (d *Local) Size(_ context.Context) (int, error) {
+	return int(d.header.Metadata.Size), nil
 }
 
-func (d *Local) BlockSize() int64 {
-	return int64(d.header.Metadata.BlockSize)
+func (d *Local) BlockSize() int {
+	return int(d.header.Metadata.BlockSize)
 }
 
 func (d *Local) Close() (e error) {
@@ -81,16 +81,16 @@ func (d *Local) Close() (e error) {
 	return nil
 }
 
-func (d *Local) Slice(_ context.Context, off, length int64) ([]byte, error) {
+func (d *Local) Slice(_ context.Context, off, length int) ([]byte, error) {
 	end := off + length
-	size := int64(d.header.Metadata.Size)
+	size := int(d.header.Metadata.Size)
 	if end > size {
 		end = size
 		length = end - off
 	}
 
 	out := make([]byte, length)
-	_, err := d.f.ReadAt(out, off)
+	_, err := d.f.ReadAt(out, int64(off))
 	if err != nil {
 		return nil, err
 	}

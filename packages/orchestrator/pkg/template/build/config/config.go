@@ -66,7 +66,7 @@ type TemplateConfig struct {
 	KernelVersion string
 }
 
-func MemfilePageSize(hugePages bool) int64 {
+func MemfilePageSize(hugePages bool) int {
 	if hugePages {
 		return header.HugepageSize
 	}
@@ -74,6 +74,6 @@ func MemfilePageSize(hugePages bool) int64 {
 	return header.PageSize
 }
 
-func (e TemplateConfig) RootfsBlockSize() int64 {
+func (e TemplateConfig) RootfsBlockSize() int {
 	return header.RootfsBlockSize
 }

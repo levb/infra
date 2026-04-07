@@ -15,10 +15,10 @@ import (
 // The list of block mappings will be in order of increasing Start, covering the entire file
 type BuildMap struct {
 	// Offset defines which block of the current layer this mapping starts at
-	Offset             uint64
-	Length             uint64
+	Offset             int
+	Length             int
 	BuildId            uuid.UUID
-	BuildStorageOffset uint64
+	BuildStorageOffset int
 	FrameTable         *storage.FrameTable
 }
 
@@ -42,8 +42,8 @@ func (mapping *BuildMap) SetFrames(frameTable *storage.FrameTable, from int) (in
 	}
 
 	mappedRange := storage.Range{
-		Start:  int64(mapping.BuildStorageOffset),
-		Length: int(mapping.Length),
+		Start:  mapping.BuildStorageOffset,
+		Length: mapping.Length,
 	}
 
 	subset, next := frameTable.Subset(mappedRange, from)
@@ -60,13 +60,13 @@ func (mapping *BuildMap) SetFrames(frameTable *storage.FrameTable, from int) (in
 func CreateMapping(
 	buildId *uuid.UUID,
 	dirty *bitset.BitSet,
-	blockSize int64,
+	blockSize int,
 ) []*BuildMap {
 	var mappings []*BuildMap
 
 	var startBlock uint
 	var blockLength uint
-	var buildStorageOffset uint64
+	var buildStorageOffset int
 
 	for blockIdx, e := dirty.NextSet(0); e; blockIdx, e = dirty.NextSet(blockIdx + 1) {
 		if startBlock+blockLength == blockIdx {
@@ -77,9 +77,9 @@ func CreateMapping(
 
 		if blockLength > 0 {
 			m := &BuildMap{
-				Offset:             uint64(startBlock) * uint64(blockSize),
+				Offset:             int(startBlock) * blockSize,
 				BuildId:            *buildId,
-				Length:             uint64(blockLength) * uint64(blockSize),
+				Length:             int(blockLength) * blockSize,
 				BuildStorageOffset: buildStorageOffset,
 			}
 
@@ -94,9 +94,9 @@ func CreateMapping(
 
 	if blockLength > 0 {
 		mappings = append(mappings, &BuildMap{
-			Offset:             uint64(startBlock) * uint64(blockSize),
+			Offset:             int(startBlock) * blockSize,
 			BuildId:            *buildId,
-			Length:             uint64(blockLength) * uint64(blockSize),
+			Length:             int(blockLength) * blockSize,
 			BuildStorageOffset: buildStorageOffset,
 		})
 	}
@@ -179,7 +179,7 @@ func MergeMappings(
 		// add diff to the result
 		// if right part is not empty, update baseMapping with it, otherwise remove it from the baseMapping
 		if diff.Offset >= base.Offset && diff.Offset+diff.Length <= base.Offset+base.Length {
-			leftBaseLength := int64(diff.Offset) - int64(base.Offset)
+			leftBaseLength := diff.Offset - base.Offset
 
 			// Track frame cursor so the right split starts scanning where the left stopped,
 			// avoiding O(N²) rescanning of the base's FrameTable.
@@ -187,10 +187,9 @@ func MergeMappings(
 
 			if leftBaseLength > 0 {
 				leftBase := &BuildMap{
-					Offset:  base.Offset,
-					Length:  uint64(leftBaseLength),
-					BuildId: base.BuildId,
-					// the build storage offset is the same as the base mapping
+					Offset:             base.Offset,
+					Length:             leftBaseLength,
+					BuildId:            base.BuildId,
 					BuildStorageOffset: base.BuildStorageOffset,
 				}
 				var err error
@@ -206,15 +205,15 @@ func MergeMappings(
 
 			diffIdx++
 
-			rightBaseShift := int64(diff.Offset) + int64(diff.Length) - int64(base.Offset)
-			rightBaseLength := int64(base.Length) - rightBaseShift
+			rightBaseShift := diff.Offset + diff.Length - base.Offset
+			rightBaseLength := base.Length - rightBaseShift
 
 			if rightBaseLength > 0 {
 				rightBase := &BuildMap{
-					Offset:             base.Offset + uint64(rightBaseShift),
-					Length:             uint64(rightBaseLength),
+					Offset:             base.Offset + rightBaseShift,
+					Length:             rightBaseLength,
 					BuildId:            base.BuildId,
-					BuildStorageOffset: base.BuildStorageOffset + uint64(rightBaseShift),
+					BuildStorageOffset: base.BuildStorageOffset + rightBaseShift,
 				}
 				if _, err := rightBase.SetFrames(base.FrameTable, frameCursor); err != nil {
 					return nil, fmt.Errorf("set frames for right split at offset %d: %w", rightBase.Offset, err)
@@ -236,15 +235,15 @@ func MergeMappings(
 
 			diffIdx++
 
-			rightBaseShift := int64(diff.Offset) + int64(diff.Length) - int64(base.Offset)
-			rightBaseLength := int64(base.Length) - rightBaseShift
+			rightBaseShift := diff.Offset + diff.Length - base.Offset
+			rightBaseLength := base.Length - rightBaseShift
 
 			if rightBaseLength > 0 {
 				rightBase := &BuildMap{
-					Offset:             base.Offset + uint64(rightBaseShift),
-					Length:             uint64(rightBaseLength),
+					Offset:             base.Offset + rightBaseShift,
+					Length:             rightBaseLength,
 					BuildId:            base.BuildId,
-					BuildStorageOffset: base.BuildStorageOffset + uint64(rightBaseShift),
+					BuildStorageOffset: base.BuildStorageOffset + rightBaseShift,
 				}
 				if _, err := rightBase.SetFrames(base.FrameTable, 0); err != nil {
 					return nil, fmt.Errorf("set frames for right split at offset %d: %w", rightBase.Offset, err)
@@ -261,12 +260,12 @@ func MergeMappings(
 		// diff is after base and there is overlap
 		// add the left part of base to the result, it should not be empty because of the check above
 		if diff.Offset > base.Offset {
-			leftBaseLength := int64(diff.Offset) - int64(base.Offset)
+			leftBaseLength := diff.Offset - base.Offset
 
 			if leftBaseLength > 0 {
 				leftBase := &BuildMap{
 					Offset:             base.Offset,
-					Length:             uint64(leftBaseLength),
+					Length:             leftBaseLength,
 					BuildId:            base.BuildId,
 					BuildStorageOffset: base.BuildStorageOffset,
 				}

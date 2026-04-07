@@ -239,10 +239,10 @@ func (s *DiffStore) deleteOldestFromCache(ctx context.Context) (suc bool, e erro
 		sfSize, err := item.Value().FileSize()
 		if err != nil {
 			logger.L().Warn(ctx, "failed to get size of deleted item from cache", zap.Error(err))
-			sfSize = fallbackDiffSize
+			s.scheduleDelete(ctx, item.Key(), fallbackDiffSize)
+		} else {
+			s.scheduleDelete(ctx, item.Key(), int64(sfSize))
 		}
-
-		s.scheduleDelete(ctx, item.Key(), sfSize)
 
 		success = true
 

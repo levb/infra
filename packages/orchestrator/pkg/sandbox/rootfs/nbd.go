@@ -25,7 +25,7 @@ type NBDProvider struct {
 
 	ready *utils.SetOnce[string]
 
-	blockSize int64
+	blockSize int
 
 	finishedOperations chan struct{}
 	devicePool         *nbd.DevicePool

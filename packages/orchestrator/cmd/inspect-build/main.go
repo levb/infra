@@ -104,7 +104,7 @@ func printUsage() {
 
 func printHeader(h *header.Header, source string) {
 	// Validate mappings
-	err := header.ValidateMappings(h.Mapping, h.Metadata.Size, h.Metadata.BlockSize)
+	err := header.ValidateMappings(h.Mapping, int(h.Metadata.Size), int(h.Metadata.BlockSize))
 	if err != nil {
 		fmt.Printf("\n⚠️  WARNING: Mapping validation failed!\n%s\n\n", err)
 	}
@@ -132,7 +132,7 @@ func printHeader(h *header.Header, source string) {
 	fmt.Printf("=======\n")
 
 	for _, mapping := range h.Mapping {
-		fmt.Println(mapping.Format(h.Metadata.BlockSize))
+		fmt.Println(mapping.Format(int(h.Metadata.BlockSize)))
 	}
 
 	fmt.Printf("\nMAPPING SUMMARY\n")

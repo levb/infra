@@ -59,7 +59,7 @@ type featureFlagsClient interface {
 
 type cachedSeekable struct {
 	path      string
-	chunkSize int64
+	chunkSize int
 	inner     Seekable
 	flags     featureFlagsClient
 	tracer    trace.Tracer
@@ -72,12 +72,12 @@ var (
 	_ StreamingReader = (*cachedSeekable)(nil)
 )
 
-func (c *cachedSeekable) OpenRangeReader(ctx context.Context, off int64, length int64, frameTable *FrameTable) (io.ReadCloser, error) {
+func (c *cachedSeekable) OpenRangeReader(ctx context.Context, off int, length int, frameTable *FrameTable) (io.ReadCloser, error) {
 	compressed := frameTable.IsCompressed()
 
 	ctx, span := c.tracer.Start(ctx, "read", trace.WithAttributes(
-		attribute.Int64("offset", off),
-		attribute.Int64("length", length),
+		attribute.Int("offset", off),
+		attribute.Int("length", length),
 		attribute.Bool("compressed", compressed),
 	))
 
@@ -111,10 +111,10 @@ func (c *cachedSeekable) OpenRangeReader(ctx context.Context, off int64, length 
 
 	fp, err := os.Open(chunkPath)
 	if err == nil {
-		recordCacheRead(ctx, true, length, cacheTypeSeekable, cacheOpOpenRangeReader)
-		timer.Success(ctx, length)
+		recordCacheRead(ctx, true, int64(length), cacheTypeSeekable, cacheOpOpenRangeReader)
+		timer.Success(ctx, int64(length))
 
-		rc := io.ReadCloser(&fsRangeReadCloser{Reader: io.NewSectionReader(fp, 0, length), file: fp})
+		rc := io.ReadCloser(&fsRangeReadCloser{Reader: io.NewSectionReader(fp, 0, int64(length)), file: fp})
 		rc = withSpan(rc, span)
 
 		return rc, nil
@@ -134,7 +134,7 @@ func (c *cachedSeekable) OpenRangeReader(ctx context.Context, off int64, length 
 		return nil, fmt.Errorf("failed to open inner range reader: %w", err)
 	}
 
-	recordCacheRead(ctx, false, length, cacheTypeSeekable, cacheOpOpenRangeReader)
+	recordCacheRead(ctx, false, int64(length), cacheTypeSeekable, cacheOpOpenRangeReader)
 
 	if !skipCacheWriteback(ctx) {
 		rc = newCacheWriteThroughReader(rc, c, ctx, off, length, chunkPath)
@@ -170,7 +170,7 @@ func (r *spanReadCloser) Close() error {
 // newCacheWriteThroughReader wraps a reader, buffering all data read through it.
 // On Close, it asynchronously writes the buffered data to the NFS cache only
 // if the total bytes read match the expected length (to avoid caching truncated data).
-func newCacheWriteThroughReader(inner io.ReadCloser, cache *cachedSeekable, ctx context.Context, off, expectedLen int64, chunkPath string) io.ReadCloser {
+func newCacheWriteThroughReader(inner io.ReadCloser, cache *cachedSeekable, ctx context.Context, off, expectedLen int, chunkPath string) io.ReadCloser {
 	return &cacheWriteThroughReader{
 		inner:       inner,
 		buf:         bytes.NewBuffer(make([]byte, 0, expectedLen)),
@@ -187,8 +187,8 @@ type cacheWriteThroughReader struct {
 	buf         *bytes.Buffer
 	cache       *cachedSeekable
 	ctx         context.Context //nolint:containedctx // needed for async cache write-back in Close
-	off         int64
-	expectedLen int64
+	off         int
+	expectedLen int
 	chunkPath   string
 }
 
@@ -208,7 +208,7 @@ func (r *cacheWriteThroughReader) Close() error {
 	// Unlike ReadAt where io.EOF can justify a short read (last chunk),
 	// a streaming reader always ends with EOF regardless of whether the
 	// data was truncated, so the byte count is the only reliable check.
-	if isCompleteRead(r.buf.Len(), int(r.expectedLen), nil) {
+	if isCompleteRead(r.buf.Len(), r.expectedLen, nil) {
 		data := make([]byte, r.buf.Len())
 		copy(data, r.buf.Bytes())
 
@@ -226,7 +226,7 @@ func (r *cacheWriteThroughReader) Close() error {
 	return closeErr
 }
 
-func (c *cachedSeekable) Size(ctx context.Context) (n int64, e error) {
+func (c *cachedSeekable) Size(ctx context.Context) (n int, e error) {
 	ctx, span := c.tracer.Start(ctx, "get size of object")
 	defer func() {
 		recordError(span, e)
@@ -294,7 +294,7 @@ func (c *cachedSeekable) StoreFile(ctx context.Context, path string, cfg *Compre
 				return
 			}
 
-			recordCacheWrite(ctx, size, cacheTypeSeekable, cacheOpWriteFromFileSystem)
+			recordCacheWrite(ctx, int64(size), cacheTypeSeekable, cacheOpWriteFromFileSystem)
 
 			if err := c.writeLocalSize(ctx, size); err != nil {
 				recordError(span, err)
@@ -312,7 +312,7 @@ func (c *cachedSeekable) goCtx(ctx context.Context, fn func(context.Context)) {
 	})
 }
 
-func (c *cachedSeekable) makeChunkFilename(offset int64) string {
+func (c *cachedSeekable) makeChunkFilename(offset int) string {
 	return fmt.Sprintf("%s/%012d-%d.bin", c.path, offset/c.chunkSize, c.chunkSize)
 }
 
@@ -324,14 +324,14 @@ func (c *cachedSeekable) sizeFilename() string {
 	return filepath.Join(c.path, "size.txt")
 }
 
-func (c *cachedSeekable) readLocalSize(context.Context) (int64, error) {
+func (c *cachedSeekable) readLocalSize(context.Context) (int, error) {
 	filename := c.sizeFilename()
 	content, err := os.ReadFile(filename)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read cached size: %w", err)
 	}
 
-	size, err := strconv.ParseInt(string(content), 10, 64)
+	size, err := strconv.Atoi(string(content))
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse cached size: %w", err)
 	}
@@ -339,7 +339,7 @@ func (c *cachedSeekable) readLocalSize(context.Context) (int64, error) {
 	return size, nil
 }
 
-func (c *cachedSeekable) validateReadParams(buffSize, offset int64) error {
+func (c *cachedSeekable) validateReadParams(buffSize, offset int) error {
 	if buffSize == 0 {
 		return ErrBufferTooSmall
 	}
@@ -356,7 +356,7 @@ func (c *cachedSeekable) validateReadParams(buffSize, offset int64) error {
 	return nil
 }
 
-func (c *cachedSeekable) writeToCache(ctx context.Context, offset int64, finalPath string, bytes []byte) error {
+func (c *cachedSeekable) writeToCache(ctx context.Context, offset int, finalPath string, bytes []byte) error {
 	writeTimer := cacheSlabWriteTimerFactory.Begin()
 
 	// Try to acquire lock for this chunk write to NFS cache
@@ -375,7 +375,7 @@ func (c *cachedSeekable) writeToCache(ctx context.Context, offset int64, finalPa
 		err := lock.ReleaseLock(ctx, lockFile)
 		if err != nil {
 			logger.L().Warn(ctx, "failed to release lock after writing to cache",
-				zap.Int64("offset", offset),
+				zap.Int("offset", offset),
 				zap.String("path", finalPath),
 				zap.Error(err))
 		}
@@ -402,7 +402,7 @@ func (c *cachedSeekable) writeToCache(ctx context.Context, offset int64, finalPa
 	return nil
 }
 
-func (c *cachedSeekable) writeLocalSize(ctx context.Context, size int64) error {
+func (c *cachedSeekable) writeLocalSize(ctx context.Context, size int) error {
 	finalFilename := c.sizeFilename()
 
 	// Try to acquire lock for this chunk write to NFS cache
@@ -416,7 +416,7 @@ func (c *cachedSeekable) writeLocalSize(ctx context.Context, size int64) error {
 		err := lock.ReleaseLock(ctx, lockFile)
 		if err != nil {
 			logger.L().Warn(ctx, "failed to release lock after writing chunk to cache",
-				zap.Int64("size", size),
+				zap.Int("size", size),
 				zap.String("path", finalFilename),
 				zap.Error(err))
 		}
@@ -437,7 +437,7 @@ func (c *cachedSeekable) writeLocalSize(ctx context.Context, size int64) error {
 	return nil
 }
 
-func (c *cachedSeekable) createCacheBlocksFromFile(ctx context.Context, inputPath string) (count int64, err error) {
+func (c *cachedSeekable) createCacheBlocksFromFile(ctx context.Context, inputPath string) (count int, err error) {
 	ctx, span := c.tracer.Start(ctx, "create cache blocks from filesystem")
 	defer func() {
 		recordError(span, err)
@@ -455,7 +455,7 @@ func (c *cachedSeekable) createCacheBlocksFromFile(ctx context.Context, inputPat
 		return 0, fmt.Errorf("failed to stat input file: %w", err)
 	}
 
-	totalSize := stat.Size()
+	totalSize := int(stat.Size())
 
 	maxConcurrency := c.flags.IntFlag(ctx, featureflags.MaxCacheWriterConcurrencyFlag)
 	if maxConcurrency <= 0 {
@@ -465,7 +465,7 @@ func (c *cachedSeekable) createCacheBlocksFromFile(ctx context.Context, inputPat
 	}
 
 	ec := utils.NewErrorCollector(maxConcurrency)
-	for offset := int64(0); offset < totalSize; offset += c.chunkSize {
+	for offset := 0; offset < totalSize; offset += c.chunkSize {
 		ec.Go(ctx, func() error {
 			if err := c.writeChunkFromFile(ctx, offset, input); err != nil {
 				return fmt.Errorf("failed to write chunk file at offset %d: %w", offset, err)
@@ -483,9 +483,9 @@ func (c *cachedSeekable) createCacheBlocksFromFile(ctx context.Context, inputPat
 // writeChunkFromFile writes a piece of a local file. It does not need to worry about race conditions, as it will only
 // be called in the build layer, which cannot be built on multiple machines at the same time, or multiple times on the
 // same machine..
-func (c *cachedSeekable) writeChunkFromFile(ctx context.Context, offset int64, input *os.File) (err error) {
+func (c *cachedSeekable) writeChunkFromFile(ctx context.Context, offset int, input *os.File) (err error) {
 	_, span := c.tracer.Start(ctx, "write chunk from file at offset", trace.WithAttributes(
-		attribute.Int64("offset", offset),
+		attribute.Int("offset", offset),
 	))
 	defer func() {
 		recordError(span, err)
@@ -506,7 +506,7 @@ func (c *cachedSeekable) writeChunkFromFile(ctx context.Context, offset int64, i
 	defer utils.Cleanup(ctx, "failed to close file", output.Close)
 
 	offsetReader := newOffsetReader(input, offset)
-	count, err := io.CopyN(output, offsetReader, c.chunkSize)
+	count, err := io.CopyN(output, offsetReader, int64(c.chunkSize))
 	if ignoreEOF(err) != nil {
 		writeTimer.Failure(ctx, count)
 		safelyRemoveFile(ctx, chunkPath)

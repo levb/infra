@@ -14,7 +14,7 @@ func TestTracker_AddAndHas(t *testing.T) {
 	const pageSize = 4096
 	tr := NewTracker(pageSize)
 
-	offset := int64(pageSize * 4)
+	offset := pageSize * 4
 
 	// Initially should not be marked
 	assert.False(t, tr.Has(offset), "Expected offset %d not to be marked initially", offset)
@@ -24,7 +24,7 @@ func TestTracker_AddAndHas(t *testing.T) {
 	assert.True(t, tr.Has(offset), "Expected offset %d to be marked after Add", offset)
 
 	// Other offsets should not be marked
-	otherOffsets := []int64{
+	otherOffsets := []int{
 		0, pageSize, 2 * pageSize, 3 * pageSize, 5 * pageSize, 10 * pageSize,
 	}
 	for _, other := range otherOffsets {
@@ -40,7 +40,7 @@ func TestTracker_Reset(t *testing.T) {
 	const pageSize = 4096
 	tr := NewTracker(pageSize)
 
-	offset := int64(pageSize * 4)
+	offset := pageSize * 4
 
 	// Add offset and verify it's marked
 	tr.Add(offset)
@@ -51,7 +51,7 @@ func TestTracker_Reset(t *testing.T) {
 	assert.False(t, tr.Has(offset), "Expected offset %d to be cleared after Reset", offset)
 
 	// Offsets that were never set should also remain unset
-	otherOffsets := []int64{0, pageSize, 2 * pageSize, pageSize * 10}
+	otherOffsets := []int{0, pageSize, 2 * pageSize, pageSize * 10}
 	for _, other := range otherOffsets {
 		assert.False(t, tr.Has(other), "Expected offset %d to not be marked after Reset", other)
 	}
@@ -62,7 +62,7 @@ func TestTracker_MultipleOffsets(t *testing.T) {
 	const pageSize = 4096
 	tr := NewTracker(pageSize)
 
-	offsets := []int64{0, pageSize, 2 * pageSize, 10 * pageSize}
+	offsets := []int{0, pageSize, 2 * pageSize, 10 * pageSize}
 
 	// Add multiple offsets
 	for _, o := range offsets {
@@ -76,7 +76,7 @@ func TestTracker_MultipleOffsets(t *testing.T) {
 
 	// Check offsets in between added offsets are not set
 	// (Offsets that aren't inside any marked block should not be marked)
-	nonSetOffsets := []int64{
+	nonSetOffsets := []int{
 		3 * pageSize,
 		4 * pageSize,
 		5 * pageSize,
@@ -96,7 +96,7 @@ func TestTracker_ResetClearsAll(t *testing.T) {
 	const pageSize = 4096
 	tr := NewTracker(pageSize)
 
-	offsets := []int64{0, pageSize, 2 * pageSize, 10 * pageSize}
+	offsets := []int{0, pageSize, 2 * pageSize, 10 * pageSize}
 
 	// Add multiple offsets
 	for _, o := range offsets {
@@ -111,7 +111,7 @@ func TestTracker_ResetClearsAll(t *testing.T) {
 		assert.False(t, tr.Has(o), "Expected offset %d to be cleared after Reset", o)
 	}
 	// Check unrelated offsets also not marked
-	moreOffsets := []int64{3 * pageSize, 7 * pageSize, 100, 4095}
+	moreOffsets := []int{3 * pageSize, 7 * pageSize, 100, 4095}
 	for _, o := range moreOffsets {
 		assert.False(t, tr.Has(o), "Expected offset %d to not be marked after Reset", o)
 	}
@@ -123,22 +123,22 @@ func TestTracker_MisalignedOffset(t *testing.T) {
 	tr := NewTracker(pageSize)
 
 	// Test with misaligned offset
-	misalignedOffset := int64(123)
+	misalignedOffset := 123
 	tr.Add(misalignedOffset)
 
 	// Should be set for the block containing the offset—that is, block 0 (0..4095)
 	assert.True(t, tr.Has(misalignedOffset), "Expected misaligned offset %d to be marked (should mark its containing block)", misalignedOffset)
 
 	// Now check that any offset in the same block is also considered marked
-	anotherOffsetInSameBlock := int64(1000)
+	anotherOffsetInSameBlock := 1000
 	assert.True(t, tr.Has(anotherOffsetInSameBlock), "Expected offset %d to be marked as in same block as %d", anotherOffsetInSameBlock, misalignedOffset)
 
 	// But not for a different block
-	offsetInNextBlock := int64(pageSize)
+	offsetInNextBlock := pageSize
 	assert.False(t, tr.Has(offsetInNextBlock), "Did not expect offset %d to be marked", offsetInNextBlock)
 
 	// And not far outside any set block
-	offsetFar := int64(2 * pageSize)
+	offsetFar := 2 * pageSize
 	assert.False(t, tr.Has(offsetFar), "Did not expect offset %d to be marked", offsetFar)
 }
 
@@ -149,7 +149,7 @@ func TestTracker_Offsets(t *testing.T) {
 
 	numOffsets := 300
 
-	offsetsMap := map[int64]struct{}{}
+	offsetsMap := map[int]struct{}{}
 
 	for range numOffsets {
 		select {
@@ -158,7 +158,7 @@ func TestTracker_Offsets(t *testing.T) {
 		default:
 		}
 
-		base := int64(rand.Intn(121)) // 0..120
+		base := rand.Intn(121) // 0..120
 		offset := base * pageSize
 
 		offsetsMap[offset] = struct{}{}

@@ -16,25 +16,25 @@ func (BytesNotAvailableError) Error() string {
 }
 
 type FramedReader interface {
-	ReadAt(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error)
+	ReadAt(ctx context.Context, p []byte, off int, ft *storage.FrameTable) (int, error)
 }
 
 type FramedSlicer interface {
-	Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error)
+	Slice(ctx context.Context, off, length int, ft *storage.FrameTable) ([]byte, error)
 }
 
 // Slicer provides plain block reads (no FrameTable). Used by UFFD/NBD.
 type Slicer interface {
-	Slice(ctx context.Context, off, length int64) ([]byte, error)
-	BlockSize() int64
+	Slice(ctx context.Context, off, length int) ([]byte, error)
+	BlockSize() int
 }
 
 type ReadonlyDevice interface {
-	ReadAt(ctx context.Context, p []byte, off int64) (int, error)
-	Size(ctx context.Context) (int64, error)
+	ReadAt(ctx context.Context, p []byte, off int) (int, error)
+	Size(ctx context.Context) (int, error)
 	io.Closer
 	Slicer
-	BlockSize() int64
+	BlockSize() int
 	Header() *header.Header
 }
 

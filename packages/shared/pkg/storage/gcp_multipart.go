@@ -395,7 +395,7 @@ func (m *MultipartUploader) UploadFileInParallel(ctx context.Context, filePath s
 	if err != nil {
 		return 0, fmt.Errorf("failed to get file info: %w", err)
 	}
-	fileSize := fileInfo.Size()
+	fileSize := int(fileInfo.Size())
 
 	// Calculate number of parts
 	numParts := int(math.Ceil(float64(fileSize) / float64(gcpMultipartUploadChunkSize)))
@@ -418,10 +418,10 @@ func (m *MultipartUploader) UploadFileInParallel(ctx context.Context, filePath s
 		return 0, fmt.Errorf("failed to complete upload: %w", err)
 	}
 
-	return fileSize, nil
+	return int64(fileSize), nil
 }
 
-func (m *MultipartUploader) uploadParts(ctx context.Context, maxConcurrency int, numParts int, fileSize int64, file *os.File, uploadID string) ([]Part, error) {
+func (m *MultipartUploader) uploadParts(ctx context.Context, maxConcurrency int, numParts int, fileSize int, file *os.File, uploadID string) ([]Part, error) {
 	g, ctx := errgroup.WithContext(ctx) // Context ONLY for waitgroup goroutines; canceled after errgroup finishes
 	g.SetLimit(maxConcurrency)          // Limit concurrent goroutines
 
@@ -440,14 +440,14 @@ func (m *MultipartUploader) uploadParts(ctx context.Context, maxConcurrency int,
 			}
 
 			// Read chunk from file
-			offset := int64(partNumber-1) * gcpMultipartUploadChunkSize
+			offset := (partNumber - 1) * gcpMultipartUploadChunkSize
 			chunkSize := gcpMultipartUploadChunkSize
-			if offset+int64(chunkSize) > fileSize {
-				chunkSize = int(fileSize - offset)
+			if offset+chunkSize > fileSize {
+				chunkSize = fileSize - offset
 			}
 
 			chunk := make([]byte, chunkSize)
-			_, err := file.ReadAt(chunk, offset)
+			_, err := file.ReadAt(chunk, int64(offset))
 			if err != nil {
 				return fmt.Errorf("failed to read chunk for part %d: %w", partNumber, err)
 			}

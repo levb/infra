@@ -13,7 +13,7 @@ type Overlay struct {
 	device       ReadonlyDevice
 	cache        *Cache
 	cacheEjected atomic.Bool
-	blockSize    int64
+	blockSize    int
 }
 
 var _ Device = (*Overlay)(nil)
@@ -28,8 +28,8 @@ func NewOverlay(device ReadonlyDevice, cache *Cache) *Overlay {
 	}
 }
 
-func (o *Overlay) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
-	blocks := header.BlocksOffsets(int64(len(p)), o.blockSize)
+func (o *Overlay) ReadAt(ctx context.Context, p []byte, off int) (int, error) {
+	blocks := header.BlocksOffsets(len(p), o.blockSize)
 
 	for _, blockOff := range blocks {
 		n, err := o.cache.ReadAt(p[blockOff:blockOff+o.blockSize], off+blockOff)
@@ -62,19 +62,20 @@ func (o *Overlay) EjectCache() (*Cache, error) {
 // but creating and copying the bytes from the cache and device to the new slice.
 //
 // When we are implementing this we might want to just enforce the length to be the same as the block size.
-func (o *Overlay) Slice(_ context.Context, _, _ int64) ([]byte, error) {
+func (o *Overlay) Slice(_ context.Context, _, _ int) ([]byte, error) {
 	return nil, fmt.Errorf("not implemented")
 }
 
+// WriteAt implements io.WriterAt — off stays int64.
 func (o *Overlay) WriteAt(p []byte, off int64) (int, error) {
-	return o.cache.WriteAt(p, off)
+	return o.cache.WriteAt(p, int(off))
 }
 
-func (o *Overlay) Size(_ context.Context) (int64, error) {
+func (o *Overlay) Size(_ context.Context) (int, error) {
 	return o.cache.Size()
 }
 
-func (o *Overlay) BlockSize() int64 {
+func (o *Overlay) BlockSize() int {
 	return o.blockSize
 }
 

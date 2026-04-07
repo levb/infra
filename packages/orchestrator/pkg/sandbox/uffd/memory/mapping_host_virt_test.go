@@ -32,11 +32,11 @@ func TestMapping_GetHostVirtRanges(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		offset         int64
-		size           int64
+		offset         int
+		size           int
 		expectedRanges []block.Range
 		expectError    error
-		expectErrorAt  int64 // offset where error should occur
+		expectErrorAt  int64 // offset where error should occur (OffsetNotFoundError uses int64)
 	}{
 		{
 			name:   "valid offset in first region, single byte",

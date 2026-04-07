@@ -17,7 +17,7 @@ func TestSeekableSource_Size(t *testing.T) {
 	t.Parallel()
 
 	diff := buildmocks.NewMockDiff(t)
-	diff.EXPECT().FileSize().Return(int64(1234), nil)
+	diff.EXPECT().FileSize().Return(1234, nil)
 
 	cache := peerservermocks.NewMockCache(t)
 	cache.EXPECT().LookupDiff("build-1", build.DiffType(storage.MemfileName)).Return(diff, true)
@@ -27,7 +27,7 @@ func TestSeekableSource_Size(t *testing.T) {
 
 	size, err := src.Size(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, int64(1234), size)
+	assert.Equal(t, 1234, size)
 }
 
 func TestSeekableSource_Stream(t *testing.T) {
@@ -36,8 +36,8 @@ func TestSeekableSource_Stream(t *testing.T) {
 	data := []byte("diff bytes")
 
 	diff := buildmocks.NewMockDiff(t)
-	diff.EXPECT().Slice(mock.Anything, int64(0), int64(len(data)), (*storage.FrameTable)(nil)).Return(data, nil)
-	diff.EXPECT().BlockSize().Return(int64(len(data)))
+	diff.EXPECT().Slice(mock.Anything, 0, len(data), (*storage.FrameTable)(nil)).Return(data, nil)
+	diff.EXPECT().BlockSize().Return(len(data))
 
 	cache := peerservermocks.NewMockCache(t)
 	cache.EXPECT().LookupDiff("build-1", build.DiffType(storage.MemfileName)).Return(diff, true)
@@ -46,7 +46,7 @@ func TestSeekableSource_Stream(t *testing.T) {
 	require.NoError(t, err)
 
 	sender := &collectSender{}
-	err = src.Stream(t.Context(), 0, int64(len(data)), sender)
+	err = src.Stream(t.Context(), 0, len(data), sender)
 	require.NoError(t, err)
 	assert.Equal(t, data, sender.data)
 }

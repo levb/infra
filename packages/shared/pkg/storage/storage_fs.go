@@ -170,14 +170,14 @@ func (o *fsObject) storeFileCompressed(ctx context.Context, localPath string, cf
 	return compressStream(ctx, file, cfg, uploader, 4)
 }
 
-func (o *fsObject) openRangeReader(_ context.Context, off, length int64) (io.ReadCloser, error) {
+func (o *fsObject) openRangeReader(_ context.Context, off, length int) (io.ReadCloser, error) {
 	f, err := o.getHandle(true)
 	if err != nil {
 		return nil, err
 	}
 
 	return &fsRangeReadCloser{
-		Reader: io.NewSectionReader(f, off, length),
+		Reader: io.NewSectionReader(f, int64(off), int64(length)),
 		file:   f,
 	}, nil
 }
@@ -191,7 +191,7 @@ func (o *fsObject) Exists(_ context.Context) (bool, error) {
 	return err == nil, err
 }
 
-func (o *fsObject) Size(_ context.Context) (int64, error) {
+func (o *fsObject) Size(_ context.Context) (int, error) {
 	handle, err := o.getHandle(true)
 	if err != nil {
 		return 0, err
@@ -206,12 +206,12 @@ func (o *fsObject) Size(_ context.Context) (int64, error) {
 	// Check for .uncompressed-size sidecar file
 	sidecarPath := o.path + "." + MetadataKeyUncompressedSize
 	if sidecarData, sidecarErr := os.ReadFile(sidecarPath); sidecarErr == nil {
-		if parsed, parseErr := strconv.ParseInt(strings.TrimSpace(string(sidecarData)), 10, 64); parseErr == nil {
+		if parsed, parseErr := strconv.Atoi(strings.TrimSpace(string(sidecarData))); parseErr == nil {
 			return parsed, nil
 		}
 	}
 
-	return fileInfo.Size(), nil
+	return int(fileInfo.Size()), nil
 }
 
 func (o *fsObject) Delete(_ context.Context) error {
@@ -280,14 +280,14 @@ func (u *fsPartUploader) Complete(_ context.Context) error {
 	return os.WriteFile(u.fullPath, u.Assemble(), 0o644)
 }
 
-func (o *fsObject) OpenRangeReader(ctx context.Context, offsetU int64, length int64, frameTable *FrameTable) (io.ReadCloser, error) {
+func (o *fsObject) OpenRangeReader(ctx context.Context, offsetU int, length int, frameTable *FrameTable) (io.ReadCloser, error) {
 	if frameTable.IsCompressed() {
 		frameStart, frameSize, err := frameTable.FrameFor(offsetU)
 		if err != nil {
 			return nil, fmt.Errorf("get frame for offset %d, FS:%s: %w", offsetU, o.path, err)
 		}
 
-		raw, err := o.openRangeReader(ctx, frameStart.C, int64(frameSize.C))
+		raw, err := o.openRangeReader(ctx, int(frameStart.C), int(frameSize.C))
 		if err != nil {
 			return nil, err
 		}

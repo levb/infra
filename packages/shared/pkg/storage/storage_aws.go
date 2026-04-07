@@ -215,7 +215,7 @@ func (o *awsObject) Put(ctx context.Context, data []byte) error {
 	return nil
 }
 
-func (o *awsObject) OpenRangeReader(ctx context.Context, off, length int64, frameTable *FrameTable) (io.ReadCloser, error) {
+func (o *awsObject) OpenRangeReader(ctx context.Context, off, length int, frameTable *FrameTable) (io.ReadCloser, error) {
 	if frameTable.IsCompressed() {
 		return nil, fmt.Errorf("compressed reads are not supported on AWS")
 	}
@@ -238,7 +238,7 @@ func (o *awsObject) OpenRangeReader(ctx context.Context, off, length int64, fram
 	return resp.Body, nil
 }
 
-func (o *awsObject) Size(ctx context.Context) (int64, error) {
+func (o *awsObject) Size(ctx context.Context) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, awsOperationTimeout)
 	defer cancel()
 
@@ -253,7 +253,7 @@ func (o *awsObject) Size(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 
-	return *resp.ContentLength, nil
+	return int(*resp.ContentLength), nil
 }
 
 func (o *awsObject) Exists(ctx context.Context) (bool, error) {

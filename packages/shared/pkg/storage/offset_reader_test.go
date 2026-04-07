@@ -17,12 +17,12 @@ func TestOffsetReader_Read(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		offset         int64
+		offset         int
 		readSize       int
 		expectedData   string
 		expectedN      int
 		expectedErr    error
-		expectedOffset int64
+		expectedOffset int
 	}{
 		{
 			name:           "read from start",
@@ -109,7 +109,7 @@ func TestOffsetReader_SequentialReads(t *testing.T) {
 	require.NoError(t, err1)
 	assert.Equal(t, 6, n1)
 	assert.Equal(t, "hello ", string(p1[:n1]))
-	assert.Equal(t, int64(6), r.offset)
+	assert.Equal(t, 6, r.offset)
 
 	// Second read
 	p2 := make([]byte, 5)
@@ -117,12 +117,12 @@ func TestOffsetReader_SequentialReads(t *testing.T) {
 	require.NoError(t, err2)
 	assert.Equal(t, 5, n2)
 	assert.Equal(t, "world", string(p2[:n2]))
-	assert.Equal(t, int64(11), r.offset)
+	assert.Equal(t, 11, r.offset)
 
 	// Third read (EOF)
 	p3 := make([]byte, 5)
 	n3, err3 := r.Read(p3)
 	require.ErrorIs(t, err3, io.EOF)
 	assert.Equal(t, 0, n3)
-	assert.Equal(t, int64(11), r.offset)
+	assert.Equal(t, 11, r.offset)
 }

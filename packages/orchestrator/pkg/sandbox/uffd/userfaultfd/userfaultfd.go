@@ -290,20 +290,20 @@ func (u *Userfaultfd) Prefault(ctx context.Context, offset int64, data []byte) e
 		return fmt.Errorf("data length (%d) is less than pagesize (%d)", len(data), pagesize)
 	}
 
-	return u.faultPage(ctx, addr, offset, pagesize, directDataSource{data, int64(pagesize)}, nil, block.Prefetch)
+	return u.faultPage(ctx, addr, offset, pagesize, directDataSource{data, int(pagesize)}, nil, block.Prefetch)
 }
 
 // directDataSource wraps a byte slice to implement block.Slicer for prefaulting.
 type directDataSource struct {
 	data     []byte
-	pagesize int64
+	pagesize int
 }
 
-func (d directDataSource) Slice(_ context.Context, _, _ int64) ([]byte, error) {
+func (d directDataSource) Slice(_ context.Context, _, _ int) ([]byte, error) {
 	return d.data, nil
 }
 
-func (d directDataSource) BlockSize() int64 {
+func (d directDataSource) BlockSize() int {
 	return d.pagesize
 }
 
@@ -331,7 +331,7 @@ func (u *Userfaultfd) faultPage(
 		}
 	}()
 
-	b, dataErr := source.Slice(ctx, offset, int64(pagesize))
+	b, dataErr := source.Slice(ctx, int(offset), int(pagesize))
 	if dataErr != nil {
 		var signalErr error
 		if onFailure != nil {
@@ -378,8 +378,8 @@ func (u *Userfaultfd) faultPage(
 	}
 
 	// Add the offset to the missing requests tracker with metadata.
-	u.missingRequests.Add(offset)
-	u.prefetchTracker.Add(offset, accessType)
+	u.missingRequests.Add(int(offset))
+	u.prefetchTracker.Add(int(offset), accessType)
 
 	return nil
 }

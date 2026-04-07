@@ -56,15 +56,15 @@ func TestSerializeDeserialize_V3_RoundTrip(t *testing.T) {
 
 	require.Equal(t, metadata, got.Metadata)
 	require.Len(t, got.Mapping, 2)
-	require.Equal(t, uint64(0), got.Mapping[0].Offset)
-	require.Equal(t, uint64(4096), got.Mapping[0].Length)
+	require.Equal(t, 0, got.Mapping[0].Offset)
+	require.Equal(t, 4096, got.Mapping[0].Length)
 	require.Equal(t, buildID, got.Mapping[0].BuildId)
-	require.Equal(t, uint64(0), got.Mapping[0].BuildStorageOffset)
+	require.Equal(t, 0, got.Mapping[0].BuildStorageOffset)
 
-	require.Equal(t, uint64(4096), got.Mapping[1].Offset)
-	require.Equal(t, uint64(4096), got.Mapping[1].Length)
+	require.Equal(t, 4096, got.Mapping[1].Offset)
+	require.Equal(t, 4096, got.Mapping[1].Length)
 	require.Equal(t, baseID, got.Mapping[1].BuildId)
-	require.Equal(t, uint64(123), got.Mapping[1].BuildStorageOffset)
+	require.Equal(t, 123, got.Mapping[1].BuildStorageOffset)
 
 	// V3 headers have no BuildFiles
 	require.Nil(t, got.BuildFiles)
@@ -98,8 +98,8 @@ func TestSerializeDeserialize_EmptyMappings_Defaults(t *testing.T) {
 
 	// NewHeader creates a default mapping when none provided
 	require.Len(t, got.Mapping, 1)
-	require.Equal(t, uint64(0), got.Mapping[0].Offset)
-	require.Equal(t, metadata.Size, got.Mapping[0].Length)
+	require.Equal(t, 0, got.Mapping[0].Offset)
+	require.Equal(t, int(metadata.Size), got.Mapping[0].Length)
 	require.Equal(t, metadata.BuildId, got.Mapping[0].BuildId)
 }
 
@@ -178,8 +178,8 @@ func TestSerializeDeserialize_V4_WithFrameTable(t *testing.T) {
 
 	// First mapping has FrameTable
 	m0 := got.Mapping[0]
-	require.Equal(t, uint64(0), m0.Offset)
-	require.Equal(t, uint64(4096), m0.Length)
+	require.Equal(t, 0, m0.Offset)
+	require.Equal(t, 4096, m0.Length)
 	require.Equal(t, buildID, m0.BuildId)
 	require.NotNil(t, m0.FrameTable)
 	require.Equal(t, storage.CompressionLZ4, m0.FrameTable.CompressionType())
@@ -193,16 +193,16 @@ func TestSerializeDeserialize_V4_WithFrameTable(t *testing.T) {
 
 	// Second mapping has no FrameTable
 	m1 := got.Mapping[1]
-	require.Equal(t, uint64(4096), m1.Offset)
-	require.Equal(t, uint64(4096), m1.Length)
+	require.Equal(t, 4096, m1.Offset)
+	require.Equal(t, 4096, m1.Length)
 	require.Equal(t, baseID, m1.BuildId)
 	require.Nil(t, m1.FrameTable)
 
 	// BuildFiles round-trip
 	require.Len(t, got.BuildFiles, 2)
-	require.Equal(t, int64(12345), got.BuildFiles[buildID].Size)
+	require.Equal(t, 12345, got.BuildFiles[buildID].Size)
 	require.Equal(t, checksum, got.BuildFiles[buildID].Checksum)
-	require.Equal(t, int64(67890), got.BuildFiles[baseID].Size)
+	require.Equal(t, 67890, got.BuildFiles[baseID].Size)
 	require.Equal(t, [32]byte{}, got.BuildFiles[baseID].Checksum)
 }
 
@@ -306,8 +306,8 @@ func TestSerializeDeserialize_V4_CompressionNone_EmptyFrames(t *testing.T) {
 	require.Nil(t, got.Mapping[0].FrameTable)
 
 	// Second mapping must not be corrupted by stray StartAt bytes.
-	require.Equal(t, uint64(4096), got.Mapping[1].Offset)
-	require.Equal(t, uint64(4096), got.Mapping[1].Length)
+	require.Equal(t, 4096, got.Mapping[1].Offset)
+	require.Equal(t, 4096, got.Mapping[1].Length)
 	require.Equal(t, baseID, got.Mapping[1].BuildId)
 }
 

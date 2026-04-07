@@ -12,7 +12,7 @@ import (
 
 // PrefetchEntriesToMapping converts a slice of PrefetchBlockEntry to MemoryPrefetchMapping.
 // Entries are sorted by access order. Returns nil if empty.
-func PrefetchEntriesToMapping(entries []block.PrefetchBlockEntry, blockSize int64) *MemoryPrefetchMapping {
+func PrefetchEntriesToMapping(entries []block.PrefetchBlockEntry, blockSize int) *MemoryPrefetchMapping {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -32,14 +32,14 @@ func PrefetchEntriesToMapping(entries []block.PrefetchBlockEntry, blockSize int6
 	orderedIndices := make([]uint64, len(entries))
 	accessTypes := make([]AccessType, len(entries))
 	for i, entry := range entries {
-		orderedIndices[i] = entry.Index
+		orderedIndices[i] = uint64(entry.Index)
 		accessTypes[i] = AccessTypeFromBlock(entry.AccessType)
 	}
 
 	return &MemoryPrefetchMapping{
 		Indices:     orderedIndices,
 		AccessTypes: accessTypes,
-		BlockSize:   blockSize,
+		BlockSize:   int64(blockSize),
 	}
 }
 

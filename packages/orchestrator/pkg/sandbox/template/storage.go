@@ -143,19 +143,19 @@ func NewStorage(
 	}, nil
 }
 
-func (d *Storage) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
+func (d *Storage) ReadAt(ctx context.Context, p []byte, off int) (int, error) {
 	return d.source.ReadAt(ctx, p, off)
 }
 
-func (d *Storage) Size(_ context.Context) (int64, error) {
-	return int64(d.source.Header().Metadata.Size), nil
+func (d *Storage) Size(_ context.Context) (int, error) {
+	return int(d.source.Header().Metadata.Size), nil
 }
 
-func (d *Storage) BlockSize() int64 {
-	return int64(d.source.Header().Metadata.BlockSize)
+func (d *Storage) BlockSize() int {
+	return int(d.source.Header().Metadata.BlockSize)
 }
 
-func (d *Storage) Slice(ctx context.Context, off, length int64) ([]byte, error) {
+func (d *Storage) Slice(ctx context.Context, off, length int) ([]byte, error) {
 	return d.source.Slice(ctx, off, length)
 }
 

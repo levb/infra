@@ -22,7 +22,7 @@ const (
 
 type cachedBlob struct {
 	path      string
-	chunkSize int64
+	chunkSize int
 	inner     Blob
 	flags     featureFlagsClient
 	tracer    trace.Tracer

@@ -96,13 +96,13 @@ type Blob interface {
 
 type SeekableReader interface {
 	// Random slice access, off and buffer length must be aligned to block size
-	ReadAt(ctx context.Context, buffer []byte, off int64, ft *FrameTable) (int, error)
-	Size(ctx context.Context) (int64, error)
+	ReadAt(ctx context.Context, buffer []byte, off int, ft *FrameTable) (int, error)
+	Size(ctx context.Context) (int, error)
 }
 
 // StreamingReader supports progressive reads via a streaming range reader.
 type StreamingReader interface {
-	OpenRangeReader(ctx context.Context, offsetU int64, length int64, frameTable *FrameTable) (io.ReadCloser, error)
+	OpenRangeReader(ctx context.Context, offsetU int, length int, frameTable *FrameTable) (io.ReadCloser, error)
 }
 
 type SeekableWriter interface {
@@ -113,7 +113,7 @@ type SeekableWriter interface {
 type Seekable interface {
 	StreamingReader
 	SeekableWriter
-	Size(ctx context.Context) (int64, error)
+	Size(ctx context.Context) (int, error)
 }
 
 // PeerTransitionedError is returned by the peer Seekable when the GCS upload

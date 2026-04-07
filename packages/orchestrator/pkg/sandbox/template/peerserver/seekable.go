@@ -18,7 +18,7 @@ type seekableSource struct {
 	diff build.Diff
 }
 
-func (f *seekableSource) Size(_ context.Context) (int64, error) {
+func (f *seekableSource) Size(_ context.Context) (int, error) {
 	return f.diff.FileSize()
 }
 
@@ -26,10 +26,10 @@ func (f *seekableSource) Exists(_ context.Context) (bool, error) {
 	return false, ErrNotSupported
 }
 
-func (f *seekableSource) Stream(ctx context.Context, offset, length int64, sender Sender) error {
+func (f *seekableSource) Stream(ctx context.Context, offset, length int, sender Sender) error {
 	ctx, span := tracer.Start(ctx, "stream-seekable-file", trace.WithAttributes(
-		attribute.Int64("offset", offset),
-		attribute.Int64("length", length),
+		attribute.Int("offset", offset),
+		attribute.Int("length", length),
 	))
 	defer span.End()
 
@@ -41,7 +41,7 @@ func (f *seekableSource) Stream(ctx context.Context, offset, length int64, sende
 		return fmt.Errorf("slice diff at offset %d: %w", offset, err)
 	}
 
-	blockSize := int(f.diff.BlockSize())
+	blockSize := f.diff.BlockSize()
 
 	for len(data) > 0 {
 		take := min(len(data), blockSize)

@@ -14,10 +14,10 @@ type Tracker struct {
 	b  *bitset.BitSet
 	mu sync.RWMutex
 
-	blockSize int64
+	blockSize int
 }
 
-func NewTracker(blockSize int64) *Tracker {
+func NewTracker(blockSize int) *Tracker {
 	return &Tracker{
 		// The bitset resizes automatically based on the maximum set bit.
 		b:         bitset.New(0),
@@ -25,14 +25,14 @@ func NewTracker(blockSize int64) *Tracker {
 	}
 }
 
-func (t *Tracker) Has(off int64) bool {
+func (t *Tracker) Has(off int) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
 	return t.b.Test(uint(header.BlockIdx(off, t.blockSize)))
 }
 
-func (t *Tracker) Add(off int64) {
+func (t *Tracker) Add(off int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -52,7 +52,7 @@ func (t *Tracker) BitSet() *bitset.BitSet {
 	return t.b
 }
 
-func (t *Tracker) BlockSize() int64 {
+func (t *Tracker) BlockSize() int {
 	return t.blockSize
 }
 
@@ -66,15 +66,15 @@ func (t *Tracker) Clone() *Tracker {
 	}
 }
 
-func (t *Tracker) Offsets() iter.Seq[int64] {
+func (t *Tracker) Offsets() iter.Seq[int] {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
 	return bitsetOffsets(t.b.Clone(), t.BlockSize())
 }
 
-func bitsetOffsets(b *bitset.BitSet, blockSize int64) iter.Seq[int64] {
-	return utils.TransformTo(b.EachSet(), func(idx uint) int64 {
-		return header.BlockOffset(int64(idx), blockSize)
+func bitsetOffsets(b *bitset.BitSet, blockSize int) iter.Seq[int] {
+	return utils.TransformTo(b.EachSet(), func(idx uint) int {
+		return header.BlockOffset(int(idx), blockSize)
 	})
 }

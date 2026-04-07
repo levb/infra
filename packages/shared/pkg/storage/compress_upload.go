@@ -248,7 +248,7 @@ func compressStream(ctx context.Context, in io.Reader, cfg *CompressConfig, uplo
 			break
 		}
 
-		if part.compressedSize.Load() >= targetPartSize {
+		if part.compressedSize.Load() >= int64(targetPartSize) {
 			part.submit(ctx, q)
 			part, compressCtx = newPart(part.index+1, ctx, cfg.FrameEncodeWorkers)
 		}

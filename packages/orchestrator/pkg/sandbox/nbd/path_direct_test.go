@@ -25,7 +25,7 @@ func TestPathDirect_Direct4MBWrite(t *testing.T) {
 
 	featureFlags, err := featureflags.NewClient()
 	require.NoError(t, err)
-	size := int64(10 * 1024 * 1024)
+	size := int(10 * 1024 * 1024)
 
 	deviceFile := setupNBDDevice(t, featureFlags, size, unix.O_DIRECT|unix.O_RDWR)
 
@@ -56,7 +56,7 @@ func TestPathDirect_Direct32MBWrite(t *testing.T) {
 
 	featureFlags, err := featureflags.NewClient()
 	require.NoError(t, err)
-	size := int64(256 * 1024 * 1024)
+	size := int(256 * 1024 * 1024)
 
 	deviceFile := setupNBDDevice(t, featureFlags, size, unix.O_DIRECT|unix.O_RDWR)
 
@@ -85,7 +85,7 @@ func TestPathDirect_Write(t *testing.T) {
 	featureFlags, err := featureflags.NewClient()
 	require.NoError(t, err)
 
-	size := int64(5 * 1024 * 1024)
+	size := int(5 * 1024 * 1024)
 
 	deviceFile := setupNBDDevice(t, featureFlags, size, os.O_RDWR)
 
@@ -110,7 +110,7 @@ func TestPathDirect_WriteAtOffset(t *testing.T) {
 
 	featureFlags, err := featureflags.NewClient()
 	require.NoError(t, err)
-	size := int64(5 * 1024 * 1024)
+	size := int(5 * 1024 * 1024)
 
 	deviceFile := setupNBDDevice(t, featureFlags, size, os.O_RDWR)
 
@@ -137,7 +137,7 @@ func TestPathDirect_LargeWrite(t *testing.T) {
 	featureFlags, err := featureflags.NewClient()
 	require.NoError(t, err)
 
-	size := int64(1200 * 1024 * 1024)
+	size := int(1200 * 1024 * 1024)
 
 	deviceFile := setupNBDDevice(t, featureFlags, size, os.O_RDWR)
 
@@ -156,7 +156,7 @@ func TestPathLargeRead(t *testing.T) {
 	featureFlags, err := featureflags.NewClient()
 	require.NoError(t, err)
 
-	size := int64(1200 * 1024 * 1024)
+	size := int(1200 * 1024 * 1024)
 
 	deviceFile := setupNBDDevice(t, featureFlags, size, os.O_RDONLY)
 	time.Sleep(1 * time.Second)
@@ -169,7 +169,7 @@ func TestPathLargeRead(t *testing.T) {
 	require.NoError(t, err, "failed to execute dd command")
 }
 
-func setupNBDDevice(t *testing.T, featureFlags *featureflags.Client, size int64, flags int) *os.File {
+func setupNBDDevice(t *testing.T, featureFlags *featureflags.Client, size int, flags int) *os.File {
 	t.Helper()
 
 	if os.Geteuid() != 0 {

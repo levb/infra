@@ -63,7 +63,7 @@ func serializeV4(metadata *Metadata, buildFiles map[uuid.UUID]BuildFileInfo, map
 		info := buildFiles[id]
 		entry := v4SerializableBuildFileInfo{
 			BuildId:  id,
-			Size:     info.Size,
+			Size:     int64(info.Size),
 			Checksum: info.Checksum,
 		}
 		if err := binary.Write(&block, binary.LittleEndian, &entry); err != nil {
@@ -78,10 +78,10 @@ func serializeV4(metadata *Metadata, buildFiles map[uuid.UUID]BuildFileInfo, map
 
 	for _, mapping := range mappings {
 		v4 := &v4SerializableBuildMap{
-			Offset:             mapping.Offset,
-			Length:             mapping.Length,
+			Offset:             uint64(mapping.Offset),
+			Length:             uint64(mapping.Length),
 			BuildId:            mapping.BuildId,
-			BuildStorageOffset: mapping.BuildStorageOffset,
+			BuildStorageOffset: uint64(mapping.BuildStorageOffset),
 		}
 
 		var offset *storage.FrameOffset
@@ -153,7 +153,7 @@ func deserializeV4(metadata *Metadata, blockData []byte) (*Header, error) {
 				return nil, fmt.Errorf("failed to read build file info: %w", err)
 			}
 			buildFiles[entry.BuildId] = BuildFileInfo{
-				Size:     entry.Size,
+				Size:     int(entry.Size),
 				Checksum: entry.Checksum,
 			}
 		}
@@ -173,10 +173,10 @@ func deserializeV4(metadata *Metadata, blockData []byte) (*Header, error) {
 		}
 
 		m := &BuildMap{
-			Offset:             v4.Offset,
-			Length:             v4.Length,
+			Offset:             int(v4.Offset),
+			Length:             int(v4.Length),
 			BuildId:            v4.BuildId,
-			BuildStorageOffset: v4.BuildStorageOffset,
+			BuildStorageOffset: int(v4.BuildStorageOffset),
 		}
 
 		if v4.CompressionType != 0 && v4.NumFrames > 0 {

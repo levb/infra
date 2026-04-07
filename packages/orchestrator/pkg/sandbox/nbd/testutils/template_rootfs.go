@@ -114,7 +114,7 @@ func TemplateRootfs(ctx context.Context, buildID string) (*BuildDevice, *Cleaner
 	buildDevice := NewBuildDevice(
 		build.NewFile(h, store, build.Rootfs, s, m),
 		h,
-		int64(h.Metadata.BlockSize),
+		int(h.Metadata.BlockSize),
 	)
 
 	return buildDevice, &cleaner, nil

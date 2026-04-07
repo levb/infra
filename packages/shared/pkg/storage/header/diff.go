@@ -20,7 +20,7 @@ var (
 	EmptyBlock    = make([]byte, RootfsBlockSize)
 )
 
-func IsEmptyBlock(block []byte, blockSize int64) (bool, error) {
+func IsEmptyBlock(block []byte, blockSize int) (bool, error) {
 	var emptyBuf []byte
 	switch blockSize {
 	case HugepageSize:

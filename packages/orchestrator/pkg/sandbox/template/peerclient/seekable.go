@@ -21,30 +21,30 @@ type peerSeekable struct {
 	peerHandle[storage.Seekable]
 }
 
-func (s *peerSeekable) Size(ctx context.Context) (int64, error) {
+func (s *peerSeekable) Size(ctx context.Context) (int, error) {
 	return withPeerFallback(ctx, &s.peerHandle, "size peer-seekable", attrOpSize,
-		func(ctx context.Context) (peerAttempt[int64], error) {
+		func(ctx context.Context) (peerAttempt[int], error) {
 			resp, err := s.client.GetBuildFileSize(ctx, &orchestrator.GetBuildFileSizeRequest{
 				BuildId:  s.buildID,
 				FileName: s.fileName,
 			})
 			if err == nil && checkPeerAvailability(resp.GetAvailability(), s.uploaded) {
-				return peerAttempt[int64]{value: resp.GetTotalSize(), hit: true}, nil
+				return peerAttempt[int]{value: int(resp.GetTotalSize()), hit: true}, nil
 			}
 
 			if err != nil {
 				logger.L().Warn(ctx, "failed to get build file size from peer", logger.WithBuildID(s.buildID), zap.Error(err))
 			}
 
-			return peerAttempt[int64]{}, nil
+			return peerAttempt[int]{}, nil
 		},
-		func(ctx context.Context, base storage.Seekable) (int64, error) {
+		func(ctx context.Context, base storage.Seekable) (int, error) {
 			return base.Size(ctx)
 		},
 	)
 }
 
-func (s *peerSeekable) OpenRangeReader(ctx context.Context, off int64, length int64, frameTable *storage.FrameTable) (io.ReadCloser, error) {
+func (s *peerSeekable) OpenRangeReader(ctx context.Context, off int, length int, frameTable *storage.FrameTable) (io.ReadCloser, error) {
 	return withPeerFallback(ctx, &s.peerHandle, "peer-seekable-open-range-reader", attrOpRangeReader,
 		func(ctx context.Context) (peerAttempt[io.ReadCloser], error) {
 			streamCtx, cancel := context.WithCancel(ctx)
@@ -52,11 +52,11 @@ func (s *peerSeekable) OpenRangeReader(ctx context.Context, off int64, length in
 			recv, err := openPeerSeekableStream(streamCtx, s.client, &orchestrator.ReadAtBuildSeekableRequest{
 				BuildId:  s.buildID,
 				FileName: s.fileName,
-				Offset:   off,
-				Length:   length,
+				Offset:   int64(off),
+				Length:   int64(length),
 			}, s.uploaded)
 			if err != nil {
-				logger.L().Warn(ctx, "failed to open range reader from peer", logger.WithBuildID(s.buildID), zap.Int64("off", off), zap.Int64("length", length), zap.Error(err))
+				logger.L().Warn(ctx, "failed to open range reader from peer", logger.WithBuildID(s.buildID), zap.Int("off", off), zap.Int("length", length), zap.Error(err))
 				cancel()
 
 				return peerAttempt[io.ReadCloser]{}, nil

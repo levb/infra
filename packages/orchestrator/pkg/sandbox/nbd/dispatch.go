@@ -16,8 +16,8 @@ import (
 var ErrShuttingDown = errors.New("shutting down. Cannot serve any new requests")
 
 type Provider interface {
-	ReadAt(ctx context.Context, p []byte, off int64) (int, error)
-	Size(ctx context.Context) (int64, error)
+	ReadAt(ctx context.Context, p []byte, off int) (int, error)
+	Size(ctx context.Context) (int, error)
 	io.WriterAt
 }
 
@@ -248,7 +248,7 @@ func (d *Dispatch) cmdRead(ctx context.Context, cmdHandle uint64, cmdFrom uint64
 		data := make([]byte, length)
 
 		go func() {
-			_, err := d.prov.ReadAt(ctx, data, int64(from))
+			_, err := d.prov.ReadAt(ctx, data, int(from))
 			errchan <- err
 		}()
 

@@ -1202,7 +1202,7 @@ func pauseProcessRootfs(
 	}
 	telemetry.ReportEvent(ctx, "exported rootfs")
 
-	rootfsDiff, err := rootfsDiffFile.CloseToDiff(int64(originalHeader.Metadata.BlockSize))
+	rootfsDiff, err := rootfsDiffFile.CloseToDiff(int(originalHeader.Metadata.BlockSize))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to convert rootfs diff file to local diff: %w", err)
 	}

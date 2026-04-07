@@ -48,25 +48,25 @@ func NewErrCacheClosed(filePath string) *CacheClosedError {
 
 type Cache struct {
 	filePath         string
-	size             int64
-	blockSize        int64
+	size             int
+	blockSize        int
 	mmap             *mmap.MMap
 	mu               sync.RWMutex
 	dirty            sync.Map
-	dirtyGranularity int64
+	dirtyGranularity int
 	dirtyFile        bool
 	closed           atomic.Bool
 }
 
 // NewCache creates a cache with dirty tracking at blockSize granularity.
 // When we are passing filePath that is a file that has content we want to server want to use dirtyFile = true.
-func NewCache(size, blockSize int64, filePath string, dirtyFile bool) (*Cache, error) {
+func NewCache(size, blockSize int, filePath string, dirtyFile bool) (*Cache, error) {
 	return NewCacheWithDirtyGranularity(size, blockSize, blockSize, filePath, dirtyFile)
 }
 
 // NewCacheWithDirtyGranularity creates a cache with dirty tracking at the specified granularity.
 // For chunker caches, dirtyGranularity can be larger than blockSize to reduce dirty map overhead.
-func NewCacheWithDirtyGranularity(size, blockSize, dirtyGranularity int64, filePath string, dirtyFile bool) (*Cache, error) {
+func NewCacheWithDirtyGranularity(size, blockSize, dirtyGranularity int, filePath string, dirtyFile bool) (*Cache, error) {
 	f, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("error opening file: %w", err)
@@ -85,7 +85,7 @@ func NewCacheWithDirtyGranularity(size, blockSize, dirtyGranularity int64, fileP
 	}
 
 	// This should create a sparse file on Linux.
-	err = f.Truncate(size)
+	err = f.Truncate(int64(size))
 	if err != nil {
 		return nil, fmt.Errorf("error allocating file: %w", err)
 	}
@@ -94,7 +94,7 @@ func NewCacheWithDirtyGranularity(size, blockSize, dirtyGranularity int64, fileP
 		return nil, fmt.Errorf("size too big: %d > %d", size, math.MaxInt)
 	}
 
-	mm, err := mmap.MapRegion(f, int(size), mmap.RDWR, 0, 0)
+	mm, err := mmap.MapRegion(f, size, mmap.RDWR, 0, 0)
 	if err != nil {
 		return nil, fmt.Errorf("error mapping file: %w", err)
 	}
@@ -147,7 +147,7 @@ func (c *Cache) ExportToDiff(ctx context.Context, out *os.File) (*header.DiffMet
 	// Explicit mmap flush is not necessary, because the kernel will handle that as part of the copy_file_range syscall.
 	// Calling sync_file_range marks the range for writeback and starts it early.
 	// This is just an optimization, so if it fails just log a warning and let copy_file_range do the actual work.
-	err = unix.SyncFileRange(src, 0, c.size, unix.SYNC_FILE_RANGE_WRITE)
+	err = unix.SyncFileRange(src, 0, int64(c.size), unix.SYNC_FILE_RANGE_WRITE)
 	if err != nil {
 		logger.L().Warn(ctx, "error syncing file", zap.Error(err))
 	}
@@ -157,7 +157,7 @@ func (c *Cache) ExportToDiff(ctx context.Context, out *os.File) (*header.DiffMet
 
 	// We don't need to sort the keys as the bitset handles the ordering.
 	c.dirty.Range(func(key, _ any) bool {
-		builder.AddDirtyOffset(key.(int64))
+		builder.AddDirtyOffset(key.(int))
 
 		return true
 	})
@@ -173,8 +173,8 @@ func (c *Cache) ExportToDiff(ctx context.Context, out *os.File) (*header.DiffMet
 	copyStart := time.Now()
 	for r := range BitsetRanges(diffMetadata.Dirty, diffMetadata.BlockSize) {
 		totalRanges++
-		remaining := int(r.Size)
-		readOffset := r.Start
+		remaining := r.Size
+		readOffset := int64(r.Start)
 
 		// The kernel may return short writes (e.g. capped at MAX_RW_COUNT on non-reflink filesystems),
 		// so we loop until the full range is copied. The offset pointers are advanced by the kernel.
@@ -220,15 +220,15 @@ func (c *Cache) ExportToDiff(ctx context.Context, out *os.File) (*header.DiffMet
 
 	telemetry.SetAttributes(ctx,
 		attribute.Int64("copy_ms", time.Since(copyStart).Milliseconds()),
-		attribute.Int64("total_size_bytes", c.size),
-		attribute.Int64("dirty_size_bytes", int64(diffMetadata.Dirty.Count())*c.blockSize),
+		attribute.Int64("total_size_bytes", int64(c.size)),
+		attribute.Int64("dirty_size_bytes", int64(diffMetadata.Dirty.Count())*int64(c.blockSize)),
 		attribute.Int64("total_ranges", totalRanges),
 	)
 
 	return diffMetadata, nil
 }
 
-func (c *Cache) ReadAt(b []byte, off int64) (int, error) {
+func (c *Cache) ReadAt(b []byte, off int) (int, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -240,7 +240,7 @@ func (c *Cache) ReadAt(b []byte, off int64) (int, error) {
 		return 0, NewErrCacheClosed(c.filePath)
 	}
 
-	slice, err := c.Slice(off, int64(len(b)))
+	slice, err := c.Slice(off, len(b))
 	if err != nil {
 		return 0, fmt.Errorf("error slicing mmap: %w", err)
 	}
@@ -248,7 +248,7 @@ func (c *Cache) ReadAt(b []byte, off int64) (int, error) {
 	return copy(b, slice), nil
 }
 
-func (c *Cache) WriteAt(b []byte, off int64) (int, error) {
+func (c *Cache) WriteAt(b []byte, off int) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -287,7 +287,7 @@ func (c *Cache) Close() (e error) {
 	return e
 }
 
-func (c *Cache) Size() (int64, error) {
+func (c *Cache) Size() (int, error) {
 	if c.isClosed() {
 		return 0, NewErrCacheClosed(c.filePath)
 	}
@@ -297,7 +297,7 @@ func (c *Cache) Size() (int64, error) {
 
 // Slice returns a slice of the mmap.
 // When using Slice you must ensure thread safety, ideally by only writing to the same block once and the exposing the slice.
-func (c *Cache) Slice(off, length int64) ([]byte, error) {
+func (c *Cache) Slice(off, length int) ([]byte, error) {
 	if c.isClosed() {
 		return nil, NewErrCacheClosed(c.filePath)
 	}
@@ -317,7 +317,7 @@ func (c *Cache) Slice(off, length int64) ([]byte, error) {
 
 // sliceDirect returns a slice of the mmap without checking isCached.
 // Used by the streaming chunker after the waiter mechanism has confirmed data availability.
-func (c *Cache) sliceDirect(off, length int64) ([]byte, error) {
+func (c *Cache) sliceDirect(off, length int) ([]byte, error) {
 	if c.isClosed() {
 		return nil, NewErrCacheClosed(c.filePath)
 	}
@@ -331,7 +331,7 @@ func (c *Cache) sliceDirect(off, length int64) ([]byte, error) {
 	return (*c.mmap)[off:end], nil
 }
 
-func (c *Cache) isCached(off, length int64) bool {
+func (c *Cache) isCached(off, length int) bool {
 	// Zero-length is vacuously true (no-op)
 	if length <= 0 {
 		return true
@@ -357,7 +357,7 @@ func (c *Cache) isCached(off, length int64) bool {
 	return true
 }
 
-func (c *Cache) setIsCached(off, length int64) {
+func (c *Cache) setIsCached(off, length int) {
 	// Zero-length is a no-op
 	if length <= 0 {
 		return
@@ -374,7 +374,7 @@ func (c *Cache) setIsCached(off, length int64) {
 }
 
 // When using WriteAtWithoutLock you must ensure thread safety, ideally by only writing to the same block once and the exposing the slice.
-func (c *Cache) WriteAtWithoutLock(b []byte, off int64) (int, error) {
+func (c *Cache) WriteAtWithoutLock(b []byte, off int) (int, error) {
 	if c.isClosed() {
 		return 0, NewErrCacheClosed(c.filePath)
 	}
@@ -383,7 +383,7 @@ func (c *Cache) WriteAtWithoutLock(b []byte, off int64) (int, error) {
 		return 0, nil
 	}
 
-	end := min(off+int64(len(b)), c.size)
+	end := min(off+len(b), c.size)
 
 	n := copy((*c.mmap)[off:end], b)
 
@@ -394,7 +394,7 @@ func (c *Cache) WriteAtWithoutLock(b []byte, off int64) (int, error) {
 
 // FileSize returns the size of the cache on disk.
 // The size might differ from the dirty size, as it may not be fully on disk.
-func (c *Cache) FileSize() (int64, error) {
+func (c *Cache) FileSize() (int, error) {
 	var stat syscall.Stat_t
 	err := syscall.Stat(c.filePath, &stat)
 	if err != nil {
@@ -407,10 +407,10 @@ func (c *Cache) FileSize() (int64, error) {
 		return 0, fmt.Errorf("failed to get disk stats for path %s: %w", c.filePath, err)
 	}
 
-	return stat.Blocks * fsStat.Bsize, nil
+	return int(stat.Blocks * int64(fsStat.Bsize)), nil
 }
 
-func (c *Cache) address(off int64) (*byte, error) {
+func (c *Cache) address(off int) (*byte, error) {
 	if c.mmap == nil {
 		return nil, nil
 	}
@@ -423,7 +423,7 @@ func (c *Cache) address(off int64) (*byte, error) {
 }
 
 // addressBytes returns a slice of the mmap and a function to release the read lock which blocks the cache from being closed.
-func (c *Cache) addressBytes(off, length int64) ([]byte, func(), error) {
+func (c *Cache) addressBytes(off, length int) ([]byte, func(), error) {
 	c.mu.RLock()
 
 	if c.mmap == nil {
@@ -453,7 +453,7 @@ func (c *Cache) addressBytes(off, length int64) ([]byte, func(), error) {
 	return (*c.mmap)[off:end], releaseCacheCloseLock, nil
 }
 
-func (c *Cache) BlockSize() int64 {
+func (c *Cache) BlockSize() int {
 	return c.blockSize
 }
 
@@ -463,7 +463,7 @@ func (c *Cache) Path() string {
 
 func NewCacheFromProcessMemory(
 	ctx context.Context,
-	blockSize int64,
+	blockSize int,
 	filePath string,
 	pid int,
 	ranges []Range,
@@ -494,35 +494,35 @@ func (c *Cache) copyProcessMemory(
 ) error {
 	// We need to align the maximum read/write count to the block size, so we can use mark the offsets as dirty correctly.
 	// Because the MAX_RW_COUNT is not aligned to arbitrary block sizes, we need to align it to the block size we use for the cache.
-	alignedRwCount := getAlignedMaxRwCount(c.blockSize)
+	alignedRwCount := getAlignedMaxRwCount(int64(c.blockSize))
 
 	// We need to split the ranges because the Kernel does not support reading/writing more than MAX_RW_COUNT bytes in a single operation.
-	ranges := splitOversizedRanges(rs, alignedRwCount)
+	ranges := splitOversizedRanges(rs, int(alignedRwCount))
 
-	var offset int64
-	var rangeIdx int64
+	var offset int
+	var rangeIdx int
 
 	for {
 		var remote []unix.RemoteIovec
 
-		var segmentSize int64
+		var segmentSize int
 
 		// We iterate over the range of all ranges until we have reached the limit of the IOV_MAX,
 		// or until the next range would overflow the MAX_RW_COUNT.
-		for ; rangeIdx < int64(len(ranges)); rangeIdx++ {
+		for ; rangeIdx < len(ranges); rangeIdx++ {
 			r := ranges[rangeIdx]
 
 			if len(remote) == IOV_MAX {
 				break
 			}
 
-			if segmentSize+r.Size > alignedRwCount {
+			if segmentSize+r.Size > int(alignedRwCount) {
 				break
 			}
 
 			remote = append(remote, unix.RemoteIovec{
 				Base: uintptr(r.Start),
-				Len:  int(r.Size),
+				Len:  r.Size,
 			})
 
 			segmentSize += r.Size
@@ -574,7 +574,7 @@ func (c *Cache) copyProcessMemory(
 				return fmt.Errorf("failed to read memory: %w", err)
 			}
 
-			if int64(n) != segmentSize {
+			if n != segmentSize {
 				return fmt.Errorf("failed to read memory: expected %d bytes, got %d", segmentSize, n)
 			}
 
@@ -592,7 +592,7 @@ func (c *Cache) copyProcessMemory(
 // Split ranges so there are no ranges larger than maxSize.
 // This is not an optimal split—ideally we would split the ranges so that we can fill each call to unix.ProcessVMReadv to the max size.
 // This is though a very simple split that will work and the syscalls overhead here is not very high as opposed to the other things.
-func splitOversizedRanges(ranges []Range, maxSize int64) (result []Range) {
+func splitOversizedRanges(ranges []Range, maxSize int) (result []Range) {
 	for _, r := range ranges {
 		if r.Size <= maxSize {
 			result = append(result, r)
@@ -600,7 +600,7 @@ func splitOversizedRanges(ranges []Range, maxSize int64) (result []Range) {
 			continue
 		}
 
-		for offset := int64(0); offset < r.Size; offset += maxSize {
+		for offset := 0; offset < r.Size; offset += maxSize {
 			result = append(result, Range{
 				Start: r.Start + offset,
 				Size:  min(r.Size-offset, maxSize),

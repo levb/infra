@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	blockSize = int64(1024)
+	blockSize = 1024
 )
 
 func newRootFSDiff(t *testing.T, cachePath, buildId string) Diff {
@@ -48,7 +48,7 @@ func newRootFSDiff(t *testing.T, cachePath, buildId string) Diff {
 	return diff
 }
 
-func newDiffWithAsserts(t *testing.T, cachePath, buildId string, diffType DiffType, blockSize int64) (Diff, error) {
+func newDiffWithAsserts(t *testing.T, cachePath, buildId string, diffType DiffType, blockSize int) (Diff, error) {
 	t.Helper()
 
 	localDiff, err := NewLocalDiffFile(cachePath, buildId, diffType)

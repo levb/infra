@@ -17,7 +17,7 @@ var (
 	diffID   = uuid.New()
 )
 
-var blockSize = uint64(2 << 20)
+var blockSize = 2 << 20
 
 var size = 8 * blockSize
 
@@ -325,7 +325,7 @@ func TestNormalizeMappingsSingleMapping(t *testing.T) {
 	m := NormalizeMappings(input)
 
 	assert.Len(t, m, 1)
-	assert.Equal(t, uint64(0), m[0].Offset)
+	assert.Equal(t, 0, m[0].Offset)
 	assert.Equal(t, 2*blockSize, m[0].Length)
 	assert.Equal(t, baseID, m[0].BuildId)
 
@@ -391,10 +391,10 @@ func TestNormalizeMappingsTwoAdjacentSameBuildId(t *testing.T) {
 	m := NormalizeMappings(input)
 
 	assert.Len(t, m, 1)
-	assert.Equal(t, uint64(0), m[0].Offset)
+	assert.Equal(t, 0, m[0].Offset)
 	assert.Equal(t, 5*blockSize, m[0].Length)
 	assert.Equal(t, baseID, m[0].BuildId)
-	assert.Equal(t, uint64(0), m[0].BuildStorageOffset)
+	assert.Equal(t, 0, m[0].BuildStorageOffset)
 
 	err := ValidateMappings(m, 5*blockSize, blockSize)
 	require.NoError(t, err)
@@ -432,10 +432,10 @@ func TestNormalizeMappingsAllSameBuildId(t *testing.T) {
 	m := NormalizeMappings(input)
 
 	assert.Len(t, m, 1)
-	assert.Equal(t, uint64(0), m[0].Offset)
+	assert.Equal(t, 0, m[0].Offset)
 	assert.Equal(t, 8*blockSize, m[0].Length)
 	assert.Equal(t, baseID, m[0].BuildId)
-	assert.Equal(t, uint64(0), m[0].BuildStorageOffset)
+	assert.Equal(t, 0, m[0].BuildStorageOffset)
 
 	err := ValidateMappings(m, size, blockSize)
 	require.NoError(t, err)
@@ -476,7 +476,7 @@ func TestNormalizeMappingsMultipleGroupsSameBuildId(t *testing.T) {
 	m := NormalizeMappings(input)
 
 	assert.Len(t, m, 2)
-	assert.Equal(t, uint64(0), m[0].Offset)
+	assert.Equal(t, 0, m[0].Offset)
 	assert.Equal(t, 4*blockSize, m[0].Length)
 	assert.Equal(t, id1, m[0].BuildId)
 	assert.Equal(t, 4*blockSize, m[1].Offset)
@@ -558,10 +558,10 @@ func TestNormalizeMappingsThreeConsecutiveSameBuildId(t *testing.T) {
 	m := NormalizeMappings(input)
 
 	assert.Len(t, m, 1)
-	assert.Equal(t, uint64(0), m[0].Offset)
+	assert.Equal(t, 0, m[0].Offset)
 	assert.Equal(t, 6*blockSize, m[0].Length)
 	assert.Equal(t, baseID, m[0].BuildId)
-	assert.Equal(t, uint64(0), m[0].BuildStorageOffset)
+	assert.Equal(t, 0, m[0].BuildStorageOffset)
 
 	err := ValidateMappings(m, 6*blockSize, blockSize)
 	require.NoError(t, err)
@@ -616,7 +616,7 @@ func TestNormalizeMappingsMixedPattern(t *testing.T) {
 
 	assert.Len(t, m, 3)
 	// First two merged
-	assert.Equal(t, uint64(0), m[0].Offset)
+	assert.Equal(t, 0, m[0].Offset)
 	assert.Equal(t, 2*blockSize, m[0].Length)
 	assert.Equal(t, id1, m[0].BuildId)
 	// Middle one stays alone
@@ -659,7 +659,7 @@ func TestNormalizeMappingsZeroLengthMapping(t *testing.T) {
 
 	// All should be merged since they all have the same BuildId
 	assert.Len(t, m, 1)
-	assert.Equal(t, uint64(0), m[0].Offset)
+	assert.Equal(t, 0, m[0].Offset)
 	assert.Equal(t, 4*blockSize, m[0].Length)
 	assert.Equal(t, baseID, m[0].BuildId)
 
@@ -701,7 +701,7 @@ func TestNormalizeMappingsDoesNotModifyInput(t *testing.T) {
 
 	// Verify result is correct
 	assert.Len(t, m, 2)
-	assert.Equal(t, uint64(0), m[0].Offset)
+	assert.Equal(t, 0, m[0].Offset)
 	assert.Equal(t, 4*blockSize, m[0].Length)
 
 	// Verify input was not modified
@@ -774,7 +774,7 @@ func TestMergeMappings_FrameTableSplits(t *testing.T) {
 				t.Helper()
 				require.Len(t, m, 3)
 
-				assert.Equal(t, uint64(0), m[0].Offset)
+				assert.Equal(t, 0, m[0].Offset)
 				assert.Equal(t, 2*blockSize, m[0].Length)
 				assertFrameTable(t, "left", m[0], 0, 0, 2, frameU, frameC)
 
@@ -830,7 +830,7 @@ func TestMergeMappings_FrameTableSplits(t *testing.T) {
 				t.Helper()
 				require.Len(t, m, 2)
 
-				assert.Equal(t, uint64(0), m[0].Offset)
+				assert.Equal(t, 0, m[0].Offset)
 				assert.Equal(t, 2*blockSize, m[0].Length)
 				assertFrameTable(t, "left-head", m[0], 0, 0, 2, frameU, frameC)
 
@@ -921,13 +921,13 @@ func TestMergeMappings_FrameTableSplits(t *testing.T) {
 				// Build B left: block [2*bs..3*bs), storage offset 0, frame 0 only.
 				assert.Equal(t, 2*blockSize, m[1].Offset)
 				assert.Equal(t, 1*blockSize, m[1].Length)
-				assert.Equal(t, uint64(0), m[1].BuildStorageOffset)
+				assert.Equal(t, 0, m[1].BuildStorageOffset)
 				assertFrameTable(t, "build-B-left", m[1], 0, 0, 1, frameU, frameC)
 
 				// Diff
 				assert.Equal(t, compDiffID, m[2].BuildId)
 
-				// Build B right: block [5*bs..6*bs), storage offset 3*bs, frame 3.
+				// Build B right: block [5*bs..6*bs), storage offset 3*blockSize, frame 3.
 				assert.Equal(t, 5*blockSize, m[3].Offset)
 				assert.Equal(t, 1*blockSize, m[3].Length)
 				assert.Equal(t, 3*blockSize, m[3].BuildStorageOffset)
@@ -968,12 +968,12 @@ func TestMergeMappings_FrameTableSplits(t *testing.T) {
 					"%s: FrameTable.StartAt.U must be <= BuildStorageOffset", label)
 
 				// FrameFor must find the first block.
-				_, _, err := ft.FrameFor(int64(m.BuildStorageOffset))
+				_, _, err := ft.FrameFor(int(m.BuildStorageOffset))
 				require.NoError(t, err, "%s: FrameFor(start)", label)
 
 				// FrameFor must find the last block.
 				if m.Length > 0 {
-					lastByte := int64(m.BuildStorageOffset + m.Length - 1)
+					lastByte := int(m.BuildStorageOffset + m.Length - 1)
 					_, _, err := ft.FrameFor(lastByte)
 					require.NoError(t, err, "%s: FrameFor(last byte)", label)
 				}

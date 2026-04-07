@@ -53,19 +53,19 @@ func (b *File) Header() *header.Header {
 // retry the same failing read forever.
 const maxTransitionRetries = 2
 
-func (b *File) ReadAt(ctx context.Context, p []byte, off int64) (n int, err error) {
+func (b *File) ReadAt(ctx context.Context, p []byte, off int) (n int, err error) {
 	transitionRetries := 0
 
 	for n < len(p) {
 		h := b.header.Load()
 
-		mappedToBuild, err := h.GetShiftedMapping(ctx, off+int64(n))
+		mappedToBuild, err := h.GetShiftedMapping(ctx, off+n)
 		if err != nil {
 			return 0, fmt.Errorf("failed to get mapping: %w", err)
 		}
 
-		remainingReadLength := int64(len(p)) - int64(n)
-		readLength := min(int64(mappedToBuild.Length), remainingReadLength)
+		remainingReadLength := len(p) - n
+		readLength := min(int(mappedToBuild.Length), remainingReadLength)
 
 		if readLength <= 0 {
 			logger.L().Error(ctx, fmt.Sprintf(
@@ -77,7 +77,7 @@ func (b *File) ReadAt(ctx context.Context, p []byte, off int64) (n int, err erro
 				b.fileType,
 				mappedToBuild.Offset,
 				n,
-				int64(n)+readLength,
+				n+readLength,
 				n,
 				mappedToBuild.Length,
 				remainingReadLength,
@@ -90,7 +90,7 @@ func (b *File) ReadAt(ctx context.Context, p []byte, off int64) (n int, err erro
 		// We will use this to handle base builds that are already diffs.
 		// The passed slice p must start as empty, otherwise we would need to copy the empty values there.
 		if mappedToBuild.BuildId == uuid.Nil {
-			n += int(readLength)
+			n += readLength
 
 			continue
 		}
@@ -102,8 +102,8 @@ func (b *File) ReadAt(ctx context.Context, p []byte, off int64) (n int, err erro
 		}
 
 		buildN, err := mappedBuild.ReadAt(ctx,
-			p[n:int64(n)+readLength],
-			int64(mappedToBuild.Offset),
+			p[n:n+readLength],
+			int(mappedToBuild.Offset),
 			mappedToBuild.FrameTable,
 		)
 		if err != nil {
@@ -128,7 +128,7 @@ func (b *File) ReadAt(ctx context.Context, p []byte, off int64) (n int, err erro
 }
 
 // The slice access must be in the predefined blocksize of the build.
-func (b *File) Slice(ctx context.Context, off, _ int64) ([]byte, error) {
+func (b *File) Slice(ctx context.Context, off, _ int) ([]byte, error) {
 	transitionRetries := 0
 
 	for {
@@ -150,7 +150,7 @@ func (b *File) Slice(ctx context.Context, off, _ int64) ([]byte, error) {
 			return nil, fmt.Errorf("failed to get build: %w", err)
 		}
 
-		result, err := diff.Slice(ctx, int64(mappedBuild.Offset), int64(h.Metadata.BlockSize), mappedBuild.FrameTable)
+		result, err := diff.Slice(ctx, int(mappedBuild.Offset), int(h.Metadata.BlockSize), mappedBuild.FrameTable)
 		if err != nil {
 			var transErr *storage.PeerTransitionedError
 			if errors.As(err, &transErr) && transitionRetries < maxTransitionRetries {
@@ -202,7 +202,7 @@ func (b *File) swapHeader(transErr *storage.PeerTransitionedError) error {
 // buildFileSize returns the uncompressed file size for buildID from the
 // header's BuildFiles map. Returns 0 for V3 headers (no BuildFiles), which
 // signals the read path to fall back to a Size() RPC.
-func (b *File) buildFileSize(h *header.Header, buildID uuid.UUID) int64 {
+func (b *File) buildFileSize(h *header.Header, buildID uuid.UUID) int {
 	if info, ok := h.BuildFiles[buildID]; ok {
 		return info.Size
 	}
@@ -210,12 +210,12 @@ func (b *File) buildFileSize(h *header.Header, buildID uuid.UUID) int64 {
 	return 0
 }
 
-func (b *File) getBuild(ctx context.Context, buildID uuid.UUID, uncompressedSize int64, ct storage.CompressionType) (Diff, error) {
+func (b *File) getBuild(ctx context.Context, buildID uuid.UUID, uncompressedSize int, ct storage.CompressionType) (Diff, error) {
 	storageDiff, err := newStorageDiff(
 		b.store.cachePath,
 		buildID.String(),
 		b.fileType,
-		int64(b.Header().Metadata.BlockSize),
+		int(b.Header().Metadata.BlockSize),
 		b.metrics,
 		b.persistence,
 		uncompressedSize, ct,

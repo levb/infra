@@ -14,10 +14,10 @@ type BuildDevice struct {
 	*build.File
 
 	header    *header.Header
-	blockSize int64
+	blockSize int
 }
 
-func NewBuildDevice(file *build.File, header *header.Header, blockSize int64) *BuildDevice {
+func NewBuildDevice(file *build.File, header *header.Header, blockSize int) *BuildDevice {
 	return &BuildDevice{
 		File:      file,
 		header:    header,
@@ -29,7 +29,7 @@ func (m *BuildDevice) Close() error {
 	return nil
 }
 
-func (m *BuildDevice) BlockSize() int64 {
+func (m *BuildDevice) BlockSize() int {
 	return m.blockSize
 }
 
@@ -37,6 +37,6 @@ func (m *BuildDevice) Header() *header.Header {
 	return m.header
 }
 
-func (m *BuildDevice) Size(_ context.Context) (int64, error) {
-	return int64(m.header.Metadata.Size), nil
+func (m *BuildDevice) Size(_ context.Context) (int, error) {
+	return int(m.header.Metadata.Size), nil
 }

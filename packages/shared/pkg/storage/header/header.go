@@ -17,7 +17,7 @@ import (
 // BuildFileInfo holds metadata about a build's data file, stored in the header
 // so the read path can avoid network round-trips (e.g. Size() calls to GCS).
 type BuildFileInfo struct {
-	Size     int64    // uncompressed file size
+	Size     int      // uncompressed file size
 	Checksum [32]byte // SHA-256 of uncompressed data; zero value means unknown
 }
 
@@ -33,7 +33,7 @@ type Header struct {
 	// to a Size() RPC for those.
 	BuildFiles  map[uuid.UUID]BuildFileInfo
 	blockStarts *bitset.BitSet
-	startMap    map[int64]*BuildMap
+	startMap    map[int]*BuildMap
 
 	Mapping []*BuildMap
 }
@@ -70,19 +70,19 @@ func NewHeader(metadata *Metadata, mapping []*BuildMap) (*Header, error) {
 	if len(mapping) == 0 {
 		mapping = []*BuildMap{{
 			Offset:             0,
-			Length:             metadata.Size,
+			Length:             int(metadata.Size),
 			BuildId:            metadata.BuildId,
 			BuildStorageOffset: 0,
 		}}
 	}
 
-	blocks := TotalBlocks(int64(metadata.Size), int64(metadata.BlockSize))
+	blocks := TotalBlocks(int(metadata.Size), int(metadata.BlockSize))
 
 	intervals := bitset.New(uint(blocks))
-	startMap := make(map[int64]*BuildMap, len(mapping))
+	startMap := make(map[int]*BuildMap, len(mapping))
 
 	for _, m := range mapping {
-		block := BlockIdx(int64(m.Offset), int64(metadata.BlockSize))
+		block := BlockIdx(int(m.Offset), int(metadata.BlockSize))
 
 		intervals.Set(uint(block))
 		startMap[block] = m
@@ -117,16 +117,16 @@ func (t *Header) IsNormalizeFixApplied() bool {
 	return t.Metadata.Version >= NormalizeFixVersion
 }
 
-func (t *Header) GetShiftedMapping(ctx context.Context, offset int64) (BuildMap, error) {
+func (t *Header) GetShiftedMapping(ctx context.Context, offset int) (BuildMap, error) {
 	mapping, shift, err := t.getMapping(ctx, offset)
 	if err != nil {
 		return BuildMap{}, err
 	}
-	mappedLength := int64(mapping.Length) - shift
+	mappedLength := mapping.Length - shift
 
 	b := BuildMap{
-		Offset:     mapping.BuildStorageOffset + uint64(shift),
-		Length:     uint64(mappedLength),
+		Offset:     mapping.BuildStorageOffset + shift,
+		Length:     mappedLength,
 		BuildId:    mapping.BuildId,
 		FrameTable: mapping.FrameTable,
 	}
@@ -138,8 +138,8 @@ func (t *Header) GetShiftedMapping(ctx context.Context, offset int64) (BuildMap,
 
 		b.Length = 0
 		logger.L().Warn(ctx, "mapped length is negative, but normalize fix is not applied",
-			zap.Int64("offset", offset),
-			zap.Int64("mappedLength", mappedLength),
+			zap.Int("offset", offset),
+			zap.Int("mappedLength", mappedLength),
 			logger.WithBuildID(mapping.BuildId.String()),
 		)
 	}
@@ -148,56 +148,56 @@ func (t *Header) GetShiftedMapping(ctx context.Context, offset int64) (BuildMap,
 }
 
 // TODO: Maybe we can optimize mapping by automatically assuming the mapping is uuid.Nil if we don't find it + stopping storing the nil mapping.
-func (t *Header) getMapping(ctx context.Context, offset int64) (*BuildMap, int64, error) {
-	if offset < 0 || offset >= int64(t.Metadata.Size) {
+func (t *Header) getMapping(ctx context.Context, offset int) (*BuildMap, int, error) {
+	if offset < 0 || offset >= int(t.Metadata.Size) {
 		if t.IsNormalizeFixApplied() {
 			return nil, 0, fmt.Errorf("offset %d is out of bounds (size: %d)", offset, t.Metadata.Size)
 		}
 
 		logger.L().Warn(ctx, "offset is out of bounds, but normalize fix is not applied",
-			zap.Int64("offset", offset),
-			zap.Int64("size", int64(t.Metadata.Size)),
+			zap.Int("offset", offset),
+			zap.Int("size", int(t.Metadata.Size)),
 			logger.WithBuildID(t.Metadata.BuildId.String()),
 		)
 	}
-	if offset%int64(t.Metadata.BlockSize) != 0 {
+	if offset%int(t.Metadata.BlockSize) != 0 {
 		if t.IsNormalizeFixApplied() {
 			return nil, 0, fmt.Errorf("offset %d is not aligned to block size %d", offset, t.Metadata.BlockSize)
 		}
 
 		logger.L().Warn(ctx, "offset is not aligned to block size, but normalize fix is not applied",
-			zap.Int64("offset", offset),
-			zap.Int64("blockSize", int64(t.Metadata.BlockSize)),
+			zap.Int("offset", offset),
+			zap.Int("blockSize", int(t.Metadata.BlockSize)),
 			logger.WithBuildID(t.Metadata.BuildId.String()),
 		)
 	}
 
-	block := BlockIdx(offset, int64(t.Metadata.BlockSize))
+	block := BlockIdx(offset, int(t.Metadata.BlockSize))
 
 	start, ok := t.blockStarts.PreviousSet(uint(block))
 	if !ok {
 		return nil, 0, fmt.Errorf("no source found for offset %d", offset)
 	}
 
-	mapping, ok := t.startMap[int64(start)]
+	mapping, ok := t.startMap[int(start)]
 	if !ok {
 		return nil, 0, fmt.Errorf("no mapping found for offset %d", offset)
 	}
 
-	shift := (block - int64(start)) * int64(t.Metadata.BlockSize)
+	shift := (block - int(start)) * int(t.Metadata.BlockSize)
 
 	// Verify that the offset falls within this mapping's range
-	if shift >= int64(mapping.Length) {
+	if shift >= mapping.Length {
 		if t.IsNormalizeFixApplied() {
 			return nil, 0, fmt.Errorf("offset %d (block %d) is beyond the end of mapping at offset %d (ends at %d)",
 				offset, block, mapping.Offset, mapping.Offset+mapping.Length)
 		}
 
 		logger.L().Warn(ctx, "offset is beyond the end of mapping, but normalize fix is not applied",
-			zap.Int64("offset", offset),
-			zap.Int64("block", block),
-			zap.Uint64("mappingOffset", mapping.Offset),
-			zap.Uint64("mappingEnd", mapping.Offset+mapping.Length),
+			zap.Int("offset", offset),
+			zap.Int("block", block),
+			zap.Int("mappingOffset", mapping.Offset),
+			zap.Int("mappingEnd", mapping.Offset+mapping.Length),
 			logger.WithBuildID(t.Metadata.BuildId.String()),
 		)
 	}
@@ -258,22 +258,24 @@ func ValidateHeader(h *Header) error {
 	// Check that last mapping covers up to (at least) Size
 	lastMapping := sortedMappings[len(sortedMappings)-1]
 	lastEnd := lastMapping.Offset + lastMapping.Length
-	if lastEnd < h.Metadata.Size {
+	size := int(h.Metadata.Size)
+	bs := int(h.Metadata.BlockSize)
+	if lastEnd < size {
 		return fmt.Errorf("mappings don't cover entire file: last mapping ends at %d but file size is %d (missing %d bytes) for buildId %s",
-			lastEnd, h.Metadata.Size, h.Metadata.Size-lastEnd, h.Metadata.BuildId.String())
+			lastEnd, size, size-lastEnd, h.Metadata.BuildId.String())
 	}
 
 	// Allow last mapping to extend up to one block past size (for alignment)
-	if lastEnd > h.Metadata.Size+h.Metadata.BlockSize {
+	if lastEnd > size+bs {
 		return fmt.Errorf("last mapping extends too far: ends at %d but file size is %d (overhang=%d bytes, max allowed=%d) for buildId %s",
-			lastEnd, h.Metadata.Size, lastEnd-h.Metadata.Size, h.Metadata.BlockSize, h.Metadata.BuildId.String())
+			lastEnd, size, lastEnd-size, bs, h.Metadata.BuildId.String())
 	}
 
 	// Validate individual mapping bounds
 	for i, m := range h.Mapping {
-		if m.Offset > h.Metadata.Size {
+		if m.Offset > size {
 			return fmt.Errorf("mapping[%d] has Offset %d beyond header size %d for buildId %s",
-				i, m.Offset, h.Metadata.Size, m.BuildId.String())
+				i, m.Offset, size, m.BuildId.String())
 		}
 		if m.Length == 0 {
 			return fmt.Errorf("mapping[%d] has zero length at offset %d for buildId %s",

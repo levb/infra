@@ -71,7 +71,7 @@ func (s FrameSize) String() string {
 }
 
 type Range struct {
-	Start  int64
+	Start  int
 	Length int
 }
 
@@ -104,10 +104,10 @@ func (ft *FrameTable) IsCompressed() bool {
 	return ft != nil && ft.compressionType != CompressionNone
 }
 
-func (ft *FrameTable) Size() (uncompressed, compressed int64) {
+func (ft *FrameTable) Size() (uncompressed, compressed int) {
 	for _, frame := range ft.Frames {
-		uncompressed += int64(frame.U)
-		compressed += int64(frame.C)
+		uncompressed += int(frame.U)
+		compressed += int(frame.C)
 	}
 
 	return uncompressed, compressed
@@ -136,14 +136,14 @@ func (ft *FrameTable) Subset(r Range, from int) (*FrameTable, int) {
 	}
 
 	startSet := false
-	requestedEnd := r.Start + int64(r.Length)
+	requestedEnd := int64(r.Start + r.Length)
 	nextFrom := from
 
 	for i := from; i < len(ft.Frames); i++ {
 		frame := ft.Frames[i]
 		frameEnd := currentOffset.U + int64(frame.U)
 
-		if frameEnd <= r.Start {
+		if frameEnd <= int64(r.Start) {
 			currentOffset.Add(frame)
 			nextFrom = i + 1
 
@@ -170,15 +170,16 @@ func (ft *FrameTable) Subset(r Range, from int) (*FrameTable, int) {
 }
 
 // FrameFor finds the frame containing the given offset and returns its start position and full size.
-func (ft *FrameTable) FrameFor(offset int64) (starts FrameOffset, size FrameSize, err error) {
+func (ft *FrameTable) FrameFor(offset int) (starts FrameOffset, size FrameSize, err error) {
 	if ft == nil {
 		return FrameOffset{}, FrameSize{}, fmt.Errorf("FrameFor called with nil frame table - data is not compressed")
 	}
 
+	off64 := int64(offset)
 	currentOffset := ft.StartAt
 	for _, frame := range ft.Frames {
 		frameEnd := currentOffset.U + int64(frame.U)
-		if offset >= currentOffset.U && offset < frameEnd {
+		if off64 >= currentOffset.U && off64 < frameEnd {
 			return currentOffset, frame, nil
 		}
 		currentOffset.Add(frame)

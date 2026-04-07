@@ -15,11 +15,11 @@ type Empty struct {
 
 var _ ReadonlyDevice = (*Empty)(nil)
 
-func NewEmpty(size int64, blockSize int64, buildID uuid.UUID) (*Empty, error) {
+func NewEmpty(size int, blockSize int, buildID uuid.UUID) (*Empty, error) {
 	h, err := header.NewHeader(header.NewTemplateMetadata(
 		buildID,
-		uint64(blockSize),
-		uint64(size),
+		blockSize,
+		size,
 	), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create header: %w", err)
@@ -30,8 +30,8 @@ func NewEmpty(size int64, blockSize int64, buildID uuid.UUID) (*Empty, error) {
 	}, nil
 }
 
-func (e *Empty) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
-	slice, err := e.Slice(ctx, off, int64(len(p)))
+func (e *Empty) ReadAt(ctx context.Context, p []byte, off int) (int, error) {
+	slice, err := e.Slice(ctx, off, len(p))
 	if err != nil {
 		return 0, fmt.Errorf("failed to slice empty: %w", err)
 	}
@@ -39,21 +39,21 @@ func (e *Empty) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
 	return copy(p, slice), nil
 }
 
-func (e *Empty) Size(_ context.Context) (int64, error) {
-	return int64(e.header.Metadata.Size), nil
+func (e *Empty) Size(_ context.Context) (int, error) {
+	return int(e.header.Metadata.Size), nil
 }
 
-func (e *Empty) BlockSize() int64 {
-	return int64(e.header.Metadata.BlockSize)
+func (e *Empty) BlockSize() int {
+	return int(e.header.Metadata.BlockSize)
 }
 
 func (e *Empty) Close() error {
 	return nil
 }
 
-func (e *Empty) Slice(_ context.Context, off, length int64) ([]byte, error) {
+func (e *Empty) Slice(_ context.Context, off, length int) ([]byte, error) {
 	end := off + length
-	size := int64(e.header.Metadata.Size)
+	size := int(e.header.Metadata.Size)
 	if end > size {
 		end = size
 		length = end - off

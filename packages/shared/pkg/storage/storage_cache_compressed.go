@@ -19,7 +19,7 @@ var compressedCacheReadAttrs = []attribute.KeyValue{
 // openReaderCompressed handles the compressed cache path for OpenRangeReader.
 // NFS stores compressed frames (.frm); on hit we decompress, on miss we fetch
 // raw compressed bytes and tee them to NFS on Close.
-func (c *cachedSeekable) openReaderCompressed(ctx context.Context, offsetU int64, frameTable *FrameTable) (io.ReadCloser, error) {
+func (c *cachedSeekable) openReaderCompressed(ctx context.Context, offsetU int, frameTable *FrameTable) (io.ReadCloser, error) {
 	frameStart, frameSize, err := frameTable.FrameFor(offsetU)
 	if err != nil {
 		return nil, fmt.Errorf("cache OpenRangeReader: frame lookup for offset %d: %w", offsetU, err)
@@ -52,7 +52,7 @@ func (c *cachedSeekable) openReaderCompressed(ctx context.Context, offsetU int64
 	timer.Failure(ctx, 0)
 
 	// Cache miss: fetch raw compressed bytes via OpenRangeReader(nil frameTable).
-	raw, err := c.inner.OpenRangeReader(ctx, frameStart.C, int64(frameSize.C), nil)
+	raw, err := c.inner.OpenRangeReader(ctx, int(frameStart.C), int(frameSize.C), nil)
 	if err != nil {
 		return nil, fmt.Errorf("cache OpenRangeReader: raw fetch at C=%d: %w", frameStart.C, err)
 	}
@@ -78,7 +78,7 @@ func newDecompressingCacheReader(
 	cache *cachedSeekable,
 	ctx context.Context, //nolint:revive // ctx after other params for readability at call site
 	framePath string,
-	offset int64,
+	offset int,
 ) (io.ReadCloser, error) {
 	var compressedBuf bytes.Buffer
 	compressedBuf.Grow(expectedSize)
@@ -110,7 +110,7 @@ type decompressingCacheReader struct {
 	cache         *cachedSeekable
 	ctx           context.Context //nolint:containedctx // needed for async cache write-back in Close
 	framePath     string
-	offset        int64
+	offset        int
 }
 
 func (r *decompressingCacheReader) Read(p []byte) (int, error) {

@@ -12,7 +12,7 @@ import (
 // startBlock-endBlock [offset, offset+length) := [buildStorageOffset, buildStorageOffset+length) ⊂ buildId, length in bytes
 //
 // It is used for debugging and visualization.
-func (mapping *BuildMap) Format(blockSize uint64) string {
+func (mapping *BuildMap) Format(blockSize int) string {
 	rangeMessage := fmt.Sprintf("%d-%d", mapping.Offset/blockSize, (mapping.Offset+mapping.Length)/blockSize)
 
 	return fmt.Sprintf(
@@ -44,7 +44,7 @@ func Layers(mappings []*BuildMap) *map[uuid.UUID]struct{} {
 // It is used for debugging and visualization.
 //
 // You can pass maps to visualize different groups of buildIds.
-func Visualize(mappings []*BuildMap, size, blockSize, cols uint64, bottomGroup, topGroup *map[uuid.UUID]struct{}) string {
+func Visualize(mappings []*BuildMap, size, blockSize, cols int, bottomGroup, topGroup *map[uuid.UUID]struct{}) string {
 	output := make([]rune, size/blockSize)
 
 	for outputIdx := range output {
@@ -69,8 +69,8 @@ func Visualize(mappings []*BuildMap, size, blockSize, cols uint64, bottomGroup, 
 
 	lineOutput := make([]string, 0)
 
-	for i := uint64(0); i < size/blockSize; i += cols {
-		if i+cols <= uint64(len(output)) {
+	for i := 0; i < len(output); i += cols {
+		if i+cols <= len(output) {
 			lineOutput = append(lineOutput, string(output[i:i+cols]))
 		} else {
 			lineOutput = append(lineOutput, string(output[i:]))
@@ -85,8 +85,8 @@ func Visualize(mappings []*BuildMap, size, blockSize, cols uint64, bottomGroup, 
 //
 // It checks if the mappings are contiguous and if the length of each mapping is a multiple of the block size.
 // It also checks if the mappings cover the whole size.
-func ValidateMappings(mappings []*BuildMap, size, blockSize uint64) error {
-	var currentOffset uint64
+func ValidateMappings(mappings []*BuildMap, size, blockSize int) error {
+	var currentOffset int
 
 	for _, mapping := range mappings {
 		if currentOffset != mapping.Offset {

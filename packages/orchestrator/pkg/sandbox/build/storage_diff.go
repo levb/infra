@@ -18,11 +18,11 @@ type StorageDiff struct {
 	storagePath       string
 	storageObjectType storage.SeekableObjectType
 
-	blockSize        int64
+	blockSize        int
 	metrics          blockmetrics.Metrics
 	persistence      storage.StorageProvider
 	featureFlags     *featureflags.Client
-	uncompressedSize int64 // 0 means unknown (fall back to Size() call)
+	uncompressedSize int // 0 means unknown (fall back to Size() call)
 }
 
 var _ Diff = (*StorageDiff)(nil)
@@ -39,10 +39,10 @@ func newStorageDiff(
 	basePath string,
 	buildId string,
 	diffType DiffType,
-	blockSize int64,
+	blockSize int,
 	metrics blockmetrics.Metrics,
 	persistence storage.StorageProvider,
-	uncompressedSize int64,
+	uncompressedSize int,
 	ct storage.CompressionType,
 	ff *featureflags.Client,
 ) (*StorageDiff, error) {
@@ -119,7 +119,7 @@ func (b *StorageDiff) Close() error {
 	return c.Close()
 }
 
-func (b *StorageDiff) ReadAt(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error) {
+func (b *StorageDiff) ReadAt(ctx context.Context, p []byte, off int, ft *storage.FrameTable) (int, error) {
 	c, err := b.chunker.Wait()
 	if err != nil {
 		return 0, err
@@ -128,7 +128,7 @@ func (b *StorageDiff) ReadAt(ctx context.Context, p []byte, off int64, ft *stora
 	return c.ReadAt(ctx, p, off, ft)
 }
 
-func (b *StorageDiff) Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
+func (b *StorageDiff) Slice(ctx context.Context, off, length int, ft *storage.FrameTable) ([]byte, error) {
 	c, err := b.chunker.Wait()
 	if err != nil {
 		return nil, err
@@ -142,7 +142,7 @@ func (b *StorageDiff) CachePath() (string, error) {
 	return b.cachePath, nil
 }
 
-func (b *StorageDiff) FileSize() (int64, error) {
+func (b *StorageDiff) FileSize() (int, error) {
 	c, err := b.chunker.Wait()
 	if err != nil {
 		return 0, err
@@ -151,10 +151,10 @@ func (b *StorageDiff) FileSize() (int64, error) {
 	return c.FileSize()
 }
 
-func (b *StorageDiff) Size(_ context.Context) (int64, error) {
+func (b *StorageDiff) Size(_ context.Context) (int, error) {
 	return b.FileSize()
 }
 
-func (b *StorageDiff) BlockSize() int64 {
+func (b *StorageDiff) BlockSize() int {
 	return b.blockSize
 }

@@ -25,10 +25,10 @@ func serializeV3(metadata *Metadata, mappings []*BuildMap) ([]byte, error) {
 
 	for _, mapping := range mappings {
 		v3 := &v3SerializableBuildMap{
-			Offset:             mapping.Offset,
-			Length:             mapping.Length,
+			Offset:             uint64(mapping.Offset),
+			Length:             uint64(mapping.Length),
 			BuildId:            mapping.BuildId,
-			BuildStorageOffset: mapping.BuildStorageOffset,
+			BuildStorageOffset: uint64(mapping.BuildStorageOffset),
 		}
 		if err := binary.Write(&buf, binary.LittleEndian, v3); err != nil {
 			return nil, fmt.Errorf("failed to write block mapping: %w", err)
@@ -54,10 +54,10 @@ func deserializeV3(metadata *Metadata, blockData []byte) (*Header, error) {
 		}
 
 		mappings = append(mappings, &BuildMap{
-			Offset:             v3.Offset,
-			Length:             v3.Length,
+			Offset:             int(v3.Offset),
+			Length:             int(v3.Length),
 			BuildId:            v3.BuildId,
-			BuildStorageOffset: v3.BuildStorageOffset,
+			BuildStorageOffset: int(v3.BuildStorageOffset),
 		})
 	}
 

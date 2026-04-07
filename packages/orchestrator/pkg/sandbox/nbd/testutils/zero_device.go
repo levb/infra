@@ -13,21 +13,21 @@ import (
 var _ block.ReadonlyDevice = (*ZeroDevice)(nil)
 
 type ZeroDevice struct {
-	blockSize int64
-	size      int64
+	blockSize int
+	size      int
 	header    *header.Header
 }
 
-func NewZeroDevice(size int64, blockSize int64) (*ZeroDevice, error) {
+func NewZeroDevice(size int, blockSize int) (*ZeroDevice, error) {
 	h, err := header.NewHeader(header.NewTemplateMetadata(
 		uuid.Nil,
-		uint64(blockSize),
-		uint64(size),
+		blockSize,
+		size,
 	),
 		[]*header.BuildMap{
 			{
 				Offset:             0,
-				Length:             uint64(size),
+				Length:             size,
 				BuildId:            uuid.Nil,
 				BuildStorageOffset: 0,
 			},
@@ -44,17 +44,17 @@ func NewZeroDevice(size int64, blockSize int64) (*ZeroDevice, error) {
 	}, nil
 }
 
-func (z *ZeroDevice) ReadAt(_ context.Context, p []byte, _ int64) (n int, err error) {
+func (z *ZeroDevice) ReadAt(_ context.Context, p []byte, _ int) (n int, err error) {
 	clear(p)
 
 	return len(p), nil
 }
 
-func (z *ZeroDevice) BlockSize() int64 {
+func (z *ZeroDevice) BlockSize() int {
 	return z.blockSize
 }
 
-func (z *ZeroDevice) Slice(_ context.Context, _, length int64) ([]byte, error) {
+func (z *ZeroDevice) Slice(_ context.Context, _, length int) ([]byte, error) {
 	return make([]byte, length), nil
 }
 
@@ -66,6 +66,6 @@ func (z *ZeroDevice) Close() error {
 	return nil
 }
 
-func (z *ZeroDevice) Size(_ context.Context) (int64, error) {
+func (z *ZeroDevice) Size(_ context.Context) (int, error) {
 	return z.size, nil
 }

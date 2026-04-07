@@ -22,7 +22,7 @@ type DirectProvider struct {
 	header *header.Header
 
 	path      string
-	blockSize int64
+	blockSize int
 
 	// TODO: Remove when the snapshot flow is improved
 	finishedOperations chan struct{}
@@ -131,7 +131,7 @@ func (o *DirectProvider) exportToDiff(ctx context.Context, out io.Writer) (*head
 		return nil, fmt.Errorf("error flushing path: %w", err)
 	}
 
-	builder := header.NewDiffMetadataBuilder(int64(o.header.Metadata.Size), o.blockSize)
+	builder := header.NewDiffMetadataBuilder(int(o.header.Metadata.Size), o.blockSize)
 
 	f, err := os.Open(o.path)
 	if err != nil {
@@ -140,8 +140,8 @@ func (o *DirectProvider) exportToDiff(ctx context.Context, out io.Writer) (*head
 	defer f.Close()
 
 	block := make([]byte, o.blockSize)
-	for i := int64(0); i < int64(o.header.Metadata.Size); i += o.blockSize {
-		n, err := f.ReadAt(block, i)
+	for i := 0; i < int(o.header.Metadata.Size); i += o.blockSize {
+		n, err := f.ReadAt(block, int64(i))
 		if err != nil {
 			return nil, fmt.Errorf("error reading from file: %w", err)
 		}

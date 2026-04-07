@@ -62,9 +62,9 @@ func (m *Mapping) GetOffset(hostVirtAddr uintptr) (int64, uintptr, error) {
 }
 
 // GetHostVirtRanges returns the host virtual addresses and sizes (ranges) that cover exactly the given [offset, offset+length) range in the host virtual address space.
-func (m *Mapping) GetHostVirtRanges(off int64, size int64) (hostVirtRanges []block.Range, err error) {
-	for n := int64(0); n < size; {
-		currentOff := off + n
+func (m *Mapping) GetHostVirtRanges(off int, size int) (hostVirtRanges []block.Range, err error) {
+	for n := 0; n < size; {
+		currentOff := int64(off + n)
 
 		region, err := m.getHostVirtRegion(currentOff)
 		if err != nil {
@@ -72,9 +72,9 @@ func (m *Mapping) GetHostVirtRanges(off int64, size int64) (hostVirtRanges []blo
 		}
 
 		start := region.shiftedHostVirtAddr(currentOff)
-		remainingSize := min(int64(region.endHostVirtAddr()-start), size-n)
+		remainingSize := min(int(region.endHostVirtAddr()-start), size-n)
 
-		r := block.NewRange(int64(start), remainingSize)
+		r := block.NewRange(int(start), remainingSize)
 
 		hostVirtRanges = append(hostVirtRanges, r)
 

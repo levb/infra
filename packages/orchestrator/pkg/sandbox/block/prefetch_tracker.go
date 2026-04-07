@@ -11,9 +11,9 @@ import (
 // PrefetchData contains block access data for prefetch mapping.
 type PrefetchData struct {
 	// BlockEntries contains metadata for each block index
-	BlockEntries map[uint64]PrefetchBlockEntry
+	BlockEntries map[int]PrefetchBlockEntry
 	// BlockSize is the size of each block in bytes
-	BlockSize int64
+	BlockSize int
 }
 
 // AccessType represents the type of access that caused a block to be loaded.
@@ -30,28 +30,28 @@ const (
 
 // BlockEntry holds metadata about a tracked block.
 type PrefetchBlockEntry struct {
-	Index      uint64
-	Order      uint64
+	Index      int
+	Order      int
 	AccessType AccessType
 }
 
 type PrefetchTracker struct {
 	mu sync.RWMutex
 
-	blockSize int64
+	blockSize int
 
 	// blockEntries stores metadata for each block index
-	blockEntries map[uint64]PrefetchBlockEntry
+	blockEntries map[int]PrefetchBlockEntry
 	// orderCounter tracks the next order number to assign
-	orderCounter uint64
+	orderCounter int
 
 	isTracking atomic.Bool
 }
 
-func NewPrefetchTracker(blockSize int64) *PrefetchTracker {
+func NewPrefetchTracker(blockSize int) *PrefetchTracker {
 	t := &PrefetchTracker{
 		blockSize:    blockSize,
-		blockEntries: make(map[uint64]PrefetchBlockEntry),
+		blockEntries: make(map[int]PrefetchBlockEntry),
 		orderCounter: 1,
 	}
 	t.isTracking.Store(true)
@@ -60,7 +60,7 @@ func NewPrefetchTracker(blockSize int64) *PrefetchTracker {
 }
 
 // Add adds an offset to the tracker with metadata about the access.
-func (t *PrefetchTracker) Add(off int64, accessType AccessType) {
+func (t *PrefetchTracker) Add(off int, accessType AccessType) {
 	if !t.isTracking.Load() {
 		return
 	}
@@ -68,7 +68,7 @@ func (t *PrefetchTracker) Add(off int64, accessType AccessType) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	idx := uint64(header.BlockIdx(off, t.blockSize))
+	idx := header.BlockIdx(off, t.blockSize)
 
 	// Only add if not already tracked
 	if _, ok := t.blockEntries[idx]; !ok {
@@ -89,7 +89,7 @@ func (t *PrefetchTracker) PrefetchData() PrefetchData {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	result := make(map[uint64]PrefetchBlockEntry, len(t.blockEntries))
+	result := make(map[int]PrefetchBlockEntry, len(t.blockEntries))
 	maps.Copy(result, t.blockEntries)
 
 	return PrefetchData{

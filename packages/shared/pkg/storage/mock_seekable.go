@@ -39,7 +39,7 @@ func (_m *MockSeekable) EXPECT() *MockSeekable_Expecter {
 }
 
 // OpenRangeReader provides a mock function for the type MockSeekable
-func (_mock *MockSeekable) OpenRangeReader(ctx context.Context, offsetU int64, length int64, frameTable *FrameTable) (io.ReadCloser, error) {
+func (_mock *MockSeekable) OpenRangeReader(ctx context.Context, offsetU int, length int, frameTable *FrameTable) (io.ReadCloser, error) {
 	ret := _mock.Called(ctx, offsetU, length, frameTable)
 
 	if len(ret) == 0 {
@@ -48,17 +48,17 @@ func (_mock *MockSeekable) OpenRangeReader(ctx context.Context, offsetU int64, l
 
 	var r0 io.ReadCloser
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, *FrameTable) (io.ReadCloser, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int, int, *FrameTable) (io.ReadCloser, error)); ok {
 		return returnFunc(ctx, offsetU, length, frameTable)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, *FrameTable) io.ReadCloser); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int, int, *FrameTable) io.ReadCloser); ok {
 		r0 = returnFunc(ctx, offsetU, length, frameTable)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(io.ReadCloser)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64, *FrameTable) error); ok {
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int, int, *FrameTable) error); ok {
 		r1 = returnFunc(ctx, offsetU, length, frameTable)
 	} else {
 		r1 = ret.Error(1)
@@ -73,26 +73,26 @@ type MockSeekable_OpenRangeReader_Call struct {
 
 // OpenRangeReader is a helper method to define mock.On call
 //   - ctx context.Context
-//   - offsetU int64
-//   - length int64
+//   - offsetU int
+//   - length int
 //   - frameTable *FrameTable
 func (_e *MockSeekable_Expecter) OpenRangeReader(ctx interface{}, offsetU interface{}, length interface{}, frameTable interface{}) *MockSeekable_OpenRangeReader_Call {
 	return &MockSeekable_OpenRangeReader_Call{Call: _e.mock.On("OpenRangeReader", ctx, offsetU, length, frameTable)}
 }
 
-func (_c *MockSeekable_OpenRangeReader_Call) Run(run func(ctx context.Context, offsetU int64, length int64, frameTable *FrameTable)) *MockSeekable_OpenRangeReader_Call {
+func (_c *MockSeekable_OpenRangeReader_Call) Run(run func(ctx context.Context, offsetU int, length int, frameTable *FrameTable)) *MockSeekable_OpenRangeReader_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
 			arg0 = args[0].(context.Context)
 		}
-		var arg1 int64
+		var arg1 int
 		if args[1] != nil {
-			arg1 = args[1].(int64)
+			arg1 = args[1].(int)
 		}
-		var arg2 int64
+		var arg2 int
 		if args[2] != nil {
-			arg2 = args[2].(int64)
+			arg2 = args[2].(int)
 		}
 		var arg3 *FrameTable
 		if args[3] != nil {
@@ -113,28 +113,28 @@ func (_c *MockSeekable_OpenRangeReader_Call) Return(readCloser io.ReadCloser, er
 	return _c
 }
 
-func (_c *MockSeekable_OpenRangeReader_Call) RunAndReturn(run func(ctx context.Context, offsetU int64, length int64, frameTable *FrameTable) (io.ReadCloser, error)) *MockSeekable_OpenRangeReader_Call {
+func (_c *MockSeekable_OpenRangeReader_Call) RunAndReturn(run func(ctx context.Context, offsetU int, length int, frameTable *FrameTable) (io.ReadCloser, error)) *MockSeekable_OpenRangeReader_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
 // Size provides a mock function for the type MockSeekable
-func (_mock *MockSeekable) Size(ctx context.Context) (int64, error) {
+func (_mock *MockSeekable) Size(ctx context.Context) (int, error) {
 	ret := _mock.Called(ctx)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Size")
 	}
 
-	var r0 int64
+	var r0 int
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context) (int64, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context) (int, error)); ok {
 		return returnFunc(ctx)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context) int64); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context) int); ok {
 		r0 = returnFunc(ctx)
 	} else {
-		r0 = ret.Get(0).(int64)
+		r0 = ret.Get(0).(int)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
 		r1 = returnFunc(ctx)
@@ -168,12 +168,12 @@ func (_c *MockSeekable_Size_Call) Run(run func(ctx context.Context)) *MockSeekab
 	return _c
 }
 
-func (_c *MockSeekable_Size_Call) Return(n int64, err error) *MockSeekable_Size_Call {
+func (_c *MockSeekable_Size_Call) Return(n int, err error) *MockSeekable_Size_Call {
 	_c.Call.Return(n, err)
 	return _c
 }
 
-func (_c *MockSeekable_Size_Call) RunAndReturn(run func(ctx context.Context) (int64, error)) *MockSeekable_Size_Call {
+func (_c *MockSeekable_Size_Call) RunAndReturn(run func(ctx context.Context) (int, error)) *MockSeekable_Size_Call {
 	_c.Call.Return(run)
 	return _c
 }

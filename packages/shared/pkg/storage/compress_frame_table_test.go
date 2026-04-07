@@ -28,10 +28,10 @@ func TestFrameFor(t *testing.T) {
 
 	t.Run("first byte of each frame", func(t *testing.T) {
 		t.Parallel()
-		for i, wantU := range []int64{0, 1 << 20, 2 << 20} {
+		for i, wantU := range []int{0, 1 << 20, 2 << 20} {
 			start, size, err := ft.FrameFor(wantU)
 			require.NoError(t, err, "frame %d", i)
-			require.Equal(t, wantU, start.U)
+			require.Equal(t, int64(wantU), start.U)
 			require.Equal(t, int32(1<<20), size.U)
 		}
 	})

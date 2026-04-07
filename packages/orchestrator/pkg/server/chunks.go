@@ -84,7 +84,7 @@ func (s *Server) GetBuildFileSize(ctx context.Context, req *orchestrator.GetBuil
 		return nil, toGRPCError(err)
 	}
 
-	return &orchestrator.GetBuildFileSizeResponse{TotalSize: size}, nil
+	return &orchestrator.GetBuildFileSizeResponse{TotalSize: int64(size)}, nil
 }
 
 func (s *Server) GetBuildFileExists(ctx context.Context, req *orchestrator.GetBuildFileExistsRequest) (*orchestrator.GetBuildFileExistsResponse, error) {
@@ -149,7 +149,7 @@ func (s *Server) ReadAtBuildSeekable(req *orchestrator.ReadAtBuildSeekableReques
 		return toGRPCError(err)
 	}
 
-	if err := src.Stream(ctx, offset, length, &seekableStreamSender{stream}); err != nil {
+	if err := src.Stream(ctx, int(offset), int(length), &seekableStreamSender{stream}); err != nil {
 		if errors.Is(err, peerserver.ErrNotAvailable) {
 			return stream.Send(&orchestrator.ReadAtBuildSeekableResponse{Availability: peerNotAvailable})
 		}

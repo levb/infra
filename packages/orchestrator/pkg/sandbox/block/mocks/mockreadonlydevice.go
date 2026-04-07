@@ -39,18 +39,18 @@ func (_m *MockReadonlyDevice) EXPECT() *MockReadonlyDevice_Expecter {
 }
 
 // BlockSize provides a mock function for the type MockReadonlyDevice
-func (_mock *MockReadonlyDevice) BlockSize() int64 {
+func (_mock *MockReadonlyDevice) BlockSize() int {
 	ret := _mock.Called()
 
 	if len(ret) == 0 {
 		panic("no return value specified for BlockSize")
 	}
 
-	var r0 int64
-	if returnFunc, ok := ret.Get(0).(func() int64); ok {
+	var r0 int
+	if returnFunc, ok := ret.Get(0).(func() int); ok {
 		r0 = returnFunc()
 	} else {
-		r0 = ret.Get(0).(int64)
+		r0 = ret.Get(0).(int)
 	}
 	return r0
 }
@@ -72,12 +72,12 @@ func (_c *MockReadonlyDevice_BlockSize_Call) Run(run func()) *MockReadonlyDevice
 	return _c
 }
 
-func (_c *MockReadonlyDevice_BlockSize_Call) Return(n int64) *MockReadonlyDevice_BlockSize_Call {
+func (_c *MockReadonlyDevice_BlockSize_Call) Return(n int) *MockReadonlyDevice_BlockSize_Call {
 	_c.Call.Return(n)
 	return _c
 }
 
-func (_c *MockReadonlyDevice_BlockSize_Call) RunAndReturn(run func() int64) *MockReadonlyDevice_BlockSize_Call {
+func (_c *MockReadonlyDevice_BlockSize_Call) RunAndReturn(run func() int) *MockReadonlyDevice_BlockSize_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -173,7 +173,7 @@ func (_c *MockReadonlyDevice_Header_Call) RunAndReturn(run func() *header.Header
 }
 
 // ReadAt provides a mock function for the type MockReadonlyDevice
-func (_mock *MockReadonlyDevice) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
+func (_mock *MockReadonlyDevice) ReadAt(ctx context.Context, p []byte, off int) (int, error) {
 	ret := _mock.Called(ctx, p, off)
 
 	if len(ret) == 0 {
@@ -182,15 +182,15 @@ func (_mock *MockReadonlyDevice) ReadAt(ctx context.Context, p []byte, off int64
 
 	var r0 int
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, []byte, int64) (int, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []byte, int) (int, error)); ok {
 		return returnFunc(ctx, p, off)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, []byte, int64) int); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []byte, int) int); ok {
 		r0 = returnFunc(ctx, p, off)
 	} else {
 		r0 = ret.Get(0).(int)
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, []byte, int64) error); ok {
+	if returnFunc, ok := ret.Get(1).(func(context.Context, []byte, int) error); ok {
 		r1 = returnFunc(ctx, p, off)
 	} else {
 		r1 = ret.Error(1)
@@ -206,12 +206,12 @@ type MockReadonlyDevice_ReadAt_Call struct {
 // ReadAt is a helper method to define mock.On call
 //   - ctx context.Context
 //   - p []byte
-//   - off int64
+//   - off int
 func (_e *MockReadonlyDevice_Expecter) ReadAt(ctx interface{}, p interface{}, off interface{}) *MockReadonlyDevice_ReadAt_Call {
 	return &MockReadonlyDevice_ReadAt_Call{Call: _e.mock.On("ReadAt", ctx, p, off)}
 }
 
-func (_c *MockReadonlyDevice_ReadAt_Call) Run(run func(ctx context.Context, p []byte, off int64)) *MockReadonlyDevice_ReadAt_Call {
+func (_c *MockReadonlyDevice_ReadAt_Call) Run(run func(ctx context.Context, p []byte, off int)) *MockReadonlyDevice_ReadAt_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -221,9 +221,9 @@ func (_c *MockReadonlyDevice_ReadAt_Call) Run(run func(ctx context.Context, p []
 		if args[1] != nil {
 			arg1 = args[1].([]byte)
 		}
-		var arg2 int64
+		var arg2 int
 		if args[2] != nil {
-			arg2 = args[2].(int64)
+			arg2 = args[2].(int)
 		}
 		run(
 			arg0,
@@ -239,28 +239,28 @@ func (_c *MockReadonlyDevice_ReadAt_Call) Return(n int, err error) *MockReadonly
 	return _c
 }
 
-func (_c *MockReadonlyDevice_ReadAt_Call) RunAndReturn(run func(ctx context.Context, p []byte, off int64) (int, error)) *MockReadonlyDevice_ReadAt_Call {
+func (_c *MockReadonlyDevice_ReadAt_Call) RunAndReturn(run func(ctx context.Context, p []byte, off int) (int, error)) *MockReadonlyDevice_ReadAt_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
 // Size provides a mock function for the type MockReadonlyDevice
-func (_mock *MockReadonlyDevice) Size(ctx context.Context) (int64, error) {
+func (_mock *MockReadonlyDevice) Size(ctx context.Context) (int, error) {
 	ret := _mock.Called(ctx)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Size")
 	}
 
-	var r0 int64
+	var r0 int
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context) (int64, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context) (int, error)); ok {
 		return returnFunc(ctx)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context) int64); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context) int); ok {
 		r0 = returnFunc(ctx)
 	} else {
-		r0 = ret.Get(0).(int64)
+		r0 = ret.Get(0).(int)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
 		r1 = returnFunc(ctx)
@@ -294,18 +294,18 @@ func (_c *MockReadonlyDevice_Size_Call) Run(run func(ctx context.Context)) *Mock
 	return _c
 }
 
-func (_c *MockReadonlyDevice_Size_Call) Return(n int64, err error) *MockReadonlyDevice_Size_Call {
+func (_c *MockReadonlyDevice_Size_Call) Return(n int, err error) *MockReadonlyDevice_Size_Call {
 	_c.Call.Return(n, err)
 	return _c
 }
 
-func (_c *MockReadonlyDevice_Size_Call) RunAndReturn(run func(ctx context.Context) (int64, error)) *MockReadonlyDevice_Size_Call {
+func (_c *MockReadonlyDevice_Size_Call) RunAndReturn(run func(ctx context.Context) (int, error)) *MockReadonlyDevice_Size_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
 // Slice provides a mock function for the type MockReadonlyDevice
-func (_mock *MockReadonlyDevice) Slice(ctx context.Context, off int64, length int64) ([]byte, error) {
+func (_mock *MockReadonlyDevice) Slice(ctx context.Context, off int, length int) ([]byte, error) {
 	ret := _mock.Called(ctx, off, length)
 
 	if len(ret) == 0 {
@@ -314,17 +314,17 @@ func (_mock *MockReadonlyDevice) Slice(ctx context.Context, off int64, length in
 
 	var r0 []byte
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) ([]byte, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int, int) ([]byte, error)); ok {
 		return returnFunc(ctx, off, length)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) []byte); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int, int) []byte); ok {
 		r0 = returnFunc(ctx, off, length)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).([]byte)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64) error); ok {
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int, int) error); ok {
 		r1 = returnFunc(ctx, off, length)
 	} else {
 		r1 = ret.Error(1)
@@ -339,25 +339,25 @@ type MockReadonlyDevice_Slice_Call struct {
 
 // Slice is a helper method to define mock.On call
 //   - ctx context.Context
-//   - off int64
-//   - length int64
+//   - off int
+//   - length int
 func (_e *MockReadonlyDevice_Expecter) Slice(ctx interface{}, off interface{}, length interface{}) *MockReadonlyDevice_Slice_Call {
 	return &MockReadonlyDevice_Slice_Call{Call: _e.mock.On("Slice", ctx, off, length)}
 }
 
-func (_c *MockReadonlyDevice_Slice_Call) Run(run func(ctx context.Context, off int64, length int64)) *MockReadonlyDevice_Slice_Call {
+func (_c *MockReadonlyDevice_Slice_Call) Run(run func(ctx context.Context, off int, length int)) *MockReadonlyDevice_Slice_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
 			arg0 = args[0].(context.Context)
 		}
-		var arg1 int64
+		var arg1 int
 		if args[1] != nil {
-			arg1 = args[1].(int64)
+			arg1 = args[1].(int)
 		}
-		var arg2 int64
+		var arg2 int
 		if args[2] != nil {
-			arg2 = args[2].(int64)
+			arg2 = args[2].(int)
 		}
 		run(
 			arg0,
@@ -373,7 +373,7 @@ func (_c *MockReadonlyDevice_Slice_Call) Return(bytes []byte, err error) *MockRe
 	return _c
 }
 
-func (_c *MockReadonlyDevice_Slice_Call) RunAndReturn(run func(ctx context.Context, off int64, length int64) ([]byte, error)) *MockReadonlyDevice_Slice_Call {
+func (_c *MockReadonlyDevice_Slice_Call) RunAndReturn(run func(ctx context.Context, off int, length int) ([]byte, error)) *MockReadonlyDevice_Slice_Call {
 	_c.Call.Return(run)
 	return _c
 }

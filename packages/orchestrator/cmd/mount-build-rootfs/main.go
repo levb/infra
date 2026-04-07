@@ -27,8 +27,8 @@ func main() {
 	verify := flag.Bool("verify", false, "verify rootfs integrity")
 	logging := flag.Bool("log", false, "enable logging")
 	empty := flag.Bool("empty", false, "create an empty rootfs instead of loading a build")
-	size := flag.Int64("size", 1024*1024*1024, "size of the rootfs (only used with -empty)")
-	blockSize := flag.Int64("block-size", 4096, "block size of the rootfs (only used with -empty)")
+	size := flag.Int("size", 1024*1024*1024, "size of the rootfs (only used with -empty)")
+	blockSize := flag.Int("block-size", 4096, "block size of the rootfs (only used with -empty)")
 
 	flag.Parse()
 
@@ -91,7 +91,7 @@ func main() {
 	}
 }
 
-func runEmpty(ctx, nbdContext context.Context, featureFlags *featureflags.Client, size int64, blockSize int64) error {
+func runEmpty(ctx, nbdContext context.Context, featureFlags *featureflags.Client, size int, blockSize int) error {
 	cowCachePath := filepath.Join(os.TempDir(), fmt.Sprintf("rootfs.ext4.cow.cache-%s", uuid.New().String()))
 
 	emptyDevice, err := testutils.NewZeroDevice(size, blockSize)
@@ -143,8 +143,8 @@ func run(ctx, nbdContext context.Context, featureFlags *featureflags.Client, bui
 	defer os.RemoveAll(cowCachePath)
 
 	cache, err := block.NewCache(
-		int64(rootfs.Header().Metadata.Size),
-		int64(rootfs.Header().Metadata.BlockSize),
+		int(rootfs.Header().Metadata.Size),
+		int(rootfs.Header().Metadata.BlockSize),
 		cowCachePath,
 		false,
 	)

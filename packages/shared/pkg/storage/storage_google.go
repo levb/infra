@@ -226,7 +226,7 @@ func (o *gcpObject) Exists(ctx context.Context) (bool, error) {
 	return err == nil, ignoreNotExists(err)
 }
 
-func (o *gcpObject) Size(ctx context.Context) (int64, error) {
+func (o *gcpObject) Size(ctx context.Context) (int, error) {
 	timer := googleReadTimerFactory.Begin(attribute.String(gcsOperationAttr, gcsOperationAttrSize))
 
 	ctx, cancel := context.WithTimeout(ctx, googleOperationTimeout)
@@ -247,13 +247,13 @@ func (o *gcpObject) Size(ctx context.Context) (int64, error) {
 	timer.Success(ctx, 0)
 
 	if v, ok := attrs.Metadata[MetadataKeyUncompressedSize]; ok {
-		parsed, parseErr := strconv.ParseInt(v, 10, 64)
+		parsed, parseErr := strconv.Atoi(v)
 		if parseErr == nil {
 			return parsed, nil
 		}
 	}
 
-	return attrs.Size, nil
+	return int(attrs.Size), nil
 }
 
 func (o *gcpObject) openRangeReader(ctx context.Context, off, length int64) (io.ReadCloser, error) {
@@ -516,11 +516,11 @@ func parseServiceAccountBase64(serviceAccount string) (*gcpServiceToken, error) 
 	return &sa, nil
 }
 
-func (o *gcpObject) OpenRangeReader(ctx context.Context, offsetU int64, length int64, frameTable *FrameTable) (io.ReadCloser, error) {
+func (o *gcpObject) OpenRangeReader(ctx context.Context, offsetU int, length int, frameTable *FrameTable) (io.ReadCloser, error) {
 	timer := googleReadTimerFactory.Begin(attribute.String(gcsOperationAttr, gcsOperationAttrOpenReader))
 
 	if !frameTable.IsCompressed() {
-		rc, err := o.openRangeReader(ctx, offsetU, length)
+		rc, err := o.openRangeReader(ctx, int64(offsetU), int64(length))
 		if err != nil {
 			timer.Failure(ctx, 0)
 

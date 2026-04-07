@@ -39,6 +39,6 @@ type BlobSource interface {
 // SeekableSource serves random-access reads with offset/length and size queries (memfile, rootfs).
 // The requests need to be aligned to the block size.
 type SeekableSource interface {
-	Stream(ctx context.Context, offset, length int64, sender Sender) error
-	Size(ctx context.Context) (int64, error)
+	Stream(ctx context.Context, offset, length int, sender Sender) error
+	Size(ctx context.Context) (int, error)
 }

@@ -412,7 +412,7 @@ func (c *apiClient) memoryMapping(ctx context.Context) (*memory.Mapping, error) 
 	return memory.NewMappingFromFc(res.Payload.Mappings)
 }
 
-func (c *apiClient) memoryInfo(ctx context.Context, blockSize int64) (*header.DiffMetadata, error) {
+func (c *apiClient) memoryInfo(ctx context.Context, blockSize int) (*header.DiffMetadata, error) {
 	params := operations.GetMemoryParams{
 		Context: ctx,
 	}
@@ -429,7 +429,7 @@ func (c *apiClient) memoryInfo(ctx context.Context, blockSize int64) (*header.Di
 	}, nil
 }
 
-func (c *apiClient) dirtyMemory(ctx context.Context, blockSize int64) (*header.DiffMetadata, error) {
+func (c *apiClient) dirtyMemory(ctx context.Context, blockSize int) (*header.DiffMetadata, error) {
 	params := operations.GetDirtyMemoryParams{
 		Context: ctx,
 	}

@@ -12,14 +12,14 @@ import (
 
 // rangeOffsets returns the block offsets contained in the range.
 // This assumes the Range.Start is a multiple of the blockSize.
-func rangeOffsets(r *Range, blockSize int64) iter.Seq[int64] {
-	return func(yield func(offset int64) bool) {
+func rangeOffsets(r *Range, blockSize int) iter.Seq[int] {
+	return func(yield func(offset int) bool) {
 		getOffsets(r.Start, r.End(), blockSize)(yield)
 	}
 }
 
-func getOffsets(start, end int64, blockSize int64) iter.Seq[int64] {
-	return func(yield func(offset int64) bool) {
+func getOffsets(start, end int, blockSize int) iter.Seq[int] {
+	return func(yield func(offset int) bool) {
 		for off := start; off < end; off += blockSize {
 			if !yield(off) {
 				return
@@ -32,9 +32,9 @@ func TestRange_End(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
-		start    int64
-		size     int64
-		expected int64
+		start    int
+		size     int
+		expected int
 	}{
 		{
 			name:     "zero size",
@@ -78,8 +78,8 @@ func TestNewRange(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
-		start    int64
-		size     int64
+		start    int
+		size     int
 		expected Range
 	}{
 		{
@@ -124,9 +124,9 @@ func TestNewRangeFromBlocks(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name           string
-		startIdx       int64
-		numberOfBlocks int64
-		blockSize      int64
+		startIdx       int
+		numberOfBlocks int
+		blockSize      int
 		expected       Range
 	}{
 		{
@@ -195,8 +195,8 @@ func TestRange_Offsets(t *testing.T) {
 	tests := []struct {
 		name      string
 		range_    Range
-		blockSize int64
-		expected  []int64
+		blockSize int
+		expected  []int
 	}{
 		{
 			name: "single block",
@@ -205,7 +205,7 @@ func TestRange_Offsets(t *testing.T) {
 				Size:  4096,
 			},
 			blockSize: 4096,
-			expected:  []int64{0},
+			expected:  []int{0},
 		},
 		{
 			name: "multiple blocks",
@@ -214,7 +214,7 @@ func TestRange_Offsets(t *testing.T) {
 				Size:  12288, // 3 * 4096
 			},
 			blockSize: 4096,
-			expected:  []int64{0, 4096, 8192},
+			expected:  []int{0, 4096, 8192},
 		},
 		{
 			name: "non-zero start",
@@ -223,7 +223,7 @@ func TestRange_Offsets(t *testing.T) {
 				Size:  8192, // 2 * 4096
 			},
 			blockSize: 4096,
-			expected:  []int64{8192, 12288},
+			expected:  []int{8192, 12288},
 		},
 		{
 			name: "zero size",
@@ -232,7 +232,7 @@ func TestRange_Offsets(t *testing.T) {
 				Size:  0,
 			},
 			blockSize: 4096,
-			expected:  []int64{},
+			expected:  []int{},
 		},
 		{
 			name: "smaller than block size",
@@ -241,7 +241,7 @@ func TestRange_Offsets(t *testing.T) {
 				Size:  1024,
 			},
 			blockSize: 4096,
-			expected:  []int64{0},
+			expected:  []int{0},
 		},
 		{
 			name: "different block size",
@@ -250,7 +250,7 @@ func TestRange_Offsets(t *testing.T) {
 				Size:  16384, // 4 * 4096
 			},
 			blockSize: 8192,
-			expected:  []int64{0, 8192},
+			expected:  []int{0, 8192},
 		},
 	}
 
@@ -274,9 +274,9 @@ func TestRange_Offsets_Iteration(t *testing.T) {
 		Start: 0,
 		Size:  40960, // 10 * 4096
 	}
-	blockSize := int64(4096)
+	blockSize := 4096
 
-	var collected []int64
+	var collected []int
 	for offset := range rangeOffsets(&r, blockSize) {
 		collected = append(collected, offset)
 		if len(collected) >= 3 {
@@ -285,13 +285,13 @@ func TestRange_Offsets_Iteration(t *testing.T) {
 	}
 
 	assert.Len(t, collected, 3)
-	assert.Equal(t, []int64{0, 4096, 8192}, collected)
+	assert.Equal(t, []int{0, 4096, 8192}, collected)
 }
 
 func TestBitsetRanges_Empty(t *testing.T) {
 	t.Parallel()
 	b := bitset.New(100)
-	blockSize := int64(4096)
+	blockSize := 4096
 
 	ranges := slices.Collect(BitsetRanges(b, blockSize))
 	assert.Empty(t, ranges)
@@ -301,7 +301,7 @@ func TestBitsetRanges_SingleBit(t *testing.T) {
 	t.Parallel()
 	b := bitset.New(100)
 	b.Set(5)
-	blockSize := int64(4096)
+	blockSize := 4096
 
 	ranges := slices.Collect(BitsetRanges(b, blockSize))
 	require.Len(t, ranges, 1)
@@ -319,7 +319,7 @@ func TestBitsetRanges_Contiguous(t *testing.T) {
 	b.Set(3)
 	b.Set(4)
 	b.Set(5)
-	blockSize := int64(4096)
+	blockSize := 4096
 
 	ranges := slices.Collect(BitsetRanges(b, blockSize))
 	require.Len(t, ranges, 1)
@@ -340,7 +340,7 @@ func TestBitsetRanges_MultipleRanges(t *testing.T) {
 	// Set bits 7, 8 (contiguous)
 	b.Set(7)
 	b.Set(8)
-	blockSize := int64(4096)
+	blockSize := 4096
 
 	ranges := slices.Collect(BitsetRanges(b, blockSize))
 	require.Len(t, ranges, 2)
@@ -360,7 +360,7 @@ func TestBitsetRanges_AllSet(t *testing.T) {
 	for i := range uint(10) {
 		b.Set(i)
 	}
-	blockSize := int64(4096)
+	blockSize := 4096
 
 	ranges := slices.Collect(BitsetRanges(b, blockSize))
 	require.Len(t, ranges, 1)
@@ -377,7 +377,7 @@ func TestBitsetRanges_EndOfBitset(t *testing.T) {
 	for i := uint(15); i < 20; i++ {
 		b.Set(i)
 	}
-	blockSize := int64(4096)
+	blockSize := 4096
 
 	ranges := slices.Collect(BitsetRanges(b, blockSize))
 	require.Len(t, ranges, 1)
@@ -395,7 +395,7 @@ func TestBitsetRanges_Sparse(t *testing.T) {
 	b.Set(10)
 	b.Set(20)
 	b.Set(30)
-	blockSize := int64(4096)
+	blockSize := 4096
 
 	ranges := slices.Collect(BitsetRanges(b, blockSize))
 	require.Len(t, ranges, 4)
@@ -410,7 +410,7 @@ func TestGetSize(t *testing.T) {
 	tests := []struct {
 		name     string
 		ranges   []Range
-		expected int64
+		expected int
 	}{
 		{
 			name:     "empty",
@@ -466,8 +466,8 @@ func TestRange_Offsets_EdgeCases(t *testing.T) {
 	tests := []struct {
 		name      string
 		range_    Range
-		blockSize int64
-		expected  []int64
+		blockSize int
+		expected  []int
 	}{
 		{
 			name: "exact block boundary end",
@@ -476,7 +476,7 @@ func TestRange_Offsets_EdgeCases(t *testing.T) {
 				Size:  12288, // exactly 3 blocks
 			},
 			blockSize: 4096,
-			expected:  []int64{0, 4096, 8192},
+			expected:  []int{0, 4096, 8192},
 		},
 		{
 			name: "one byte over block boundary",
@@ -485,7 +485,7 @@ func TestRange_Offsets_EdgeCases(t *testing.T) {
 				Size:  12289, // 3 blocks + 1 byte
 			},
 			blockSize: 4096,
-			expected:  []int64{0, 4096, 8192, 12288},
+			expected:  []int{0, 4096, 8192, 12288},
 		},
 		{
 			name: "one byte less than block boundary",
@@ -494,7 +494,7 @@ func TestRange_Offsets_EdgeCases(t *testing.T) {
 				Size:  12287, // 3 blocks - 1 byte
 			},
 			blockSize: 4096,
-			expected:  []int64{0, 4096, 8192},
+			expected:  []int{0, 4096, 8192},
 		},
 	}
 

@@ -35,13 +35,13 @@ func allocateTestMemory(t *testing.T, size uint64, pageSize uint64) (addr uint64
 func TestCopyFromProcess_FullRange(t *testing.T) {
 	t.Parallel()
 
-	pageSize := int64(header.PageSize)
+	pageSize := header.PageSize
 	size := pageSize * 30
 
 	addr, mem := allocateTestMemory(t, uint64(size), uint64(pageSize))
 
 	ranges := []Range{
-		{Start: int64(addr), Size: size},
+		{Start: int(addr), Size: size},
 	}
 
 	cache, err := NewCacheFromProcessMemory(
@@ -60,7 +60,7 @@ func TestCopyFromProcess_FullRange(t *testing.T) {
 	data := make([]byte, size)
 	n, err := cache.ReadAt(data, 0)
 	require.NoError(t, err)
-	require.Equal(t, int(size), n)
+	require.Equal(t, size, n)
 
 	require.NoError(t, compareData(data[:n], mem[:n]))
 }
@@ -74,14 +74,14 @@ func TestCopyFromProcess_LargeRanges(t *testing.T) {
 	addr, mem := allocateTestMemory(t, totalSize, pageSize)
 
 	ranges := []Range{
-		{Start: int64(addr), Size: int64(pageSize)},
-		{Start: int64(addr + pageSize*3), Size: int64(pageSize)},
-		{Start: int64(addr + pageSize), Size: int64(pageSize)},
+		{Start: int(addr), Size: int(pageSize)},
+		{Start: int(addr + pageSize*3), Size: int(pageSize)},
+		{Start: int(addr + pageSize), Size: int(pageSize)},
 	}
 
 	cache, err := NewCacheFromProcessMemory(
 		t.Context(),
-		int64(pageSize),
+		int(pageSize),
 		t.TempDir()+"/cache",
 		os.Getpid(),
 		ranges,
@@ -99,13 +99,13 @@ func TestCopyFromProcess_LargeRanges(t *testing.T) {
 	require.NoError(t, compareData(data1[:n], mem[0:pageSize]))
 
 	data2 := make([]byte, pageSize)
-	n, err = cache.ReadAt(data2, int64(pageSize))
+	n, err = cache.ReadAt(data2, int(pageSize))
 	require.NoError(t, err)
 	require.Equal(t, int(pageSize), n)
 	require.NoError(t, compareData(data2[:n], mem[pageSize*3:pageSize*4]))
 
 	data3 := make([]byte, pageSize)
-	n, err = cache.ReadAt(data3, int64(pageSize*2))
+	n, err = cache.ReadAt(data3, int(pageSize*2))
 	require.NoError(t, err)
 	require.Equal(t, int(pageSize), n)
 	require.NoError(t, compareData(data3[:n], mem[pageSize:pageSize*2]))
@@ -116,23 +116,23 @@ func TestCopyFromProcess_MultipleRanges(t *testing.T) {
 
 	numRanges := 1500
 	pageSize := uint64(header.PageSize)
-	rangeSize := int64(pageSize * 64)
+	rangeSize := int(pageSize * 64)
 
-	totalSize := rangeSize * int64(numRanges)
+	totalSize := rangeSize * numRanges
 
 	addr, mem := allocateTestMemory(t, uint64(totalSize), pageSize)
 
 	ranges := make([]Range, numRanges)
 	for i := range numRanges {
 		ranges[i] = Range{
-			Start: int64(addr) + int64(i)*rangeSize,
+			Start: int(addr) + i*rangeSize,
 			Size:  rangeSize,
 		}
 	}
 
 	cache, err := NewCacheFromProcessMemory(
 		t.Context(),
-		int64(pageSize),
+		int(pageSize),
 		t.TempDir()+"/cache",
 		os.Getpid(),
 		ranges,
@@ -145,8 +145,8 @@ func TestCopyFromProcess_MultipleRanges(t *testing.T) {
 
 	checkCount := min(numRanges, 10)
 	for i := range checkCount {
-		actualOffset := int64(i) * rangeSize
-		alignedOffset := (actualOffset / int64(pageSize)) * int64(pageSize)
+		actualOffset := i * rangeSize
+		alignedOffset := (actualOffset / int(pageSize)) * int(pageSize)
 
 		data := make([]byte, pageSize)
 
@@ -154,14 +154,14 @@ func TestCopyFromProcess_MultipleRanges(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, int(pageSize), n)
 
-		require.NoError(t, compareData(data[:n], mem[alignedOffset:alignedOffset+int64(pageSize)]))
+		require.NoError(t, compareData(data[:n], mem[alignedOffset:alignedOffset+int(pageSize)]))
 	}
 }
 
 func TestCopyFromProcess_HugepageToRegularPage(t *testing.T) {
 	t.Parallel()
 
-	pageSize := int64(header.HugepageSize)
+	pageSize := header.HugepageSize
 	size := pageSize * 10
 
 	mem, addr, err := testutils.NewPageMmap(t, uint64(size), uint64(pageSize))
@@ -172,8 +172,8 @@ func TestCopyFromProcess_HugepageToRegularPage(t *testing.T) {
 	require.Equal(t, len(mem), n)
 
 	ranges := []Range{
-		{Start: int64(addr), Size: pageSize * 2},
-		{Start: int64(addr) + pageSize*4, Size: pageSize * 4},
+		{Start: int(addr), Size: pageSize * 2},
+		{Start: int(addr) + pageSize*4, Size: pageSize * 4},
 	}
 
 	cache, err := NewCacheFromProcessMemory(
@@ -193,13 +193,13 @@ func TestCopyFromProcess_HugepageToRegularPage(t *testing.T) {
 	data := make([]byte, pageSize*2)
 	n, err = cache.ReadAt(data, 0)
 	require.NoError(t, err)
-	require.Equal(t, int(pageSize*2), n)
+	require.Equal(t, pageSize*2, n)
 	require.NoError(t, compareData(data[:n], mem[0:pageSize*2]))
 
 	data = make([]byte, pageSize*4)
 	n, err = cache.ReadAt(data, pageSize*2)
 	require.NoError(t, err)
-	require.Equal(t, int(pageSize*4), n)
+	require.Equal(t, pageSize*4, n)
 	require.NoError(t, compareData(data[:n], mem[pageSize*4:pageSize*8]))
 }
 
@@ -234,7 +234,7 @@ func TestCacheExportToDiff_ZeroDirtyBlockEmittedAsDirtyPayload(t *testing.T) {
 	zeroBlock := make([]byte, blockSize)
 	n, err := cache.WriteAt(zeroBlock, 0)
 	require.NoError(t, err)
-	require.Equal(t, int(blockSize), n)
+	require.Equal(t, blockSize, n)
 
 	out, err := os.CreateTemp(t.TempDir(), "diff-*")
 	require.NoError(t, err)
@@ -265,7 +265,7 @@ func TestCacheExportToDiff_ZeroDirtyBlockMapsToSnapshotBuild(t *testing.T) {
 	zeroBlock := make([]byte, blockSize)
 	n, err := cache.WriteAt(zeroBlock, 0)
 	require.NoError(t, err)
-	require.Equal(t, int(blockSize), n)
+	require.Equal(t, blockSize, n)
 
 	out, err := os.CreateTemp(t.TempDir(), "diff-*")
 	require.NoError(t, err)
@@ -276,7 +276,7 @@ func TestCacheExportToDiff_ZeroDirtyBlockMapsToSnapshotBuild(t *testing.T) {
 
 	baseBuildID := uuid.New()
 	originalHeader, err := header.NewHeader(
-		header.NewTemplateMetadata(baseBuildID, uint64(blockSize), uint64(blockSize)),
+		header.NewTemplateMetadata(baseBuildID, blockSize, blockSize),
 		nil,
 	)
 	require.NoError(t, err)
@@ -305,7 +305,7 @@ func TestCacheExportToDiff_MixedDirtyBlocksKeepsZeroBlockInDiff(t *testing.T) {
 	})
 
 	zeroBlock := make([]byte, blockSize)
-	nonZeroBlock := bytes.Repeat([]byte{0xAB}, int(blockSize))
+	nonZeroBlock := bytes.Repeat([]byte{0xAB}, blockSize)
 
 	_, err = cache.WriteAt(zeroBlock, 0)
 	require.NoError(t, err)
@@ -334,7 +334,7 @@ func TestCacheExportToDiff_MixedDirtyBlocksKeepsZeroBlockInDiff(t *testing.T) {
 
 	baseBuildID := uuid.New()
 	originalHeader, err := header.NewHeader(
-		header.NewTemplateMetadata(baseBuildID, uint64(blockSize), uint64(size)),
+		header.NewTemplateMetadata(baseBuildID, blockSize, size),
 		nil,
 	)
 	require.NoError(t, err)
@@ -368,8 +368,8 @@ func TestCacheExportToDiff_NonContiguousDirtyBlocksPreserveRangeOrder(t *testing
 		require.NoError(t, cache.Close())
 	})
 
-	firstBlock := bytes.Repeat([]byte{0x11}, int(blockSize))
-	secondBlock := bytes.Repeat([]byte{0x22}, int(blockSize))
+	firstBlock := bytes.Repeat([]byte{0x11}, blockSize)
+	secondBlock := bytes.Repeat([]byte{0x22}, blockSize)
 
 	_, err = cache.WriteAt(firstBlock, 0)
 	require.NoError(t, err)
@@ -399,8 +399,8 @@ func TestCacheExportToDiff_NonContiguousDirtyBlocksPreserveRangeOrder(t *testing
 func TestCache_ZeroLengthIsCachedAndSetIsCached(t *testing.T) {
 	t.Parallel()
 
-	const blockSize int64 = 4096
-	const size int64 = blockSize * 10
+	const blockSize = 4096
+	const size = blockSize * 10
 
 	cache, err := NewCache(size, blockSize, t.TempDir()+"/cache", false)
 	require.NoError(t, err)
@@ -445,7 +445,7 @@ func TestSplitOversizedRanges(t *testing.T) {
 	tests := []struct {
 		name     string
 		ranges   []Range
-		maxSize  int64
+		maxSize  int
 		expected []Range
 	}{
 		{
@@ -569,9 +569,9 @@ func TestSplitOversizedRanges(t *testing.T) {
 func TestCopyFromProcess_Exceed_MAX_RW_COUNT(t *testing.T) {
 	t.Parallel()
 
-	pageSize := int64(header.PageSize)
+	pageSize := header.PageSize
 	// We allocate more than MAX_RW_COUNT to trigger the MAX_RW_COUNT error if the ranges are not split correctly.
-	size := ((MAX_RW_COUNT + 4*pageSize + pageSize - 1) / pageSize) * pageSize
+	size := int(((MAX_RW_COUNT + 4*int64(pageSize) + int64(pageSize) - 1) / int64(pageSize)) * int64(pageSize))
 
 	// Initialize the memory we will copy from.
 	mem, addr, err := testutils.NewPageMmap(t, uint64(size), uint64(pageSize))
@@ -581,10 +581,11 @@ func TestCopyFromProcess_Exceed_MAX_RW_COUNT(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(mem), n)
 
+	rangeBreak := int(((MAX_RW_COUNT + 2*int64(pageSize) + int64(pageSize) - 1) / int64(pageSize)) * int64(pageSize))
 	ranges := []Range{
 		// We make it so that at least one of the ranges is larger than MAX_RW_COUNT.
-		{Start: int64(addr), Size: ((MAX_RW_COUNT + 2*pageSize + pageSize - 1) / pageSize) * pageSize},
-		{Start: int64(addr) + ((MAX_RW_COUNT+2*pageSize+pageSize-1)/pageSize)*pageSize, Size: ((2*pageSize + pageSize - 1) / pageSize) * pageSize},
+		{Start: int(addr), Size: rangeBreak},
+		{Start: int(addr) + rangeBreak, Size: int(((2*int64(pageSize) + int64(pageSize) - 1) / int64(pageSize)) * int64(pageSize))},
 	}
 
 	cache, err := NewCacheFromProcessMemory(
@@ -604,7 +605,7 @@ func TestCopyFromProcess_Exceed_MAX_RW_COUNT(t *testing.T) {
 	data := make([]byte, size)
 	n, err = cache.ReadAt(data, 0)
 	require.NoError(t, err)
-	require.Equal(t, int(size), n)
+	require.Equal(t, size, n)
 	require.NoError(t, compareData(data[:n], mem[0:size]))
 }
 
@@ -612,9 +613,9 @@ func TestCopyFromProcess_Exceed_MAX_RW_COUNT(t *testing.T) {
 func TestCopyFromProcess_MAX_RW_COUNT_Misalignment_Hugepage(t *testing.T) {
 	t.Parallel()
 
-	pageSize := int64(header.HugepageSize)
+	pageSize := header.HugepageSize
 	// We allocate more than MAX_RW_COUNT/pageSize + 2 to misalign the dirty tracking if the range split is unaligned to the block size.
-	size := ((MAX_RW_COUNT/pageSize + 2) * pageSize)
+	size := int((MAX_RW_COUNT/int64(pageSize) + 2) * int64(pageSize))
 
 	mem, addr, err := testutils.NewPageMmap(t, uint64(size), uint64(pageSize))
 	require.NoError(t, err)
@@ -624,7 +625,7 @@ func TestCopyFromProcess_MAX_RW_COUNT_Misalignment_Hugepage(t *testing.T) {
 	require.Equal(t, len(mem), n)
 
 	ranges := []Range{
-		{Start: int64(addr), Size: size},
+		{Start: int(addr), Size: size},
 	}
 
 	cache, err := NewCacheFromProcessMemory(
@@ -644,13 +645,13 @@ func TestCopyFromProcess_MAX_RW_COUNT_Misalignment_Hugepage(t *testing.T) {
 		buf := make([]byte, pageSize)
 		n, err := cache.ReadAt(buf, offset)
 		require.NoError(t, err)
-		require.Equal(t, int(pageSize), n)
+		require.Equal(t, pageSize, n)
 		require.NoError(t, compareData(buf, mem[offset:offset+pageSize]))
 	}
 }
 
 func BenchmarkCopyFromHugepagesFile(b *testing.B) {
-	pageSize := int64(header.HugepageSize)
+	pageSize := header.HugepageSize
 	size := pageSize * 500
 
 	b.StopTimer()
@@ -672,13 +673,13 @@ func BenchmarkCopyFromHugepagesFile(b *testing.B) {
 		require.NoError(b, err)
 		require.Equal(b, len(mem), n)
 
-		var totalCovered int64
+		var totalCovered int
 		numRanges := 40
 		ranges := make([]Range, 0, numRanges)
-		cur := int64(addr)
+		cur := int(addr)
 
 		for i := range numRanges {
-			sizePages := int64(1 + (i % 5)) // pseudo-random but deterministic
+			sizePages := 1 + (i % 5) // pseudo-random but deterministic
 			sizeR := sizePages * pageSize
 			if totalCovered+sizeR > size*8/10 && i > 0 { // Stop if we have covered ~80% total
 				break
@@ -722,6 +723,6 @@ func BenchmarkCopyFromHugepagesFile(b *testing.B) {
 		err = syscall.Munmap(mem)
 		require.NoError(b, err)
 
-		b.SetBytes(GetSize(ranges))
+		b.SetBytes(int64(GetSize(ranges)))
 	}
 }

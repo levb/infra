@@ -30,8 +30,8 @@ type Diff interface {
 	block.FramedSlicer
 	CacheKey() DiffStoreKey
 	CachePath() (string, error)
-	FileSize() (int64, error)
-	BlockSize() int64
+	FileSize() (int, error)
+	BlockSize() int
 	Init(ctx context.Context) error
 }
 
@@ -43,7 +43,7 @@ func (n *NoDiff) CachePath() (string, error) {
 	return "", NoDiffError{}
 }
 
-func (n *NoDiff) Slice(_ context.Context, _, _ int64, _ *storage.FrameTable) ([]byte, error) {
+func (n *NoDiff) Slice(_ context.Context, _, _ int, _ *storage.FrameTable) ([]byte, error) {
 	return nil, NoDiffError{}
 }
 
@@ -51,15 +51,15 @@ func (n *NoDiff) Close() error {
 	return nil
 }
 
-func (n *NoDiff) ReadAt(_ context.Context, _ []byte, _ int64, _ *storage.FrameTable) (int, error) {
+func (n *NoDiff) ReadAt(_ context.Context, _ []byte, _ int, _ *storage.FrameTable) (int, error) {
 	return 0, NoDiffError{}
 }
 
-func (n *NoDiff) FileSize() (int64, error) {
+func (n *NoDiff) FileSize() (int, error) {
 	return 0, NoDiffError{}
 }
 
-func (n *NoDiff) Size(_ context.Context) (int64, error) {
+func (n *NoDiff) Size(_ context.Context) (int, error) {
 	return 0, NoDiffError{}
 }
 
@@ -71,7 +71,7 @@ func (n *NoDiff) Init(context.Context) error {
 	return NoDiffError{}
 }
 
-func (n *NoDiff) BlockSize() int64 {
+func (n *NoDiff) BlockSize() int {
 	return 0
 }
 

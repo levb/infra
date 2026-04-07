@@ -34,12 +34,12 @@ type Metadata struct {
 	BaseBuildId uuid.UUID
 }
 
-func NewTemplateMetadata(buildId uuid.UUID, blockSize, size uint64) *Metadata {
+func NewTemplateMetadata(buildId uuid.UUID, blockSize, size int) *Metadata {
 	return &Metadata{
 		Version:     metadataVersion,
 		Generation:  0,
-		BlockSize:   blockSize,
-		Size:        size,
+		BlockSize:   uint64(blockSize),
+		Size:        uint64(size),
 		BuildId:     buildId,
 		BaseBuildId: buildId,
 	}
@@ -76,7 +76,7 @@ type DiffMetadata struct {
 	Dirty *bitset.BitSet
 	Empty *bitset.BitSet
 
-	BlockSize int64
+	BlockSize int
 }
 
 func (d *DiffMetadata) toDiffMapping(
@@ -142,12 +142,12 @@ func (d *DiffMetadata) ToDiffHeader(
 	metadata := originalHeader.Metadata.NextGeneration(buildID)
 
 	telemetry.SetAttributes(ctx,
-		attribute.Int64("snapshot.header.mappings.length", int64(len(m))),
-		attribute.Int64("snapshot.diff.size", int64(d.Dirty.Count()*uint(originalHeader.Metadata.BlockSize))),
-		attribute.Int64("snapshot.mapped_size", int64(metadata.Size)),
-		attribute.Int64("snapshot.block_size", int64(metadata.BlockSize)),
-		attribute.Int64("snapshot.metadata.version", int64(metadata.Version)),
-		attribute.Int64("snapshot.metadata.generation", int64(metadata.Generation)),
+		attribute.Int("snapshot.header.mappings.length", len(m)),
+		attribute.Int("snapshot.diff.size", int(d.Dirty.Count()*uint(originalHeader.Metadata.BlockSize))),
+		attribute.Int("snapshot.mapped_size", int(metadata.Size)),
+		attribute.Int("snapshot.block_size", int(metadata.BlockSize)),
+		attribute.Int("snapshot.metadata.version", int(metadata.Version)),
+		attribute.Int("snapshot.metadata.generation", int(metadata.Generation)),
 		attribute.String("snapshot.metadata.build_id", metadata.BuildId.String()),
 		attribute.String("snapshot.metadata.base_build_id", metadata.BaseBuildId.String()),
 	)
@@ -169,7 +169,7 @@ func (d *DiffMetadata) ToDiffHeader(
 		}
 	}
 
-	err = ValidateMappings(header.Mapping, header.Metadata.Size, header.Metadata.BlockSize)
+	err = ValidateMappings(header.Mapping, int(header.Metadata.Size), int(header.Metadata.BlockSize))
 	if err != nil {
 		if header.IsNormalizeFixApplied() {
 			return nil, fmt.Errorf("invalid header mappings: %w", err)
@@ -185,10 +185,10 @@ type DiffMetadataBuilder struct {
 	dirty *bitset.BitSet
 	empty *bitset.BitSet
 
-	blockSize int64
+	blockSize int
 }
 
-func NewDiffMetadataBuilder(size, blockSize int64) *DiffMetadataBuilder {
+func NewDiffMetadataBuilder(size, blockSize int) *DiffMetadataBuilder {
 	return &DiffMetadataBuilder{
 		// TODO: We might be able to start with 0 as preallocating here actually takes space.
 		dirty: bitset.New(uint(TotalBlocks(size, blockSize))),
@@ -198,11 +198,11 @@ func NewDiffMetadataBuilder(size, blockSize int64) *DiffMetadataBuilder {
 	}
 }
 
-func (b *DiffMetadataBuilder) AddDirtyOffset(offset int64) {
+func (b *DiffMetadataBuilder) AddDirtyOffset(offset int) {
 	b.dirty.Set(uint(BlockIdx(offset, b.blockSize)))
 }
 
-func (b *DiffMetadataBuilder) Process(ctx context.Context, block []byte, out io.Writer, offset int64) error {
+func (b *DiffMetadataBuilder) Process(ctx context.Context, block []byte, out io.Writer, offset int) error {
 	blockIdx := BlockIdx(offset, b.blockSize)
 
 	isEmpty, err := IsEmptyBlock(block, b.blockSize)
@@ -223,8 +223,8 @@ func (b *DiffMetadataBuilder) Process(ctx context.Context, block []byte, out io.
 		return err
 	}
 
-	if int64(n) != b.blockSize {
-		return fmt.Errorf("short write: %d != %d", int64(n), b.blockSize)
+	if n != b.blockSize {
+		return fmt.Errorf("short write: %d != %d", n, b.blockSize)
 	}
 
 	return nil

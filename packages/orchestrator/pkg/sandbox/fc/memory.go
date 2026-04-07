@@ -13,11 +13,11 @@ import (
 // MemoryInfo returns the memory info for the sandbox.
 // The dirty field represents mincore resident pages—essentially pages that were faulted in.
 // The empty field represents pages that are *resident*, but also completely empty.
-func (p *Process) MemoryInfo(ctx context.Context, blockSize int64) (*header.DiffMetadata, error) {
+func (p *Process) MemoryInfo(ctx context.Context, blockSize int) (*header.DiffMetadata, error) {
 	return p.client.memoryInfo(ctx, blockSize)
 }
 
-func (p *Process) DirtyMemory(ctx context.Context, blockSize int64) (*header.DiffMetadata, error) {
+func (p *Process) DirtyMemory(ctx context.Context, blockSize int) (*header.DiffMetadata, error) {
 	return p.client.dirtyMemory(ctx, blockSize)
 }
 
@@ -25,7 +25,7 @@ func (p *Process) ExportMemory(
 	ctx context.Context,
 	include *bitset.BitSet,
 	cachePath string,
-	blockSize int64,
+	blockSize int,
 ) (*block.Cache, error) {
 	m, err := p.client.memoryMapping(ctx)
 	if err != nil {
