@@ -42,20 +42,22 @@ func skipCacheWriteback(ctx context.Context) bool {
 type cache struct {
 	rootPath  string
 	chunkSize int64
-	inner     StorageProvider
+	inner     Store
 	flags     *featureflags.Client
 
 	tracer trace.Tracer
 }
 
-var _ StorageProvider = (*cache)(nil)
+var _ Store = (*cache)(nil)
 
+// TODO: revisit decorator pattern — straightforward with raw bytes, but may
+// hurt traceability as the stack grows. Consider explicit composition instead.
 func WrapInNFSCache(
 	ctx context.Context,
 	rootPath string,
-	inner StorageProvider,
+	inner Store,
 	flags *featureflags.Client,
-) StorageProvider {
+) Store {
 	cacheTracer := tracer
 
 	createCacheSpans := flags.BoolFlag(ctx, featureflags.CreateStorageCacheSpansFlag)
@@ -72,57 +74,93 @@ func WrapInNFSCache(
 	}
 }
 
-func (c cache) DeleteObjectsWithPrefix(ctx context.Context, prefix string) error {
+func (c cache) Fetch(ctx context.Context, path string, offset, length int64) (io.ReadCloser, error) {
+	localPath := filepath.Join(c.rootPath, path)
+	if err := os.MkdirAll(localPath, cacheDirPermissions); err != nil {
+		return nil, fmt.Errorf("failed to create cache directory: %w", err)
+	}
+
+	cs := &cachedSeekable{
+		path:      localPath,
+		chunkSize: c.chunkSize,
+		inner:     c.inner,
+		innerPath: path,
+		flags:     c.flags,
+		tracer:    c.tracer,
+	}
+
+	return cs.OpenRangeReader(ctx, offset, length)
+}
+
+func (c cache) GetBlob(ctx context.Context, path string) ([]byte, error) {
+	localPath := filepath.Join(c.rootPath, path)
+	if err := os.MkdirAll(localPath, cacheDirPermissions); err != nil {
+		return nil, fmt.Errorf("failed to create cache directory: %w", err)
+	}
+
+	cb := &cachedBlob{
+		path:      localPath,
+		chunkSize: c.chunkSize,
+		inner:     c.inner,
+		innerPath: path,
+		flags:     c.flags,
+		tracer:    c.tracer,
+	}
+
+	return cb.GetBlob(ctx)
+}
+
+func (c cache) Size(ctx context.Context, path string) (int64, error) {
+	localPath := filepath.Join(c.rootPath, path)
+	if err := os.MkdirAll(localPath, cacheDirPermissions); err != nil {
+		return 0, fmt.Errorf("failed to create cache directory: %w", err)
+	}
+
+	cs := &cachedSeekable{
+		path:      localPath,
+		chunkSize: c.chunkSize,
+		inner:     c.inner,
+		innerPath: path,
+		flags:     c.flags,
+		tracer:    c.tracer,
+	}
+
+	return cs.Size(ctx)
+}
+
+func (c cache) Upload(ctx context.Context, remotePath string, src io.ReaderAt, size int64) error {
+	return c.inner.Upload(ctx, remotePath, src, size)
+}
+
+func (c cache) PutBlob(ctx context.Context, path string, data []byte) error {
+	// Write-through: also put to cache if enabled
+	localPath := filepath.Join(c.rootPath, path)
+	if err := os.MkdirAll(localPath, cacheDirPermissions); err == nil {
+		cb := &cachedBlob{
+			path:      localPath,
+			chunkSize: c.chunkSize,
+			inner:     c.inner,
+			innerPath: path,
+			flags:     c.flags,
+			tracer:    c.tracer,
+		}
+		cb.PutBlob(ctx, data)
+	}
+
+	return c.inner.PutBlob(ctx, path, data)
+}
+
+func (c cache) Delete(ctx context.Context, prefix string) error {
 	// no need to wait for cache deletion before returning
 	go func(ctx context.Context) {
 		c.deleteCachedObjectsWithPrefix(ctx, prefix)
 	}(context.WithoutCancel(ctx))
 
-	return c.inner.DeleteObjectsWithPrefix(ctx, prefix)
+	return c.inner.Delete(ctx, prefix)
 }
 
-func (c cache) UploadSignedURL(ctx context.Context, path string, ttl time.Duration) (string, error) {
-	return c.inner.UploadSignedURL(ctx, path, ttl)
-}
-
-func (c cache) OpenBlob(ctx context.Context, path string, objectType ObjectType) (Blob, error) {
-	innerObject, err := c.inner.OpenBlob(ctx, path, objectType)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open object: %w", err)
-	}
-
-	localPath := filepath.Join(c.rootPath, path)
-	if err = os.MkdirAll(localPath, cacheDirPermissions); err != nil {
-		return nil, fmt.Errorf("failed to create cache directory: %w", err)
-	}
-
-	return &cachedBlob{
-		path:      localPath,
-		chunkSize: c.chunkSize,
-		inner:     innerObject,
-		flags:     c.flags,
-		tracer:    c.tracer,
-	}, nil
-}
-
-func (c cache) OpenSeekable(ctx context.Context, path string, objectType SeekableObjectType) (Seekable, error) {
-	innerObject, err := c.inner.OpenSeekable(ctx, path, objectType)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open object: %w", err)
-	}
-
-	localPath := filepath.Join(c.rootPath, path)
-	if err = os.MkdirAll(localPath, cacheDirPermissions); err != nil {
-		return nil, fmt.Errorf("failed to create cache directory: %w", err)
-	}
-
-	return &cachedSeekable{
-		path:      localPath,
-		chunkSize: c.chunkSize,
-		inner:     innerObject,
-		flags:     c.flags,
-		tracer:    c.tracer,
-	}, nil
+func (c cache) SignedUploadURL(ctx context.Context, path string, ttl time.Duration) (string, error) {
+	return c.inner.SignedUploadURL(ctx, path, ttl)
 }
 
 func (c cache) GetDetails() string {

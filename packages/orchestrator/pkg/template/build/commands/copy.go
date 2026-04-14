@@ -26,8 +26,8 @@ import (
 )
 
 type Copy struct {
-	FilesStorage storage.StorageProvider
-	CacheScope   string
+	Store      storage.Store
+	CacheScope string
 }
 
 var _ Command = (*Copy)(nil)
@@ -79,20 +79,13 @@ func (c *Copy) Execute(
 		return metadata.Context{}, fmt.Errorf("%s requires files hash to be set", cmdType)
 	}
 
-	// 1) Download the layer tar file from the storage to the local filesystem
-	obj, err := c.FilesStorage.OpenBlob(ctx, paths.GetLayerFilesCachePath(c.CacheScope, step.GetFilesHash()), storage.BuildLayerFileObjectType)
+	// 1) Stream the layer tar file from storage to a local temp file.
+	layerPath := paths.GetLayerFilesCachePath(c.CacheScope, step.GetFilesHash())
+	rc, err := c.Store.Fetch(ctx, layerPath, 0, -1)
 	if err != nil {
-		return metadata.Context{}, fmt.Errorf("failed to open files object from storage: %w", err)
+		return metadata.Context{}, fmt.Errorf("failed to fetch layer tar from storage: %w", err)
 	}
-
-	pr, pw := io.Pipe()
-	// Start writing tar data to the pipe writer in a goroutine
-	go func() {
-		defer pw.Close()
-		if _, err := obj.WriteTo(ctx, pw); err != nil {
-			pw.CloseWithError(err)
-		}
-	}()
+	defer rc.Close()
 
 	tmpFile, err := os.CreateTemp("", "layer-file-*.tar")
 	if err != nil {
@@ -101,8 +94,7 @@ func (c *Copy) Execute(
 	defer os.Remove(tmpFile.Name())
 	defer tmpFile.Close()
 
-	_, err = io.Copy(tmpFile, pr)
-	if err != nil {
+	if _, err = io.Copy(tmpFile, rc); err != nil {
 		return metadata.Context{}, fmt.Errorf("failed to copy layer tar data to temporary file: %w", err)
 	}
 

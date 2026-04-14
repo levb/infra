@@ -10,37 +10,35 @@ import (
 )
 
 // helper to create a FileSystemStorageProvider rooted in a temp directory.
-func newTempProvider(t *testing.T) *fsStorage {
+func newTempProvider(t *testing.T) *fsStore {
 	t.Helper()
 
 	base := t.TempDir()
-	p := newFileSystemStorage(StorageConfig{
+	p := newFileSystemStore(StoreConfig{
 		GetLocalBasePath: func() string { return base },
 	})
 
 	return p
 }
 
-func TestOpenObject_Write_Exists_WriteTo(t *testing.T) {
+func TestOpenObject_Write_Size_GetBlob(t *testing.T) {
 	t.Parallel()
 	p := newTempProvider(t)
 	ctx := t.Context()
 
-	obj, err := p.OpenBlob(ctx, filepath.Join("sub", "file.txt"), MetadataObjectType)
-	require.NoError(t, err)
-
+	path := filepath.Join("sub", "file.txt")
 	contents := []byte("hello world")
-	// write via Write
-	err = obj.Put(t.Context(), contents)
+	// write via PutBlob
+	err := p.PutBlob(ctx, path, contents)
 	require.NoError(t, err)
 
 	// check Size
-	exists, err := obj.Exists(t.Context())
+	size, err := p.Size(ctx, path)
 	require.NoError(t, err)
-	require.True(t, exists)
+	require.Equal(t, int64(len(contents)), size)
 
-	// read the entire file back via WriteTo
-	data, err := GetBlob(t.Context(), obj)
+	// read back via GetBlob
+	data, err := p.GetBlob(ctx, path)
 	require.NoError(t, err)
 	require.Equal(t, contents, data)
 }
@@ -50,17 +48,11 @@ func TestFSPut(t *testing.T) {
 	p := newTempProvider(t)
 	ctx := t.Context()
 
-	// create a separate source file on disk
-	srcPath := filepath.Join(t.TempDir(), "src.txt")
 	const payload = "copy me please"
-	require.NoError(t, os.WriteFile(srcPath, []byte(payload), 0o600))
-
-	obj, err := p.OpenBlob(ctx, "copy/dst.txt", UnknownObjectType)
+	err := p.PutBlob(ctx, "copy/dst.txt", []byte(payload))
 	require.NoError(t, err)
 
-	require.NoError(t, obj.Put(t.Context(), []byte(payload)))
-
-	data, err := GetBlob(t.Context(), obj)
+	data, err := p.GetBlob(ctx, "copy/dst.txt")
 	require.NoError(t, err)
 	require.Equal(t, payload, string(data))
 }
@@ -70,23 +62,18 @@ func TestDelete(t *testing.T) {
 	p := newTempProvider(t)
 	ctx := t.Context()
 
-	obj, err := p.OpenBlob(ctx, "to/delete.txt", 0)
+	err := p.PutBlob(ctx, "to/delete.txt", []byte("bye"))
 	require.NoError(t, err)
 
-	err = obj.Put(t.Context(), []byte("bye"))
+	_, err = p.Size(ctx, "to/delete.txt")
 	require.NoError(t, err)
 
-	exists, err := obj.Exists(t.Context())
-	require.NoError(t, err)
-	assert.True(t, exists)
-
-	err = p.DeleteObjectsWithPrefix(t.Context(), "to/delete.txt")
+	err = p.Delete(t.Context(), "to/delete.txt")
 	require.NoError(t, err)
 
 	// subsequent Size call should fail with ErrorObjectNotExist
-	exists, err = obj.Exists(t.Context())
-	require.NoError(t, err)
-	assert.False(t, exists)
+	_, err = p.Size(ctx, "to/delete.txt")
+	require.ErrorIs(t, err, ErrObjectNotExist)
 }
 
 func TestDeleteObjectsWithPrefix(t *testing.T) {
@@ -100,30 +87,45 @@ func TestDeleteObjectsWithPrefix(t *testing.T) {
 		"data/sub/c.txt",
 	}
 	for _, pth := range paths {
-		obj, err := p.OpenBlob(ctx, pth, UnknownObjectType)
-		require.NoError(t, err)
-		err = obj.Put(t.Context(), []byte("x"))
+		err := p.PutBlob(ctx, pth, []byte("x"))
 		require.NoError(t, err)
 	}
 
 	// remove the entire "data" prefix
-	require.NoError(t, p.DeleteObjectsWithPrefix(ctx, "data"))
+	require.NoError(t, p.Delete(ctx, "data"))
 
 	for _, pth := range paths {
-		full := filepath.Join(p.GetDetails()[len("[Local file storage, base path set to "):len(p.GetDetails())-1], pth) // derive basePath
+		full := filepath.Join(p.basePath, pth)
 		_, err := os.Stat(full)
 		require.True(t, os.IsNotExist(err))
 	}
 }
 
-func TestWriteToNonExistentObject(t *testing.T) {
+func TestGetBlobNonExistent(t *testing.T) {
 	t.Parallel()
 	p := newTempProvider(t)
 
+	_, err := p.GetBlob(t.Context(), "missing/file.txt")
+	require.ErrorIs(t, err, ErrObjectNotExist)
+}
+
+func TestFSFetch(t *testing.T) {
+	t.Parallel()
+	p := newTempProvider(t)
 	ctx := t.Context()
-	obj, err := p.OpenBlob(ctx, "missing/file.txt", UnknownObjectType)
+
+	data := []byte("hello world, this is a test")
+	err := p.PutBlob(ctx, "fetch/test.bin", data)
 	require.NoError(t, err)
 
-	_, err = GetBlob(t.Context(), obj)
-	require.ErrorIs(t, err, ErrObjectNotExist)
+	// Fetch a range
+	rc, err := p.Fetch(ctx, "fetch/test.bin", 6, 5)
+	require.NoError(t, err)
+	defer rc.Close()
+
+	buf := make([]byte, 5)
+	n, err := rc.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, 5, n)
+	assert.Equal(t, "world", string(buf))
 }

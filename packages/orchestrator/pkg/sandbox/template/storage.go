@@ -22,46 +22,23 @@ type Storage struct {
 	source *build.File
 }
 
-func storageHeaderObjectType(diffType build.DiffType) (storage.ObjectType, bool) {
-	switch diffType {
-	case build.Memfile:
-		return storage.MemfileHeaderObjectType, true
-	case build.Rootfs:
-		return storage.RootFSHeaderObjectType, true
-	default:
-		return storage.UnknownObjectType, false
-	}
-}
-
-func objectType(diffType build.DiffType) (storage.SeekableObjectType, bool) {
-	switch diffType {
-	case build.Memfile:
-		return storage.MemfileObjectType, true
-	case build.Rootfs:
-		return storage.RootFSObjectType, true
-	default:
-		return storage.UnknownSeekableObjectType, false
-	}
-}
-
 func NewStorage(
 	ctx context.Context,
-	store *build.DiffStore,
+	diffs *build.DiffStore,
 	buildId string,
 	fileType build.DiffType,
 	h *header.Header,
-	persistence storage.StorageProvider,
+	s storage.Store,
 	metrics blockmetrics.Metrics,
 ) (*Storage, error) {
 	paths := storage.Paths{BuildID: buildId}
 
 	if h == nil {
-		var hdrPath string
-		_, ok := storageHeaderObjectType(fileType)
-		if !ok {
+		if fileType != build.Memfile && fileType != build.Rootfs {
 			return nil, build.UnknownDiffTypeError{DiffType: fileType}
 		}
 
+		var hdrPath string
 		switch fileType {
 		case build.Memfile:
 			hdrPath = paths.MemfileHeader()
@@ -72,7 +49,7 @@ func NewStorage(
 		}
 
 		var err error
-		h, err = header.LoadHeader(ctx, persistence, hdrPath)
+		h, err = header.LoadHeader(ctx, s, hdrPath)
 		if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, err
 		}
@@ -80,8 +57,7 @@ func NewStorage(
 
 	// If we can't find the diff header in storage, we try to find the "old" style template without a header as a fallback.
 	if h == nil {
-		objectType, ok := objectType(fileType)
-		if !ok {
+		if fileType != build.Memfile && fileType != build.Rootfs {
 			return nil, build.UnknownDiffTypeError{DiffType: fileType}
 		}
 
@@ -95,12 +71,7 @@ func NewStorage(
 			return nil, build.UnknownDiffTypeError{DiffType: fileType}
 		}
 
-		object, err := persistence.OpenSeekable(ctx, dataPath, objectType)
-		if err != nil {
-			return nil, err
-		}
-
-		size, err := object.Size(ctx)
+		size, err := s.Size(ctx, dataPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get object size: %w", err)
 		}
@@ -136,7 +107,7 @@ func NewStorage(
 		}
 	}
 
-	b := build.NewFile(h, store, fileType, persistence, metrics)
+	b := build.NewFile(h, diffs, fileType, s, metrics)
 
 	return &Storage{
 		source: b,

@@ -28,8 +28,34 @@ const (
 
 )
 
+// DataReader is the interface the Chunker uses to fetch data.
+// LayerReader satisfies this interface.
+type DataReader interface {
+	Read(ctx context.Context, offset, length int64) (io.ReadCloser, error)
+	FetchRegion(offset int64) (start, length int64)
+}
+
+// backendDataReader adapts a Backend + path into a DataReader,
+// treating the data as uncompressed (no FrameTable).
+type backendDataReader struct {
+	backend storage.Store
+	path    string
+	size    int64
+}
+
+func (r *backendDataReader) Read(ctx context.Context, offset, length int64) (io.ReadCloser, error) {
+	return r.backend.Fetch(ctx, r.path, offset, length)
+}
+
+func (r *backendDataReader) FetchRegion(offset int64) (start, length int64) {
+	start = (offset / storage.MemoryChunkSize) * storage.MemoryChunkSize
+	length = min(int64(storage.MemoryChunkSize), r.size-start)
+
+	return start, length
+}
+
 type Chunker struct {
-	upstream     storage.StreamingReader
+	upstream     DataReader
 	cache        *Cache
 	metrics      metrics.Metrics
 	fetchTimeout time.Duration
@@ -50,7 +76,37 @@ func NewChunker(
 	_ context.Context,
 	ff *featureflags.Client,
 	size, blockSize int64,
-	upstream storage.StreamingReader,
+	backend storage.Store,
+	storagePath string,
+	cachePath string,
+	metrics metrics.Metrics,
+) (*Chunker, error) {
+	cache, err := NewCache(size, blockSize, cachePath, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create file cache: %w", err)
+	}
+
+	return &Chunker{
+		size: size,
+		upstream: &backendDataReader{
+			backend: backend,
+			path:    storagePath,
+			size:    size,
+		},
+		cache:        cache,
+		metrics:      metrics,
+		featureFlags: ff,
+		fetchTimeout: defaultFetchTimeout,
+	}, nil
+}
+
+// NewChunkerWithReader creates a Chunker using a custom DataReader.
+// This is used by callers that have a LayerReader (compressed data).
+func NewChunkerWithReader(
+	_ context.Context,
+	ff *featureflags.Client,
+	size, blockSize int64,
+	reader DataReader,
 	cachePath string,
 	metrics metrics.Metrics,
 ) (*Chunker, error) {
@@ -61,7 +117,7 @@ func NewChunker(
 
 	return &Chunker{
 		size:         size,
-		upstream:     upstream,
+		upstream:     reader,
 		cache:        cache,
 		metrics:      metrics,
 		featureFlags: ff,
@@ -106,8 +162,6 @@ func (c *Chunker) Slice(ctx context.Context, off, length int64, ft *storage.Fram
 	}
 
 	// Use sliceDirect (no isCached check) since the waiter mechanism guarantees data is in the mmap.
-	// With coarse dirty granularity, isCached may return false during an active fetch even though
-	// the requested bytes have been written to the mmap.
 	b, cacheErr := c.cache.sliceDirect(off, length)
 	if cacheErr != nil {
 		timer.RecordRaw(ctx, length, attrs.failLocalReadAgain)
@@ -133,10 +187,6 @@ func (c *Chunker) getOrCreateSession(ctx context.Context, off, length int64, ft 
 		}
 	}
 
-	// Re-check cache under fetchMu. A fetch can finish (marking blocks
-	// cached via setIsCached) and remove itself from sessions between
-	// the lock-free Slice() and the session scan above. The lock
-	// provides a happens-before guarantee that the bitmap writes are visible.
 	if c.cache.isCached(off, length) {
 		c.fetchMu.Unlock()
 
@@ -147,27 +197,17 @@ func (c *Chunker) getOrCreateSession(ctx context.Context, off, length int64, ft 
 	c.fetchSessions = append(c.fetchSessions, s)
 	c.fetchMu.Unlock()
 
-	// Detach from the caller's cancel signal so the shared fetch goroutine
-	// continues even if the first caller's context is cancelled. Trace/value
-	// context is preserved for metrics.
 	go c.runFetch(context.WithoutCancel(ctx), s, off, ft)
 
 	return s, false
 }
 
-// fetch ensures the frame/chunk covering off is fetched into the mmap cache,
-// then waits until the block at off is available. Deduplicates concurrent
-// requests for the same region via the session list.
+// fetch ensures the frame/chunk covering off is fetched into the mmap cache.
 func (c *Chunker) fetch(ctx context.Context, off int64, ft *storage.FrameTable) error {
 	var chunkOff, chunkLen int64
 	if ft.IsCompressed() {
-		frameStarts, frameSize, err := ft.FrameFor(off)
-		if err != nil {
-			return fmt.Errorf("failed to get frame for offset %d: %w", off, err)
-		}
-
-		chunkOff = frameStarts.U
-		chunkLen = int64(frameSize.U)
+		// Use the DataReader's FetchRegion which handles frame translation
+		chunkOff, chunkLen = c.upstream.FetchRegion(off)
 	} else {
 		chunkOff = (off / storage.MemoryChunkSize) * storage.MemoryChunkSize
 		chunkLen = min(int64(storage.MemoryChunkSize), c.size-chunkOff)
@@ -188,9 +228,6 @@ func (c *Chunker) runFetch(ctx context.Context, s *fetchSession, offsetU int64, 
 
 	defer c.releaseSession(s)
 
-	// Panic recovery: ensure waiters are always notified even if the fetch
-	// goroutine panics (e.g. nil pointer in upstream reader, mmap fault).
-	// Without this, waiters would block forever on their channels.
 	defer func() {
 		if r := recover(); r != nil {
 			err := fmt.Errorf("fetch panicked: %v", r)
@@ -212,7 +249,7 @@ func (c *Chunker) runFetch(ctx context.Context, s *fetchSession, offsetU int64, 
 	}
 	fetchTimer := c.metrics.RemoteReadsTimerFactory.Begin()
 
-	readBytes, err := c.progressiveRead(ctx, s, mmapSlice, offsetU, ft)
+	readBytes, err := c.progressiveRead(ctx, s, mmapSlice, offsetU)
 	if err != nil {
 		fetchTimer.RecordRaw(ctx, readBytes, attrs.remoteFailure)
 
@@ -221,17 +258,14 @@ func (c *Chunker) runFetch(ctx context.Context, s *fetchSession, offsetU int64, 
 		return
 	}
 
-	// Mark entire chunk as cached BEFORE releasing waiters.
-	// This ensures isCached returns true before the session is removed from fetchSessions,
-	// closing the TOCTOU window in getOrCreateSession.
 	c.cache.setIsCached(s.chunkOff, s.chunkLen)
 
 	fetchTimer.RecordRaw(ctx, readBytes, attrs.remoteSuccess)
 	s.setDone()
 }
 
-func (c *Chunker) progressiveRead(ctx context.Context, s *fetchSession, mmapSlice []byte, offsetU int64, ft *storage.FrameTable) (totalRead int64, err error) {
-	reader, err := c.upstream.OpenRangeReader(ctx, offsetU, s.chunkLen, ft)
+func (c *Chunker) progressiveRead(ctx context.Context, s *fetchSession, mmapSlice []byte, offsetU int64) (totalRead int64, err error) {
+	reader, err := c.upstream.Read(ctx, offsetU, s.chunkLen)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open range reader at %d: %w", offsetU, err)
 	}
@@ -245,21 +279,17 @@ func (c *Chunker) progressiveRead(ctx context.Context, s *fetchSession, mmapSlic
 	readBatch := max(blockSize, c.getMinReadBatchSize(ctx))
 
 	for totalRead < s.chunkLen {
-		// Read in batches of max(blockSize, minReadBatchSize) to align notification
-		// granularity with the read size and minimize lock/notify overhead.
 		readEnd := min(totalRead+readBatch, s.chunkLen)
 		n, readErr := io.ReadFull(reader, mmapSlice[totalRead:readEnd])
 		totalRead += int64(n)
 
 		if n > 0 {
-			// Dirty marking is deferred to runFetch after the full chunk is fetched.
-			// With coarse dirty granularity, marking here would expose partially-written data.
 			s.advance(totalRead)
 		}
 
 		if readErr != nil {
 			if totalRead >= s.chunkLen {
-				break // all bytes received; trailing EOF is expected
+				break
 			}
 
 			return totalRead, fmt.Errorf("failed reading at offset %d after %d bytes: %w", offsetU, totalRead, readErr)
@@ -286,7 +316,6 @@ func (c *Chunker) releaseSession(s *fetchSession) {
 }
 
 // getMinReadBatchSize returns the effective min read batch size.
-// Queried per-fetch so it can be tuned via feature flags without a restart.
 func (c *Chunker) getMinReadBatchSize(ctx context.Context) int64 {
 	if c.featureFlags != nil {
 		if v := c.featureFlags.IntFlag(ctx, featureflags.MinChunkerReadSizeKB); v > 0 {

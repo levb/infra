@@ -2,8 +2,6 @@ package storage
 
 import (
 	"context"
-	"errors"
-	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -30,27 +28,25 @@ func TestCachedObjectProvider_Put(t *testing.T) {
 		err := os.MkdirAll(cacheDir, os.ModePerm)
 		require.NoError(t, err)
 
-		inner := NewMockBlob(t)
-		inner.EXPECT().
-			Put(mock.Anything, mock.Anything).
-			Return(nil)
+		inner := NewMockStore(t)
+		inner.On("PutBlob", mock.Anything, "test/path", mock.Anything).Return(nil)
 
 		featureFlags := NewMockFeatureFlagsClient(t)
 		featureFlags.EXPECT().BoolFlag(mock.Anything, mock.Anything).Return(true)
 
-		c := cachedBlob{path: cacheDir, inner: inner, chunkSize: 1024, flags: featureFlags, tracer: noopTracer}
+		cb := cachedBlob{path: cacheDir, inner: inner, innerPath: "test/path", chunkSize: 1024, flags: featureFlags, tracer: noopTracer}
 
-		// write temp file
-		err = c.Put(t.Context(), data)
-		require.NoError(t, err)
+		// Write to inner + cache
+		cb.PutBlob(t.Context(), data)
+		require.NoError(t, inner.PutBlob(t.Context(), "test/path", data))
 
 		// file is written asynchronously, wait for it to finish
-		c.wg.Wait()
+		cb.wg.Wait()
 
 		// prevent the provider from falling back to cache
-		c.inner = nil
+		cb.inner = nil
 
-		gotData, err := GetBlob(t.Context(), &c)
+		gotData, err := cb.GetBlob(t.Context())
 		require.NoError(t, err)
 		assert.Equal(t, data, gotData)
 	})
@@ -66,50 +62,26 @@ func TestCachedObjectProvider_Put(t *testing.T) {
 		const dataSize = 10 * megabyte
 		actualData := generateData(t, dataSize)
 
-		inner := NewMockBlob(t)
-		inner.EXPECT().
-			WriteTo(mock.Anything, mock.Anything).
-			RunAndReturn(func(_ context.Context, dst io.Writer) (int64, error) {
-				n, err := dst.Write(actualData)
-
-				return int64(n), err
+		inner := NewMockStore(t)
+		inner.On("GetBlob", mock.Anything, "test/path").
+			Return(func(_ context.Context, _ string) ([]byte, error) {
+				return actualData, nil
 			})
 
-		c := cachedBlob{path: cacheDir, inner: inner, chunkSize: 1024, tracer: noopTracer}
+		cb := cachedBlob{path: cacheDir, inner: inner, innerPath: "test/path", chunkSize: 1024, tracer: noopTracer}
 
-		read, err := GetBlob(t.Context(), &c)
+		read, err := cb.GetBlob(t.Context())
 		require.NoError(t, err)
 		assert.Equal(t, actualData, read)
 
-		c.wg.Wait()
+		cb.wg.Wait()
 
-		c.inner = nil
+		cb.inner = nil
 
-		read, err = GetBlob(t.Context(), &c)
+		read, err = cb.GetBlob(t.Context())
 		require.NoError(t, err)
 		assert.Equal(t, actualData, read)
 	})
-}
-
-func TestCachedObjectProvider_WriteFileToCache(t *testing.T) {
-	t.Parallel()
-
-	c := cachedBlob{
-		path:   t.TempDir(),
-		tracer: noopTracer,
-	}
-	errTarget := errors.New("find me")
-	reader := NewMockReader(t)
-	reader.EXPECT().Read(mock.Anything).Return(4, nil).Once()
-	reader.EXPECT().Read(mock.Anything).Return(0, errTarget).Once()
-
-	count, err := c.writeFileToCache(t.Context(), reader)
-	require.ErrorIs(t, err, errTarget)
-	assert.Equal(t, int64(0), count)
-
-	path := c.fullFilename()
-	_, err = os.Stat(path)
-	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func generateData(t *testing.T, count int) []byte {

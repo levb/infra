@@ -25,20 +25,20 @@ var tracer = otel.Tracer("github.com/e2b-dev/infra/packages/orchestrator/pkg/tem
 type CommandExecutor struct {
 	buildcontext.BuildContext
 
-	buildStorage storage.StorageProvider
-	proxy        *proxy.SandboxProxy
+	buildStore storage.Store
+	proxy *proxy.SandboxProxy
 }
 
 func NewCommandExecutor(
 	buildContext buildcontext.BuildContext,
-	buildStorage storage.StorageProvider,
+	buildStore storage.Store,
 	proxy *proxy.SandboxProxy,
 ) *CommandExecutor {
 	return &CommandExecutor{
 		BuildContext: buildContext,
 
-		buildStorage: buildStorage,
-		proxy:        proxy,
+		buildStore: buildStore,
+		proxy: proxy,
 	}
 }
 
@@ -51,8 +51,8 @@ func (ce *CommandExecutor) getCommand(
 	switch cmdType {
 	case "ADD", "COPY":
 		cmd = &Copy{
-			FilesStorage: ce.buildStorage,
-			CacheScope:   ce.CacheScope,
+			Store:      ce.buildStore,
+			CacheScope: ce.CacheScope,
 		}
 	case "RUN":
 		cmd = &Run{}

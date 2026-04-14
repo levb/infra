@@ -37,15 +37,6 @@ const (
 	UseCasePause = "pause"
 )
 
-// partUploader is the interface for uploading data in parts.
-// Implementations exist for GCS multipart uploads and local file writes.
-type partUploader interface {
-	Start(ctx context.Context) error
-	UploadPart(ctx context.Context, partIndex int, data ...[]byte) error
-	Complete(ctx context.Context) error
-	Close() error
-}
-
 // memPartUploader collects compressed parts in memory. Thread-safe.
 // Useful for tests and benchmarks that need CompressStream output as bytes.
 type memPartUploader struct {
@@ -150,8 +141,8 @@ func (p *part) submit(ctx context.Context, queue chan<- *part) {
 	}
 }
 
-// compressStream: read → compress (parallel) → emit metadata (ordered) → upload (concurrent).
-func compressStream(ctx context.Context, in io.Reader, cfg *CompressConfig, uploader partUploader, maxUploadConcurrency int) (ft *FrameTable, checksum [32]byte, err error) { //nolint:unparam // callers in later PRs pass different values
+// CompressStream reads from in, compresses in parallel, and uploads via the PartUploader.
+func CompressStream(ctx context.Context, in io.Reader, cfg *CompressConfig, uploader PartUploader, maxUploadConcurrency int) (ft *FrameTable, checksum [32]byte, err error) {
 	frameSize := cfg.FrameSize()
 	targetPartSize := cfg.TargetPartSize()
 

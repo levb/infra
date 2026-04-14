@@ -270,7 +270,7 @@ type runner struct {
 	coldStart  bool
 	noPrefetch bool
 	config     cfg.BuilderConfig
-	storage    storage.StorageProvider
+	store      storage.Store
 }
 
 func (r *runner) resumeOnce(ctx context.Context, iter int) (time.Duration, error) {
@@ -636,13 +636,13 @@ func (r *runner) pauseOnce(ctx context.Context, opts pauseOptions, verbose bool)
 		paths := storage.Paths{BuildID: opts.newBuildID}
 		if opts.isRemoteStorage {
 			fmt.Println("📤 Uploading snapshot...")
-			if err := snapshot.Upload(ctx, r.storage, paths); err != nil {
+			if err := snapshot.Upload(ctx, r.store, paths); err != nil {
 				return timings, fmt.Errorf("failed to upload snapshot: %w", err)
 			}
 			fmt.Println("✅ Snapshot uploaded successfully")
 		} else {
 			fmt.Println("💾 Saving snapshot to local storage...")
-			if err := snapshot.Upload(ctx, r.storage, paths); err != nil {
+			if err := snapshot.Upload(ctx, r.store, paths); err != nil {
 				return timings, fmt.Errorf("failed to save snapshot: %w", err)
 			}
 			fmt.Println("✅ Snapshot saved successfully")
@@ -850,7 +850,7 @@ func (r *runner) collectAndUploadPrefetch(ctx context.Context, opts pauseOptions
 	mapping := metadata.PrefetchEntriesToMapping(commonEntries, allPrefetchData[0].BlockSize)
 	fmt.Printf("   Common: %d blocks\n", mapping.Count())
 
-	existingMeta, err := metadata.FromBuildID(ctx, r.storage, opts.newBuildID)
+	existingMeta, err := metadata.FromBuildID(ctx, r.store, opts.newBuildID)
 	if err != nil {
 		return fmt.Errorf("load metadata: %w", err)
 	}
@@ -859,7 +859,7 @@ func (r *runner) collectAndUploadPrefetch(ctx context.Context, opts pauseOptions
 		Memory: mapping,
 	})
 
-	if err := metadata.UploadMetadata(ctx, r.storage, updatedMeta); err != nil {
+	if err := metadata.UploadMetadata(ctx, r.store, updatedMeta); err != nil {
 		return fmt.Errorf("upload metadata: %w", err)
 	}
 
@@ -1023,14 +1023,14 @@ func run(ctx context.Context, buildID string, iterations int, coldStart, noPrefe
 	if verbose {
 		fmt.Println("🔧 Creating storage provider...")
 	}
-	persistence, err := storage.GetStorageProvider(ctx, storage.TemplateStorageConfig)
+	s, err := storage.GetStore(ctx, storage.TemplateStoreConfig)
 	if verbose {
 		fmt.Println("🔧 Storage provider created, err:", err)
 	}
 	if err != nil {
 		return fmt.Errorf("storage provider: %w", err)
 	}
-	if persistence == nil {
+	if s == nil {
 		return fmt.Errorf("storage provider is nil")
 	}
 
@@ -1042,7 +1042,7 @@ func run(ctx context.Context, buildID string, iterations int, coldStart, noPrefe
 	if verbose {
 		fmt.Println("🔧 Creating template cache...")
 	}
-	cache, err := template.NewCache(config, flags, persistence, blockMetrics, peerclient.NopResolver())
+	cache, err := template.NewCache(config, flags, s, blockMetrics, peerclient.NopResolver())
 	if err != nil {
 		return fmt.Errorf("template cache: %w", err)
 	}
@@ -1093,7 +1093,7 @@ func run(ctx context.Context, buildID string, iterations int, coldStart, noPrefe
 		coldStart:  coldStart,
 		noPrefetch: noPrefetch,
 		config:     config.BuilderConfig,
-		storage:    persistence,
+		store:      s,
 		sbxConfig:  sbxCfg,
 	}
 

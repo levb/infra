@@ -366,7 +366,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	}
 	closers = append(closers, closer{"limiter", limiter.Close})
 
-	persistence, err := storage.GetStorageProvider(ctx, storage.TemplateStorageConfig.WithLimiter(limiter))
+	templateStore, err := storage.GetStore(ctx, storage.TemplateStoreConfig.WithLimiter(limiter))
 	if err != nil {
 		logger.L().Fatal(ctx, "failed to create template storage provider", zap.Error(err))
 	}
@@ -398,7 +398,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 		peerResolver = peerclient.NewResolver(peerRegistry, *nodeAddress)
 	}
 
-	templateCache, err := template.NewCache(config, featureFlags, persistence, blockMetrics, peerResolver)
+	templateCache, err := template.NewCache(config, featureFlags, templateStore, blockMetrics, peerResolver)
 	if err != nil {
 		logger.L().Fatal(ctx, "failed to create template cache", zap.Error(err))
 	}
@@ -548,7 +548,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 		TemplateCache:    templateCache,
 		Info:             serviceInfo,
 		Proxy:            sandboxProxy,
-		Persistence:      persistence,
+		Store:            templateStore,
 		FeatureFlags:     featureFlags,
 		SbxEventsService: events.NewEventsService(sbxEventsDeliveryTargets),
 		PeerRegistry:     peerRegistry,
@@ -611,7 +611,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	var tmpl *tmplserver.ServerStore
 	var localUploadHandler *localupload.Handler
 	if slices.Contains(services, cfg.TemplateManager) {
-		buildPersistence, uploadHandler, err := setupBuildStorage(ctx, limiter, config)
+		buildStore, uploadHandler, err := setupBuildStore(ctx, limiter, config)
 		if err != nil {
 			logger.L().Fatal(ctx, "failed to setup build storage", zap.Error(err))
 		}
@@ -628,8 +628,8 @@ func run(config cfg.Config, opts Options) (success bool) {
 			sandboxFactory,
 			sandboxProxy,
 			templateCache,
-			persistence,
-			buildPersistence,
+			templateStore,
+			buildStore,
 		)
 		if err != nil {
 			logger.L().Fatal(ctx, "failed to create template manager", zap.Error(err))
@@ -834,8 +834,8 @@ func startNFSProxy(
 	return closers, nil
 }
 
-func setupBuildStorage(ctx context.Context, limiter *limit.Limiter, orchConfig cfg.Config) (storage.StorageProvider, *localupload.Handler, error) {
-	cfg := storage.BuildCacheStorageConfig.WithLimiter(limiter)
+func setupBuildStore(ctx context.Context, limiter *limit.Limiter, orchConfig cfg.Config) (storage.Store, *localupload.Handler, error) {
+	cfg := storage.BuildCacheStoreConfig.WithLimiter(limiter)
 
 	var uploadHandler *localupload.Handler
 
@@ -860,12 +860,12 @@ func setupBuildStorage(ctx context.Context, limiter *limit.Limiter, orchConfig c
 			zap.String("base_path", basePath))
 	}
 
-	provider, err := storage.GetStorageProvider(ctx, cfg)
+	s, err := storage.GetStore(ctx, cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create build cache storage provider: %w", err)
 	}
 
-	return provider, uploadHandler, nil
+	return s, uploadHandler, nil
 }
 
 func newStorage(ctx context.Context, nodeID string, config network.Config, egressProxy network.EgressProxy) (network.Storage, error) {

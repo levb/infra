@@ -23,7 +23,7 @@ type Snapshot struct {
 
 func (s *Snapshot) Upload(
 	ctx context.Context,
-	persistence storage.StorageProvider,
+	store storage.Store,
 	paths storage.Paths,
 ) error {
 	var memfilePath *string
@@ -53,7 +53,7 @@ func (s *Snapshot) Upload(
 	templateBuild := NewTemplateBuild(
 		s.MemfileDiffHeader,
 		s.RootfsDiffHeader,
-		persistence,
+		store,
 		paths,
 	)
 

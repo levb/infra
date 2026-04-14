@@ -25,29 +25,19 @@ func TemplateRootfs(ctx context.Context, buildID string) (*BuildDevice, *Cleaner
 		BuildID: buildID,
 	}
 
-	s, err := storage.GetStorageProvider(ctx, storage.TemplateStorageConfig)
+	s, err := storage.GetStore(ctx, storage.TemplateStoreConfig)
 	if err != nil {
 		return nil, &cleaner, fmt.Errorf("failed to get storage provider: %w", err)
 	}
 
-	obj, err := s.OpenBlob(ctx, paths.RootfsHeader(), storage.RootFSHeaderObjectType)
-	if err != nil {
-		return nil, &cleaner, fmt.Errorf("failed to open object: %w", err)
-	}
-
-	h, err := header.Deserialize(ctx, obj)
+	h, err := header.LoadHeader(ctx, s, paths.RootfsHeader())
 	if err != nil {
 		id, err := uuid.Parse(buildID)
 		if err != nil {
 			return nil, &cleaner, fmt.Errorf("failed to parse build id: %w", err)
 		}
 
-		r, err := s.OpenSeekable(ctx, paths.Rootfs(), storage.RootFSObjectType)
-		if err != nil {
-			return nil, &cleaner, fmt.Errorf("failed to open object: %w", err)
-		}
-
-		size, err := r.Size(ctx)
+		size, err := s.Size(ctx, paths.Rootfs())
 		if err != nil {
 			return nil, &cleaner, fmt.Errorf("failed to get object size: %w", err)
 		}
@@ -81,7 +71,7 @@ func TemplateRootfs(ctx context.Context, buildID string) (*BuildDevice, *Cleaner
 		return nil, &cleaner, fmt.Errorf("failed to create feature flags client: %w", err)
 	}
 
-	store, err := build.NewDiffStore(
+	diffs, err := build.NewDiffStore(
 		cfg.Config{},
 		flags,
 		diffCacheDir,
@@ -92,16 +82,16 @@ func TemplateRootfs(ctx context.Context, buildID string) (*BuildDevice, *Cleaner
 		return nil, &cleaner, fmt.Errorf("failed to create diff store: %w", err)
 	}
 
-	store.Start(ctx)
+	diffs.Start(ctx)
 
 	cleaner.Add(func(context.Context) error {
-		store.RemoveCache()
+		diffs.RemoveCache()
 
 		return nil
 	})
 
 	cleaner.Add(func(context.Context) error {
-		store.Close()
+		diffs.Close()
 
 		return nil
 	})
@@ -112,7 +102,7 @@ func TemplateRootfs(ctx context.Context, buildID string) (*BuildDevice, *Cleaner
 	}
 
 	buildDevice := NewBuildDevice(
-		build.NewFile(h, store, build.Rootfs, s, m),
+		build.NewFile(h, diffs, build.Rootfs, s, m),
 		h,
 		int64(h.Metadata.BlockSize),
 	)

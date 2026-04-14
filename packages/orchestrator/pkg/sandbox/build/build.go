@@ -16,25 +16,25 @@ import (
 )
 
 type File struct {
-	header      atomic.Pointer[header.Header]
-	store       *DiffStore
-	fileType    DiffType
-	persistence storage.StorageProvider
-	metrics     blockmetrics.Metrics
+	header   atomic.Pointer[header.Header]
+	diffs    *DiffStore
+	fileType DiffType
+	store    storage.Store
+	metrics  blockmetrics.Metrics
 }
 
 func NewFile(
 	header *header.Header,
-	store *DiffStore,
+	diffs *DiffStore,
 	fileType DiffType,
-	persistence storage.StorageProvider,
+	s storage.Store,
 	metrics blockmetrics.Metrics,
 ) *File {
 	f := &File{
-		store:       store,
-		fileType:    fileType,
-		persistence: persistence,
-		metrics:     metrics,
+		diffs:    diffs,
+		fileType: fileType,
+		store:    s,
+		metrics:  metrics,
 	}
 	f.header.Store(header)
 
@@ -212,20 +212,20 @@ func (b *File) buildFileSize(h *header.Header, buildID uuid.UUID) int64 {
 
 func (b *File) getBuild(ctx context.Context, buildID uuid.UUID, uncompressedSize int64, ct storage.CompressionType) (Diff, error) {
 	storageDiff, err := newStorageDiff(
-		b.store.cachePath,
+		b.diffs.cachePath,
 		buildID.String(),
 		b.fileType,
 		int64(b.Header().Metadata.BlockSize),
 		b.metrics,
-		b.persistence,
+		b.store,
 		uncompressedSize, ct,
-		b.store.flags,
+		b.diffs.flags,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage diff: %w", err)
 	}
 
-	source, err := b.store.Get(ctx, storageDiff)
+	source, err := b.diffs.Get(ctx, storageDiff)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get build from store: %w", err)
 	}

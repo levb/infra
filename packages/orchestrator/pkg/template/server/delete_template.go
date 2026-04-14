@@ -41,7 +41,7 @@ func (s *ServerStore) TemplateBuildDelete(ctx context.Context, in *templatemanag
 		})
 	}
 
-	err = template.Delete(ctx, s.artifactsregistry, s.templateStorage, in.GetTemplateID(), in.GetBuildID())
+	err = template.Delete(ctx, s.artifactsregistry, s.templateStore, in.GetTemplateID(), in.GetBuildID())
 	if err != nil {
 		return nil, err
 	}

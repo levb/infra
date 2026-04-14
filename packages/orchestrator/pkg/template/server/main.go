@@ -39,8 +39,8 @@ type ServerStore struct {
 	buildCache        *cache.BuildCache
 	buildLogger       logger.Logger
 	artifactsregistry artifactsregistry.ArtifactsRegistry
-	templateStorage   storage.StorageProvider
-	buildStorage      storage.StorageProvider
+	templateStore     storage.Store
+	buildStore        storage.Store
 
 	wg           *sync.WaitGroup // wait group for running builds
 	activeBuilds atomic.Int64    // counter for active builds (for debugging)
@@ -58,8 +58,8 @@ func New(
 	sandboxFactory *sandbox.Factory,
 	proxy *proxy.SandboxProxy,
 	templateCache *sbxtemplate.Cache,
-	templatePersistence storage.StorageProvider,
-	buildPersistence storage.StorageProvider,
+	templateStore storage.Store,
+	buildStore storage.Store,
 ) (s *ServerStore, e error) {
 	logger.Info(ctx, "Initializing template manager")
 
@@ -98,8 +98,8 @@ func New(
 		logger,
 		featureFlags,
 		sandboxFactory,
-		templatePersistence,
-		buildPersistence,
+		templateStore,
+		buildStore,
 		artifactsRegistry,
 		dockerhubRepository,
 		proxy,
@@ -114,8 +114,8 @@ func New(
 		buildCache:        buildCache,
 		buildLogger:       buildLogger,
 		artifactsregistry: artifactsRegistry,
-		templateStorage:   templatePersistence,
-		buildStorage:      buildPersistence,
+		templateStore:     templateStore,
+		buildStore:        buildStore,
 		wg:                &sync.WaitGroup{},
 		closers:           closers,
 	}

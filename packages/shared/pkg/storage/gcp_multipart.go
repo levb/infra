@@ -147,7 +147,7 @@ type MultipartUploader struct {
 	parts    []Part
 }
 
-var _ partUploader = (*MultipartUploader)(nil)
+var _ PartUploader = (*MultipartUploader)(nil)
 
 // Start initiates the GCS multipart upload.
 func (m *MultipartUploader) Start(ctx context.Context) error {
@@ -382,28 +382,25 @@ func (m *MultipartUploader) completeUpload(ctx context.Context, uploadID string,
 	return nil
 }
 
+// UploadFileInParallel uploads a local file in parallel chunks.
 func (m *MultipartUploader) UploadFileInParallel(ctx context.Context, filePath string, maxConcurrency int) (int64, error) {
-	// Open file
 	file, err := os.Open(filePath)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open file: %w", err)
 	}
 	defer file.Close()
 
-	// Get file size
 	fileInfo, err := file.Stat()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get file info: %w", err)
 	}
 	fileSize := fileInfo.Size()
 
-	// Calculate number of parts
 	numParts := int(math.Ceil(float64(fileSize) / float64(gcpMultipartUploadChunkSize)))
 	if numParts == 0 {
-		numParts = 1 // Always upload at least 1 part, even for empty files
+		numParts = 1
 	}
 
-	// Initiate multipart upload
 	uploadID, err := m.initiateUpload(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to initiate upload: %w", err)
@@ -421,44 +418,38 @@ func (m *MultipartUploader) UploadFileInParallel(ctx context.Context, filePath s
 	return fileSize, nil
 }
 
-func (m *MultipartUploader) uploadParts(ctx context.Context, maxConcurrency int, numParts int, fileSize int64, file *os.File, uploadID string) ([]Part, error) {
-	g, ctx := errgroup.WithContext(ctx) // Context ONLY for waitgroup goroutines; canceled after errgroup finishes
-	g.SetLimit(maxConcurrency)          // Limit concurrent goroutines
+func (m *MultipartUploader) uploadParts(ctx context.Context, maxConcurrency int, numParts int, totalSize int64, src io.ReaderAt, uploadID string) ([]Part, error) {
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(maxConcurrency)
 
-	// Thread-safe map to collect parts
 	var partsMu sync.Mutex
 	parts := make([]Part, numParts)
 
-	// Upload each part concurrently
 	for partNumber := 1; partNumber <= numParts; partNumber++ {
 		g.Go(func() error {
-			// Check if context was cancelled
 			select {
 			case <-ctx.Done():
 				return fmt.Errorf("part %d failed: %w", partNumber, ctx.Err())
 			default:
 			}
 
-			// Read chunk from file
 			offset := int64(partNumber-1) * gcpMultipartUploadChunkSize
 			chunkSize := gcpMultipartUploadChunkSize
-			if offset+int64(chunkSize) > fileSize {
-				chunkSize = int(fileSize - offset)
+			if offset+int64(chunkSize) > totalSize {
+				chunkSize = int(totalSize - offset)
 			}
 
 			chunk := make([]byte, chunkSize)
-			_, err := file.ReadAt(chunk, offset)
-			if err != nil {
+			_, err := src.ReadAt(chunk, offset)
+			if err != nil && err != io.EOF {
 				return fmt.Errorf("failed to read chunk for part %d: %w", partNumber, err)
 			}
 
-			// Upload part
 			etag, err := m.uploadPart(ctx, uploadID, partNumber, chunk)
 			if err != nil {
 				return fmt.Errorf("failed to upload part %d: %w", partNumber, err)
 			}
 
-			// Store result thread-safely
 			partsMu.Lock()
 			parts[partNumber-1] = Part{
 				PartNumber: partNumber,
@@ -470,7 +461,6 @@ func (m *MultipartUploader) uploadParts(ctx context.Context, maxConcurrency int,
 		})
 	}
 
-	// Wait for all parts to complete or first error
 	if err := g.Wait(); err != nil {
 		return nil, fmt.Errorf("upload failed: %w", err)
 	}

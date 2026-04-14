@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,10 +30,9 @@ var (
 		"Total peer orchestrator reads",
 	))
 
-	attrOpWriteTo     = attribute.String("operation", "WriteTo")
-	attrOpExists      = attribute.String("operation", "Exists")
+	attrOpFetch       = attribute.String("operation", "Fetch")
+	attrOpGetBlob   = attribute.String("operation", "GetBlob")
 	attrOpSize        = attribute.String("operation", "Size")
-	attrOpRangeReader = attribute.String("operation", "OpenRangeReader")
 
 	attrResolveRedisError = attribute.String("peer_resolve", "redis_error")
 	attrResolveNoPeer     = attribute.String("peer_resolve", "no_peer")
@@ -47,22 +45,20 @@ var (
 	attrPeerHitFalse = attribute.Bool("peer_hit", false)
 )
 
-var _ storage.StorageProvider = (*routingProvider)(nil)
+var _ storage.Store = (*routingProvider)(nil)
 
-// routingProvider wraps a base StorageProvider and, for each Open call,
+// routingProvider wraps a base Store and, for each operation,
 // checks Redis for a peer routing entry for the buildID extracted from the path.
-// This allows each layer in a multi-layer template to be independently routed to
-// the peer that holds it, rather than routing all layers to a single peer.
 type routingProvider struct {
-	base     storage.StorageProvider
+	base     storage.Store
 	resolver Resolver
 }
 
-func NewRoutingProvider(base storage.StorageProvider, resolver Resolver) storage.StorageProvider {
+func NewRoutingProvider(base storage.Store, resolver Resolver) storage.Store {
 	return &routingProvider{base: base, resolver: resolver}
 }
 
-func (p *routingProvider) resolveProvider(ctx context.Context, buildID string) storage.StorageProvider {
+func (p *routingProvider) resolveProvider(ctx context.Context, buildID string) storage.Store {
 	ctx, span := tracer.Start(ctx, "resolve peer-provider", trace.WithAttributes(
 		telemetry.WithBuildID(buildID),
 	))
@@ -77,93 +73,175 @@ func (p *routingProvider) resolveProvider(ctx context.Context, buildID string) s
 
 	span.SetAttributes(attribute.String("peer_address", res.addr))
 
-	return newPeerStorageProvider(p.base, res.client, res.uploaded)
+	return newPeerBackend(p.base, res.client, res.uploaded)
 }
 
-func (p *routingProvider) OpenBlob(ctx context.Context, path string, objType storage.ObjectType) (storage.Blob, error) {
+func (p *routingProvider) Fetch(ctx context.Context, path string, offset, length int64) (io.ReadCloser, error) {
 	buildID, _ := storage.SplitPath(path)
 
-	return p.resolveProvider(ctx, buildID).OpenBlob(ctx, path, objType)
+	return p.resolveProvider(ctx, buildID).Fetch(ctx, path, offset, length)
 }
 
-func (p *routingProvider) OpenSeekable(ctx context.Context, path string, objType storage.SeekableObjectType) (storage.Seekable, error) {
+func (p *routingProvider) GetBlob(ctx context.Context, path string) ([]byte, error) {
 	buildID, _ := storage.SplitPath(path)
 
-	return p.resolveProvider(ctx, buildID).OpenSeekable(ctx, path, objType)
+	return p.resolveProvider(ctx, buildID).GetBlob(ctx, path)
 }
 
-func (p *routingProvider) DeleteObjectsWithPrefix(ctx context.Context, prefix string) error {
-	return p.base.DeleteObjectsWithPrefix(ctx, prefix)
+func (p *routingProvider) Size(ctx context.Context, path string) (int64, error) {
+	buildID, _ := storage.SplitPath(path)
+
+	return p.resolveProvider(ctx, buildID).Size(ctx, path)
 }
 
-func (p *routingProvider) UploadSignedURL(ctx context.Context, path string, ttl time.Duration) (string, error) {
-	return p.base.UploadSignedURL(ctx, path, ttl)
+func (p *routingProvider) Upload(ctx context.Context, remotePath string, src io.ReaderAt, size int64) error {
+	return p.base.Upload(ctx, remotePath, src, size)
+}
+
+func (p *routingProvider) PutBlob(ctx context.Context, path string, data []byte) error {
+	return p.base.PutBlob(ctx, path, data)
+}
+
+func (p *routingProvider) Delete(ctx context.Context, prefix string) error {
+	return p.base.Delete(ctx, prefix)
+}
+
+func (p *routingProvider) SignedUploadURL(ctx context.Context, path string, ttl time.Duration) (string, error) {
+	return p.base.SignedUploadURL(ctx, path, ttl)
 }
 
 func (p *routingProvider) GetDetails() string {
 	return p.base.GetDetails()
 }
 
-var _ storage.StorageProvider = (*peerStorageProvider)(nil)
+var _ storage.Store = (*peerBackend)(nil)
 
-// peerStorageProvider tries the peer first for reads. Writes are always delegated to base.
-type peerStorageProvider struct {
-	base       storage.StorageProvider
+// peerBackend tries the peer first for reads. Writes are always delegated to base.
+type peerBackend struct {
+	base       storage.Store
 	peerClient orchestrator.ChunkServiceClient
 	// uploaded is set when the peer signals GCS upload is complete (use_storage=true).
-	// Once non-nil, all subsequent reads skip the peer and go to base.
 	uploaded *atomic.Pointer[UploadedHeaders]
 }
 
-func newPeerStorageProvider(
-	base storage.StorageProvider,
+func newPeerBackend(
+	base storage.Store,
 	peerClient orchestrator.ChunkServiceClient,
 	uploaded *atomic.Pointer[UploadedHeaders],
-) storage.StorageProvider {
-	return &peerStorageProvider{
+) storage.Store {
+	return &peerBackend{
 		base:       base,
 		peerClient: peerClient,
 		uploaded:   uploaded,
 	}
 }
 
-func (p *peerStorageProvider) OpenBlob(_ context.Context, path string, objType storage.ObjectType) (storage.Blob, error) {
+func (p *peerBackend) Fetch(ctx context.Context, path string, offset, length int64) (io.ReadCloser, error) {
 	buildID, fileName := storage.SplitPath(path)
 
-	return &peerBlob{peerHandle: peerHandle[storage.Blob]{
-		client:   p.peerClient,
-		buildID:  buildID,
-		fileName: fileName,
-		uploaded: p.uploaded,
-		openFn: func(ctx context.Context) (storage.Blob, error) {
-			return p.base.OpenBlob(ctx, path, objType)
+	return withPeerFallback(ctx, p, buildID, fileName, "peer-fetch", attrOpFetch,
+		func(ctx context.Context) (peerAttempt[io.ReadCloser], error) {
+			streamCtx, cancel := context.WithCancel(ctx)
+
+			recv, err := openPeerSeekableStream(streamCtx, p.peerClient, &orchestrator.ReadAtBuildSeekableRequest{
+				BuildId:  buildID,
+				FileName: fileName,
+				Offset:   offset,
+				Length:   length,
+			}, p.uploaded)
+			if err != nil {
+				cancel()
+
+				return peerAttempt[io.ReadCloser]{}, nil
+			}
+
+			return peerAttempt[io.ReadCloser]{
+				value: newPeerStreamReader(recv, cancel),
+				hit:   true,
+			}, nil
 		},
-	}}, nil
+		func(ctx context.Context) (io.ReadCloser, error) {
+			// Signal the caller to swap to V4 headers if compressed headers are available.
+			if p.uploaded != nil {
+				if hdrs := p.uploaded.Load(); hdrs != nil && (len(hdrs.MemfileHeader) > 0 || len(hdrs.RootfsHeader) > 0) {
+					return nil, &storage.PeerTransitionedError{
+						MemfileHeader: hdrs.MemfileHeader,
+						RootfsHeader:  hdrs.RootfsHeader,
+					}
+				}
+			}
+
+			return p.base.Fetch(ctx, path, offset, length)
+		},
+	)
 }
 
-func (p *peerStorageProvider) OpenSeekable(_ context.Context, path string, objType storage.SeekableObjectType) (storage.Seekable, error) {
+func (p *peerBackend) GetBlob(ctx context.Context, path string) ([]byte, error) {
 	buildID, fileName := storage.SplitPath(path)
 
-	return &peerSeekable{peerHandle: peerHandle[storage.Seekable]{
-		client:   p.peerClient,
-		buildID:  buildID,
-		fileName: fileName,
-		uploaded: p.uploaded,
-		openFn: func(ctx context.Context) (storage.Seekable, error) {
-			return p.base.OpenSeekable(ctx, path, objType)
+	return withPeerFallback(ctx, p, buildID, fileName, "peer-get-object", attrOpGetBlob,
+		func(ctx context.Context) (peerAttempt[[]byte], error) {
+			recv, err := openPeerBlobStream(ctx, p.peerClient, &orchestrator.GetBuildBlobRequest{
+				BuildId:  buildID,
+				FileName: fileName,
+			}, p.uploaded)
+			if err != nil {
+				return peerAttempt[[]byte]{}, nil
+			}
+
+			var buf bytes.Buffer
+			n, err := io.Copy(&buf, newPeerStreamReader(recv, func() {}))
+			if err != nil {
+				return peerAttempt[[]byte]{value: buf.Bytes(), bytes: n, hit: true},
+					fmt.Errorf("failed to stream file %q from peer: %w", fileName, err)
+			}
+
+			return peerAttempt[[]byte]{value: buf.Bytes(), bytes: n, hit: true}, nil
 		},
-	}}, nil
+		func(ctx context.Context) ([]byte, error) {
+			return p.base.GetBlob(ctx, path)
+		},
+	)
 }
 
-func (p *peerStorageProvider) DeleteObjectsWithPrefix(ctx context.Context, prefix string) error {
-	return p.base.DeleteObjectsWithPrefix(ctx, prefix)
+func (p *peerBackend) Size(ctx context.Context, path string) (int64, error) {
+	buildID, fileName := storage.SplitPath(path)
+
+	return withPeerFallback(ctx, p, buildID, fileName, "peer-size", attrOpSize,
+		func(ctx context.Context) (peerAttempt[int64], error) {
+			resp, err := p.peerClient.GetBuildFileSize(ctx, &orchestrator.GetBuildFileSizeRequest{
+				BuildId:  buildID,
+				FileName: fileName,
+			})
+			if err == nil && checkPeerAvailability(resp.GetAvailability(), p.uploaded) {
+				return peerAttempt[int64]{value: resp.GetTotalSize(), hit: true}, nil
+			}
+
+			return peerAttempt[int64]{}, nil
+		},
+		func(ctx context.Context) (int64, error) {
+			return p.base.Size(ctx, path)
+		},
+	)
 }
 
-func (p *peerStorageProvider) UploadSignedURL(ctx context.Context, path string, ttl time.Duration) (string, error) {
-	return p.base.UploadSignedURL(ctx, path, ttl)
+func (p *peerBackend) Upload(ctx context.Context, remotePath string, src io.ReaderAt, size int64) error {
+	return p.base.Upload(ctx, remotePath, src, size)
 }
 
-func (p *peerStorageProvider) GetDetails() string {
+func (p *peerBackend) PutBlob(ctx context.Context, path string, data []byte) error {
+	return p.base.PutBlob(ctx, path, data)
+}
+
+func (p *peerBackend) Delete(ctx context.Context, prefix string) error {
+	return p.base.Delete(ctx, prefix)
+}
+
+func (p *peerBackend) SignedUploadURL(ctx context.Context, path string, ttl time.Duration) (string, error) {
+	return p.base.SignedUploadURL(ctx, path, ttl)
+}
+
+func (p *peerBackend) GetDetails() string {
 	return p.base.GetDetails()
 }
 
@@ -186,62 +264,28 @@ func checkPeerAvailability(avail *orchestrator.PeerAvailability, uploaded *atomi
 	return true
 }
 
-type peerHandle[Base any] struct {
-	client   orchestrator.ChunkServiceClient
-	buildID  string
-	fileName string
-	uploaded *atomic.Pointer[UploadedHeaders]
-
-	mu     sync.Mutex
-	base   Base
-	loaded bool
-	openFn func(ctx context.Context) (Base, error)
-}
-
-func (h *peerHandle[Base]) getOrOpenBase(ctx context.Context) (Base, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if h.loaded {
-		return h.base, nil
-	}
-
-	b, err := h.openFn(ctx)
-	if err != nil {
-		var zero Base
-
-		return zero, err
-	}
-
-	h.base = b
-	h.loaded = true
-
-	return b, nil
-}
-
 // peerAttempt is the result of a peer read attempt, used with withPeerFallback.
-// hit=true means the peer had data (value is populated); when hit=true and the
-// caller also returns a non-nil error the helper records a partial failure.
 type peerAttempt[T any] struct {
 	value T
 	bytes int64
 	hit   bool
 }
 
-func withPeerFallback[Base, T any](
+func withPeerFallback[T any](
 	ctx context.Context,
-	h *peerHandle[Base],
+	p *peerBackend,
+	buildID, fileName string,
 	spanName string,
 	opAttr attribute.KeyValue,
 	peerFn func(ctx context.Context) (peerAttempt[T], error),
-	useBase func(ctx context.Context, base Base) (T, error),
+	useBase func(ctx context.Context) (T, error),
 ) (T, error) {
 	ctx, span := tracer.Start(ctx, spanName, trace.WithAttributes(
-		attribute.String("file_name", h.fileName),
+		attribute.String("file_name", fileName),
 	))
 	defer span.End()
 
-	if h.uploaded.Load() == nil {
+	if p.uploaded.Load() == nil {
 		timer := peerReadTimerFactory.Begin(opAttr)
 
 		res, err := peerFn(ctx)
@@ -268,16 +312,7 @@ func withPeerFallback[Base, T any](
 
 	span.SetAttributes(attrPeerHitFalse)
 
-	base, err := h.getOrOpenBase(ctx)
-	if err != nil {
-		span.RecordError(err)
-
-		var zero T
-
-		return zero, err
-	}
-
-	result, err := useBase(ctx, base)
+	result, err := useBase(ctx)
 	if err != nil {
 		span.RecordError(err)
 	}
@@ -288,7 +323,6 @@ func withPeerFallback[Base, T any](
 var _ io.ReadCloser = (*peerStreamReader)(nil)
 
 // peerStreamReader wraps a gRPC streaming recv function as an io.ReadCloser.
-// cancel is called on Close to signal the server to terminate the stream.
 type peerStreamReader struct {
 	recv    func() ([]byte, error)
 	current *bytes.Reader
@@ -313,8 +347,6 @@ func (r *peerStreamReader) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 
-		// gRPC Recv returns (nil, io.EOF) separately from the last data message,
-		// so no data is lost here.
 		data, err := r.recv()
 		if errors.Is(err, io.EOF) {
 			r.done = true
@@ -333,4 +365,90 @@ func (r *peerStreamReader) Close() error {
 	r.cancel()
 
 	return nil
+}
+
+// openPeerSeekableStream opens a ReadAtBuildSeekable stream, checks peer availability,
+// and returns a recv function that yields data chunks starting with the first message's data.
+func openPeerSeekableStream(
+	ctx context.Context,
+	client orchestrator.ChunkServiceClient,
+	req *orchestrator.ReadAtBuildSeekableRequest,
+	uploaded *atomic.Pointer[UploadedHeaders],
+) (func() ([]byte, error), error) {
+	stream, err := client.ReadAtBuildSeekable(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("open seekable stream: %w", err)
+	}
+
+	msg, err := stream.Recv()
+	if err != nil {
+		return nil, fmt.Errorf("recv first seekable message: %w", err)
+	}
+
+	if !checkPeerAvailability(msg.GetAvailability(), uploaded) {
+		return nil, fmt.Errorf("peer not available for seekable stream")
+	}
+
+	first := msg.GetData()
+
+	return func() ([]byte, error) {
+		if first != nil {
+			data := first
+			first = nil
+
+			return data, nil
+		}
+
+		m, err := stream.Recv()
+		if err != nil {
+			return nil, err
+		}
+
+		checkPeerAvailability(m.GetAvailability(), uploaded)
+
+		return m.GetData(), nil
+	}, nil
+}
+
+// openPeerBlobStream opens a GetBuildBlob stream, checks peer availability,
+// and returns a recv function that yields data chunks.
+func openPeerBlobStream(
+	ctx context.Context,
+	client orchestrator.ChunkServiceClient,
+	req *orchestrator.GetBuildBlobRequest,
+	uploaded *atomic.Pointer[UploadedHeaders],
+) (func() ([]byte, error), error) {
+	stream, err := client.GetBuildBlob(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("open blob stream: %w", err)
+	}
+
+	msg, err := stream.Recv()
+	if err != nil {
+		return nil, fmt.Errorf("recv first blob message: %w", err)
+	}
+
+	if !checkPeerAvailability(msg.GetAvailability(), uploaded) {
+		return nil, fmt.Errorf("peer not available for blob stream")
+	}
+
+	first := msg.GetData()
+
+	return func() ([]byte, error) {
+		if first != nil {
+			data := first
+			first = nil
+
+			return data, nil
+		}
+
+		m, err := stream.Recv()
+		if err != nil {
+			return nil, err
+		}
+
+		checkPeerAvailability(m.GetAvailability(), uploaded)
+
+		return m.GetData(), nil
+	}, nil
 }

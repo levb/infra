@@ -168,7 +168,7 @@ func BenchmarkBaseImageLaunch(b *testing.B) {
 	limiter, err := limit.New(b.Context(), featureFlags)
 	require.NoError(b, err)
 
-	persistence, err := storage.GetStorageProvider(b.Context(), storage.TemplateStorageConfig.WithLimiter(limiter))
+	templateStore, err := storage.GetStore(b.Context(), storage.TemplateStoreConfig.WithLimiter(limiter))
 	require.NoError(b, err)
 
 	blockMetrics, err := blockmetrics.NewMetrics(&noop.MeterProvider{})
@@ -179,7 +179,7 @@ func BenchmarkBaseImageLaunch(b *testing.B) {
 		b.Fatalf("error parsing config: %v", err)
 	}
 
-	templateCache, err := template.NewCache(c, featureFlags, persistence, blockMetrics, peerclient.NopResolver())
+	templateCache, err := template.NewCache(c, featureFlags, templateStore, blockMetrics, peerclient.NopResolver())
 	require.NoError(b, err)
 	templateCache.Start(b.Context())
 	b.Cleanup(templateCache.Stop)
@@ -222,10 +222,10 @@ func BenchmarkBaseImageLaunch(b *testing.B) {
 	artifactRegistry, err := artifactsregistry.GetArtifactsRegistryProvider(b.Context())
 	require.NoError(b, err)
 
-	persistenceTemplate, err := storage.GetStorageProvider(b.Context(), storage.TemplateStorageConfig)
+	templateStore2, err := storage.GetStore(b.Context(), storage.TemplateStoreConfig)
 	require.NoError(b, err)
 
-	persistenceBuild, err := storage.GetStorageProvider(b.Context(), storage.BuildCacheStorageConfig)
+	buildStore, err := storage.GetStore(b.Context(), storage.BuildCacheStoreConfig)
 	require.NoError(b, err)
 
 	var proxyPort uint16 = 5007
@@ -267,8 +267,8 @@ func BenchmarkBaseImageLaunch(b *testing.B) {
 		l,
 		featureFlags,
 		sandboxFactory,
-		persistenceTemplate,
-		persistenceBuild,
+		templateStore2,
+		buildStore,
 		artifactRegistry,
 		dockerhubRepository,
 		sandboxProxy,

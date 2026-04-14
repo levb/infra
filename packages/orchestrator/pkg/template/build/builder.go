@@ -52,8 +52,8 @@ type Builder struct {
 
 	config              cfg.BuilderConfig
 	sandboxFactory      *sandbox.Factory
-	templateStorage     storage.StorageProvider
-	buildStorage        storage.StorageProvider
+	templateStore       storage.Store
+	buildStore          storage.Store
 	artifactRegistry    artifactsregistry.ArtifactsRegistry
 	dockerhubRepository dockerhub.RemoteRepository
 	proxy               *proxy.SandboxProxy
@@ -68,8 +68,8 @@ func NewBuilder(
 	logger logger.Logger,
 	featureFlags *featureflags.Client,
 	sandboxFactory *sandbox.Factory,
-	templateStorage storage.StorageProvider,
-	buildStorage storage.StorageProvider,
+	templateStore storage.Store,
+	buildStore storage.Store,
 	artifactRegistry artifactsregistry.ArtifactsRegistry,
 	dockerhubRepository dockerhub.RemoteRepository,
 	proxy *proxy.SandboxProxy,
@@ -82,8 +82,8 @@ func NewBuilder(
 		logger:              logger,
 		featureFlags:        featureFlags,
 		sandboxFactory:      sandboxFactory,
-		templateStorage:     templateStorage,
-		buildStorage:        buildStorage,
+		templateStore:       templateStore,
+		buildStore:          buildStore,
 		artifactRegistry:    artifactRegistry,
 		dockerhubRepository: dockerhubRepository,
 		proxy:               proxy,
@@ -192,7 +192,7 @@ func (b *Builder) Build(ctx context.Context, paths storage.Paths, cfg config.Tem
 		}
 
 		// Remove build files if build fails
-		removeErr := b.templateStorage.DeleteObjectsWithPrefix(ctx, paths.BuildID)
+		removeErr := b.templateStore.Delete(ctx, paths.BuildID)
 		if removeErr != nil {
 			e = errors.Join(e, fmt.Errorf("error removing build files: %w", removeErr))
 		}
@@ -247,15 +247,15 @@ func runBuild(
 	ctx, span := tracer.Start(ctx, "run build")
 	defer span.End()
 
-	templateStorage := builder.templateStorage
+	tmpl := builder.templateStore
 	if path, ok := builder.useNFSCache(ctx); ok {
-		templateStorage = storage.WrapInNFSCache(ctx, path, templateStorage, builder.featureFlags)
+		tmpl = storage.WrapInNFSCache(ctx, path, tmpl, builder.featureFlags)
 		span.SetAttributes(attribute.Bool("use_cache", true))
 	} else {
 		span.SetAttributes(attribute.Bool("use_cache", false))
 	}
 
-	index := cache.NewHashIndex(bc.CacheScope, builder.buildStorage, templateStorage)
+	index := cache.NewHashIndex(bc.CacheScope, builder.buildStore, tmpl)
 
 	uploadTracker := layer.NewUploadTracker()
 
@@ -274,8 +274,8 @@ func runBuild(
 		builder.templateCache,
 		builder.proxy,
 		builder.sandboxes,
-		templateStorage,
-		builder.buildStorage,
+		tmpl,
+		builder.buildStore,
 		index,
 		uploadTracker,
 		compressCfg,
@@ -286,7 +286,7 @@ func runBuild(
 		builder.featureFlags,
 		builder.logger,
 		builder.proxy,
-		templateStorage,
+		tmpl,
 		builder.artifactRegistry,
 		builder.dockerhubRepository,
 		layerExecutor,
@@ -298,7 +298,7 @@ func runBuild(
 
 	commandExecutor := commands.NewCommandExecutor(
 		bc,
-		builder.buildStorage,
+		builder.buildStore,
 		builder.proxy,
 	)
 
@@ -331,7 +331,7 @@ func runBuild(
 	postProcessingBuilder := finalize.New(
 		bc,
 		builder.sandboxFactory,
-		templateStorage,
+		tmpl,
 		builder.proxy,
 		layerExecutor,
 		builder.featureFlags,
@@ -341,7 +341,7 @@ func runBuild(
 	optimizeBuilder := optimize.New(
 		bc,
 		builder.sandboxFactory,
-		builder.templateStorage,
+		builder.templateStore,
 		builder.templateCache,
 		builder.proxy,
 		layerExecutor,
@@ -379,7 +379,7 @@ func runBuild(
 	// Get the base rootfs size from the template files
 	// This is the size of the rootfs after provisioning and before building the layers
 	// (as they don't change the rootfs size)
-	rootfsSize, err := getRootfsSize(ctx, builder.templateStorage, storage.Paths{BuildID: lastLayerResult.Metadata.Template.BuildID})
+	rootfsSize, err := getRootfsSize(ctx, builder.templateStore, storage.Paths{BuildID: lastLayerResult.Metadata.Template.BuildID})
 	if err != nil {
 		return nil, fmt.Errorf("error getting rootfs size: %w", err)
 	}
@@ -413,17 +413,12 @@ func forceSteps(template config.TemplateConfig) config.TemplateConfig {
 
 func getRootfsSize(
 	ctx context.Context,
-	s storage.StorageProvider,
+	s storage.Store,
 	paths storage.Paths,
 ) (uint64, error) {
-	obj, err := s.OpenBlob(ctx, paths.RootfsHeader(), storage.RootFSHeaderObjectType)
+	h, err := header.LoadHeader(ctx, s, paths.RootfsHeader())
 	if err != nil {
-		return 0, fmt.Errorf("error opening rootfs header object: %w", err)
-	}
-
-	h, err := header.Deserialize(ctx, obj)
-	if err != nil {
-		return 0, fmt.Errorf("error deserializing rootfs header: %w", err)
+		return 0, fmt.Errorf("error loading rootfs header: %w", err)
 	}
 
 	return h.Metadata.Size, nil

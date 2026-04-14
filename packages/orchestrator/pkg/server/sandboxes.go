@@ -641,7 +641,7 @@ func (s *Server) Checkpoint(ctx context.Context, in *orchestrator.SandboxCheckpo
 		uploadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), uploadTimeout)
 		defer cancel()
 
-		memHdr, rootHdr, err := res.uploadSnapshot(uploadCtx, s.persistence, s.config.CompressConfig, s.featureFlags)
+		memHdr, rootHdr, err := res.uploadSnapshot(uploadCtx, s.store, s.config.CompressConfig, s.featureFlags)
 		if completeErr := res.completeUpload(uploadCtx, memHdr, rootHdr); completeErr != nil {
 			telemetry.ReportCriticalError(uploadCtx, "error completing upload", completeErr, telemetry.WithSandboxID(in.GetSandboxId()))
 		}
@@ -705,7 +705,7 @@ type snapshotResult struct {
 
 // uploadSnapshot uploads snapshot files to GCS and returns serialized V4
 // header bytes for peer transition (nil for uncompressed builds).
-func (r *snapshotResult) uploadSnapshot(ctx context.Context, persistence storage.StorageProvider, baseCompressCfg storage.CompressConfig, flags *featureflags.Client) (memfileHdr, rootfsHdr []byte, err error) {
+func (r *snapshotResult) uploadSnapshot(ctx context.Context, s storage.Store, baseCompressCfg storage.CompressConfig, flags *featureflags.Client) (memfileHdr, rootfsHdr []byte, err error) {
 	cfg := storage.ResolveCompressConfig(ctx, baseCompressCfg, flags, storage.FileTypeMemfile, storage.UseCasePause)
 	if cfg != nil {
 		logger.L().Info(ctx, "uploading snapshot",
@@ -715,7 +715,7 @@ func (r *snapshotResult) uploadSnapshot(ctx context.Context, persistence storage
 			zap.Int("frame_size_kb", cfg.FrameSizeKB),
 		)
 	}
-	uploader := sandbox.NewBuildUploader(r.snapshot, persistence, r.paths, cfg, nil)
+	uploader := sandbox.NewBuildUploader(r.snapshot, s, r.paths, cfg, nil)
 
 	if err := uploader.UploadData(ctx); err != nil {
 		return nil, nil, err
@@ -812,7 +812,7 @@ func (s *Server) uploadSnapshotAsync(ctx context.Context, sbx *sandbox.Sandbox, 
 	go func() {
 		defer cancel()
 
-		memHdr, rootHdr, err := res.uploadSnapshot(ctx, s.persistence, s.config.CompressConfig, s.featureFlags)
+		memHdr, rootHdr, err := res.uploadSnapshot(ctx, s.store, s.config.CompressConfig, s.featureFlags)
 		if err != nil {
 			sbxlogger.I(sbx).Error(ctx, "error uploading snapshot files", zap.Error(err))
 		} else {

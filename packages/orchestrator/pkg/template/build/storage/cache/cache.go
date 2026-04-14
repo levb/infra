@@ -35,22 +35,22 @@ type Index interface {
 }
 
 type HashIndex struct {
-	cacheScope      string
-	indexStorage    storage.StorageProvider
-	templateStorage storage.StorageProvider
-	version         string
+	cacheScope    string
+	index         storage.Store
+	templateStore storage.Store
+	version       string
 }
 
 func NewHashIndex(
 	cacheScope string,
-	indexStorage storage.StorageProvider,
-	templateStorage storage.StorageProvider,
+	index storage.Store,
+	templateStore storage.Store,
 ) *HashIndex {
 	return &HashIndex{
-		cacheScope:      cacheScope,
-		indexStorage:    indexStorage,
-		templateStorage: templateStorage,
-		version:         hashingVersion,
+		cacheScope:    cacheScope,
+		index:         index,
+		templateStore: templateStore,
+		version:       hashingVersion,
 	}
 }
 
@@ -62,12 +62,7 @@ func (h *HashIndex) LayerMetaFromHash(ctx context.Context, hash string) (LayerMe
 	ctx, span := tracer.Start(ctx, "get layer_metadata")
 	defer span.End()
 
-	obj, err := h.indexStorage.OpenBlob(ctx, paths.HashToPath(h.cacheScope, hash), storage.LayerMetadataObjectType)
-	if err != nil {
-		return LayerMetadata{}, fmt.Errorf("error opening object for layer metadata: %w", err)
-	}
-
-	data, err := storage.GetBlob(ctx, obj)
+	data, err := h.index.GetBlob(ctx, paths.HashToPath(h.cacheScope, hash))
 	if err != nil {
 		return LayerMetadata{}, fmt.Errorf("error reading layer metadata from object: %w", err)
 	}
@@ -89,17 +84,12 @@ func (h *HashIndex) SaveLayerMeta(ctx context.Context, hash string, template Lay
 	ctx, span := tracer.Start(ctx, "save layer_metadata")
 	defer span.End()
 
-	obj, err := h.indexStorage.OpenBlob(ctx, paths.HashToPath(h.cacheScope, hash), storage.LayerMetadataObjectType)
-	if err != nil {
-		return fmt.Errorf("error creating object for saving UUID: %w", err)
-	}
-
 	marshaled, err := json.Marshal(template)
 	if err != nil {
 		return fmt.Errorf("error marshalling layer metadata: %w", err)
 	}
 
-	err = obj.Put(ctx, marshaled)
+	err = h.index.PutBlob(ctx, paths.HashToPath(h.cacheScope, hash), marshaled)
 	if err != nil {
 		return fmt.Errorf("error writing layer metadata to object: %w", err)
 	}
@@ -125,7 +115,7 @@ func (h *HashIndex) Cached(
 	ctx, span := tracer.Start(ctx, "is cached")
 	defer span.End()
 
-	tmpl, err := metadata.FromBuildID(ctx, h.templateStorage, buildID)
+	tmpl, err := metadata.FromBuildID(ctx, h.templateStore, buildID)
 	if err != nil {
 		// If the metadata does not exist, the layer is not cached
 		return metadata.Template{}, fmt.Errorf("error reading template metadata: %w", err)

@@ -26,7 +26,8 @@ const (
 
 type Diff interface {
 	io.Closer
-	storage.SeekableReader
+	ReadAt(ctx context.Context, buffer []byte, off int64, ft *storage.FrameTable) (int, error)
+	Size(ctx context.Context) (int64, error)
 	block.FramedSlicer
 	CacheKey() DiffStoreKey
 	CachePath() (string, error)

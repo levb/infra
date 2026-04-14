@@ -245,11 +245,11 @@ func doBuild(
 	go tcpFirewall.Start(ctx)
 	defer tcpFirewall.Close(parentCtx)
 
-	persistenceTemplate, err := storage.GetStorageProvider(ctx, storage.TemplateStorageConfig)
+	templateStore, err := storage.GetStore(ctx, storage.TemplateStoreConfig)
 	if err != nil {
 		return fmt.Errorf("template storage: %w", err)
 	}
-	persistenceBuild, err := storage.GetStorageProvider(ctx, storage.BuildCacheStorageConfig)
+	buildStore, err := storage.GetStore(ctx, storage.BuildCacheStoreConfig)
 	if err != nil {
 		return fmt.Errorf("build storage: %w", err)
 	}
@@ -291,7 +291,7 @@ func doBuild(
 	}
 	defer dockerhubRepo.Close()
 
-	templateCache, err := sbxtemplate.NewCache(c, featureFlags, persistenceTemplate, blockMetrics, peerclient.NopResolver())
+	templateCache, err := sbxtemplate.NewCache(c, featureFlags, templateStore, blockMetrics, peerclient.NopResolver())
 	if err != nil {
 		return fmt.Errorf("template cache: %w", err)
 	}
@@ -303,7 +303,7 @@ func doBuild(
 
 	builder := build.NewBuilder(
 		builderConfig, l, featureFlags, sandboxFactory,
-		persistenceTemplate, persistenceBuild, artifactRegistry,
+		templateStore, buildStore, artifactRegistry,
 		dockerhubRepo, sandboxProxy, sandboxes, templateCache, buildMetrics,
 	)
 
@@ -358,12 +358,12 @@ func doBuild(
 	fmt.Printf("\n✅ Build finished: %s\n", buildID)
 
 	// Print artifact sizes
-	printArtifactSizes(ctx, persistenceTemplate, buildID, result)
+	printArtifactSizes(ctx, templateStore, buildID, result)
 
 	return nil
 }
 
-func printArtifactSizes(ctx context.Context, persistence storage.StorageProvider, buildID string, _ *build.Result) {
+func printArtifactSizes(ctx context.Context, s storage.Store, buildID string, _ *build.Result) {
 	paths := storage.Paths{BuildID: buildID}
 	basePath := os.Getenv("LOCAL_TEMPLATE_STORAGE_BASE_PATH")
 
@@ -374,10 +374,8 @@ func printArtifactSizes(ctx context.Context, persistence storage.StorageProvider
 		printLocalFileSizes(basePath, buildID)
 	} else {
 		// For remote storage, get sizes from storage provider
-		if memfile, err := persistence.OpenSeekable(ctx, paths.Memfile(), storage.MemfileObjectType); err == nil {
-			if size, err := memfile.Size(ctx); err == nil {
-				fmt.Printf("   Memfile: %d MB\n", size>>20)
-			}
+		if size, err := s.Size(ctx, paths.Memfile()); err == nil {
+			fmt.Printf("   Memfile: %d MB\n", size>>20)
 		}
 	}
 }

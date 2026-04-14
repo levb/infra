@@ -136,7 +136,7 @@ func TestUploadSignedURL(t *testing.T) {
 		p := newTempProvider(t)
 		// uploadURL and hmacKey are unset by default.
 
-		_, err := p.UploadSignedURL(t.Context(), "file.txt", 5*time.Minute)
+		_, err := p.SignedUploadURL(t.Context(), "file.txt", 5*time.Minute)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no local upload endpoint configured")
 	})
@@ -149,7 +149,7 @@ func TestUploadSignedURL(t *testing.T) {
 		p.uploadURL = "http://localhost:5008"
 		p.hmacKey = hmacKey
 
-		signedURL, err := p.UploadSignedURL(t.Context(), "templates/abc/layer.tar", 5*time.Minute)
+		signedURL, err := p.SignedUploadURL(t.Context(), "templates/abc/layer.tar", 5*time.Minute)
 		require.NoError(t, err)
 
 		// Parse the URL and verify structure.
@@ -181,7 +181,7 @@ func TestUploadSignedURL(t *testing.T) {
 		p.uploadURL = "http://localhost:5008"
 		p.hmacKey = []byte("key")
 
-		signedURL, err := p.UploadSignedURL(t.Context(), "path with spaces/file name.tar", 5*time.Minute)
+		signedURL, err := p.SignedUploadURL(t.Context(), "path with spaces/file name.tar", 5*time.Minute)
 		require.NoError(t, err)
 
 		u, err := url.Parse(signedURL)
@@ -210,7 +210,7 @@ func TestUploadSignedURL(t *testing.T) {
 			t.Run(path, func(t *testing.T) {
 				t.Parallel()
 
-				signedURL, err := p.UploadSignedURL(t.Context(), path, 10*time.Minute)
+				signedURL, err := p.SignedUploadURL(t.Context(), path, 10*time.Minute)
 				require.NoError(t, err)
 
 				// Parse the signed URL as a client would receive it.

@@ -46,7 +46,7 @@ type Server struct {
 	templateCache         *template.Cache
 	pauseMu               sync.Mutex
 	devicePool            *nbd.DevicePool
-	persistence           storage.StorageProvider
+	store                 storage.Store
 	featureFlags          *featureflags.Client
 	sbxEventsService      *events.EventsService
 	startingSandboxes     *semaphore.Weighted
@@ -64,7 +64,7 @@ type ServiceConfig struct {
 	Info             *service.ServiceInfo
 	Proxy            *proxy.SandboxProxy
 	SandboxFactory   *sandbox.Factory
-	Persistence      storage.StorageProvider
+	Store            storage.Store
 	FeatureFlags     *featureflags.Client
 	SbxEventsService *events.EventsService
 	PeerRegistry     peerclient.Registry
@@ -84,7 +84,7 @@ func New(cfg ServiceConfig) (*Server, error) {
 		networkPool:       cfg.NetworkPool,
 		templateCache:     cfg.TemplateCache,
 		devicePool:        cfg.DevicePool,
-		persistence:       cfg.Persistence,
+		store:             cfg.Store,
 		featureFlags:      cfg.FeatureFlags,
 		sbxEventsService:  cfg.SbxEventsService,
 		startingSandboxes: semaphore.NewWeighted(maxStartingInstancesPerNode),

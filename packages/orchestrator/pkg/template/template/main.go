@@ -14,11 +14,11 @@ import (
 
 var tracer = otel.Tracer("github.com/e2b-dev/infra/packages/orchestrator/pkg/template/template")
 
-func Delete(ctx context.Context, artifactRegistry artifactsregistry.ArtifactsRegistry, templateStorage storage.StorageProvider, templateId string, buildId string) error {
+func Delete(ctx context.Context, artifactRegistry artifactsregistry.ArtifactsRegistry, templateStore storage.Store, templateId string, buildId string) error {
 	childCtx, childSpan := tracer.Start(ctx, "delete-template")
 	defer childSpan.End()
 
-	err := templateStorage.DeleteObjectsWithPrefix(ctx, buildId)
+	err := templateStore.Delete(ctx, buildId)
 	if err != nil {
 		return fmt.Errorf("error when deleting template objects: %w", err)
 	}

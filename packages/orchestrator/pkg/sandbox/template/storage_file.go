@@ -15,10 +15,9 @@ type storageFile struct {
 
 func newStorageFile(
 	ctx context.Context,
-	persistence storage.StorageProvider,
+	s storage.Store,
 	objectPath string,
 	path string,
-	objectType storage.ObjectType,
 ) (*storageFile, error) {
 	f, err := os.Create(path)
 	if err != nil {
@@ -27,16 +26,18 @@ func newStorageFile(
 
 	defer f.Close()
 
-	object, err := persistence.OpenBlob(ctx, objectPath, objectType)
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = object.WriteTo(ctx, f)
+	data, err := s.GetBlob(ctx, objectPath)
 	if err != nil {
 		cleanupErr := os.Remove(path)
 
-		return nil, fmt.Errorf("NEW STORAGE failed to write to file: %w", errors.Join(err, cleanupErr))
+		return nil, fmt.Errorf("failed to fetch object: %w", errors.Join(err, cleanupErr))
+	}
+
+	_, err = f.Write(data)
+	if err != nil {
+		cleanupErr := os.Remove(path)
+
+		return nil, fmt.Errorf("failed to write to file: %w", errors.Join(err, cleanupErr))
 	}
 
 	return &storageFile{

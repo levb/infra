@@ -35,8 +35,8 @@ type storageTemplate struct {
 	localSnapfile File
 	localMetafile File
 
-	metrics     blockmetrics.Metrics
-	persistence storage.StorageProvider
+	metrics blockmetrics.Metrics
+	store   storage.Store
 }
 
 func newTemplateFromStorage(
@@ -44,7 +44,7 @@ func newTemplateFromStorage(
 	buildId string,
 	memfileHeader *header.Header,
 	rootfsHeader *header.Header,
-	persistence storage.StorageProvider,
+	s storage.Store,
 	metrics blockmetrics.Metrics,
 	localSnapfile File,
 	localMetafile File,
@@ -63,7 +63,7 @@ func newTemplateFromStorage(
 		memfileHeader: memfileHeader,
 		rootfsHeader:  rootfsHeader,
 		metrics:       metrics,
-		persistence:   persistence,
+		store:         s,
 		memfile:       utils.NewSetOnce[block.ReadonlyDevice](),
 		rootfs:        utils.NewSetOnce[block.ReadonlyDevice](),
 		snapfile:      utils.NewSetOnce[File](),
@@ -90,10 +90,9 @@ func (t *storageTemplate) Fetch(ctx context.Context, buildStore *build.DiffStore
 
 		snapfile, snapfileErr := newStorageFile(
 			ctx,
-			t.persistence,
+			t.store,
 			t.paths.Snapfile(),
 			t.paths.CacheSnapfile(),
-			storage.SnapfileObjectType,
 		)
 		if snapfileErr != nil {
 			errMsg := fmt.Errorf("failed to fetch snapfile: %w", snapfileErr)
@@ -123,10 +122,9 @@ func (t *storageTemplate) Fetch(ctx context.Context, buildStore *build.DiffStore
 
 		meta, err := newStorageFile(
 			ctx,
-			t.persistence,
+			t.store,
 			t.paths.Metadata(),
 			t.paths.CacheMetadata(),
-			storage.MetadataObjectType,
 		)
 		if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
 			sourceErr := fmt.Errorf("failed to fetch metafile: %w", err)
@@ -178,7 +176,7 @@ func (t *storageTemplate) Fetch(ctx context.Context, buildStore *build.DiffStore
 			t.paths.BuildID,
 			build.Memfile,
 			t.memfileHeader,
-			t.persistence,
+			t.store,
 			t.metrics,
 		)
 
@@ -206,7 +204,7 @@ func (t *storageTemplate) Fetch(ctx context.Context, buildStore *build.DiffStore
 			t.paths.BuildID,
 			build.Rootfs,
 			t.rootfsHeader,
-			t.persistence,
+			t.store,
 			t.metrics,
 		)
 		if rootfsErr != nil {

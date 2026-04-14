@@ -12,15 +12,14 @@ import (
 )
 
 type StorageDiff struct {
-	chunker           *utils.SetOnce[*block.Chunker]
-	cachePath         string
-	cacheKey          DiffStoreKey
-	storagePath       string
-	storageObjectType storage.SeekableObjectType
+	chunker     *utils.SetOnce[*block.Chunker]
+	cachePath   string
+	cacheKey    DiffStoreKey
+	storagePath string
 
 	blockSize        int64
 	metrics          blockmetrics.Metrics
-	persistence      storage.StorageProvider
+	store      storage.Store
 	featureFlags     *featureflags.Client
 	uncompressedSize int64 // 0 means unknown (fall back to Size() call)
 }
@@ -41,41 +40,28 @@ func newStorageDiff(
 	diffType DiffType,
 	blockSize int64,
 	metrics blockmetrics.Metrics,
-	persistence storage.StorageProvider,
+	s storage.Store,
 	uncompressedSize int64,
 	ct storage.CompressionType,
 	ff *featureflags.Client,
 ) (*StorageDiff, error) {
-	storageObjectType, ok := storageObjectType(diffType)
-	if !ok {
+	if diffType != Memfile && diffType != Rootfs {
 		return nil, UnknownDiffTypeError{diffType}
 	}
 
 	cachePath := GenerateDiffCachePath(basePath, buildId, diffType)
 
 	return &StorageDiff{
-		storagePath:       storage.Paths{BuildID: buildId}.DataFile(string(diffType), ct),
-		storageObjectType: storageObjectType,
-		cachePath:         cachePath,
-		chunker:           utils.NewSetOnce[*block.Chunker](),
-		blockSize:         blockSize,
-		metrics:           metrics,
-		persistence:       persistence,
-		featureFlags:      ff,
-		uncompressedSize:  uncompressedSize,
-		cacheKey:          GetDiffStoreKey(buildId, diffType),
+		storagePath:      storage.Paths{BuildID: buildId}.DataFile(string(diffType), ct),
+		cachePath:        cachePath,
+		chunker:          utils.NewSetOnce[*block.Chunker](),
+		blockSize:        blockSize,
+		metrics:          metrics,
+		store:            s,
+		featureFlags:     ff,
+		uncompressedSize: uncompressedSize,
+		cacheKey:         GetDiffStoreKey(buildId, diffType),
 	}, nil
-}
-
-func storageObjectType(diffType DiffType) (storage.SeekableObjectType, bool) {
-	switch diffType {
-	case Memfile:
-		return storage.MemfileObjectType, true
-	case Rootfs:
-		return storage.RootFSObjectType, true
-	default:
-		return storage.UnknownSeekableObjectType, false
-	}
 }
 
 func (b *StorageDiff) CacheKey() DiffStoreKey {
@@ -83,14 +69,10 @@ func (b *StorageDiff) CacheKey() DiffStoreKey {
 }
 
 func (b *StorageDiff) Init(ctx context.Context) error {
-	obj, err := b.persistence.OpenSeekable(ctx, b.storagePath, b.storageObjectType)
-	if err != nil {
-		return err
-	}
-
 	size := b.uncompressedSize
 	if size == 0 {
-		size, err = obj.Size(ctx)
+		var err error
+		size, err = b.store.Size(ctx, b.storagePath)
 		if err != nil {
 			errMsg := fmt.Errorf("failed to get object size: %w", err)
 			b.chunker.SetError(errMsg)
@@ -99,7 +81,7 @@ func (b *StorageDiff) Init(ctx context.Context) error {
 		}
 	}
 
-	c, err := block.NewChunker(ctx, b.featureFlags, size, b.blockSize, obj, b.cachePath, b.metrics)
+	c, err := block.NewChunker(ctx, b.featureFlags, size, b.blockSize, b.store, b.storagePath, b.cachePath, b.metrics)
 	if err != nil {
 		errMsg := fmt.Errorf("failed to create chunker: %w", err)
 		b.chunker.SetError(errMsg)

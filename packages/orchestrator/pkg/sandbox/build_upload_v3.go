@@ -7,7 +7,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
-	headers "github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
+	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
 )
 
 // uncompressedUploader implements BuildUploader for V3 (uncompressed) builds.
@@ -34,7 +34,7 @@ func (u *uncompressedUploader) UploadData(ctx context.Context) error {
 			return nil
 		}
 
-		_, err := headers.StoreHeader(ctx, u.persistence, u.paths.MemfileHeader(), u.snapshot.MemfileDiffHeader)
+		_, err := header.StoreHeader(ctx, u.uploader, u.paths.MemfileHeader(), u.snapshot.MemfileDiffHeader)
 
 		return err
 	})
@@ -44,7 +44,7 @@ func (u *uncompressedUploader) UploadData(ctx context.Context) error {
 			return nil
 		}
 
-		_, err := headers.StoreHeader(ctx, u.persistence, u.paths.RootfsHeader(), u.snapshot.RootfsDiffHeader)
+		_, err := header.StoreHeader(ctx, u.uploader, u.paths.RootfsHeader(), u.snapshot.RootfsDiffHeader)
 
 		return err
 	})
@@ -55,7 +55,7 @@ func (u *uncompressedUploader) UploadData(ctx context.Context) error {
 			return nil
 		}
 
-		return u.uploadUncompressedFile(ctx, *memfilePath, u.paths.Memfile(), storage.MemfileObjectType)
+		return storage.UploadFile(ctx, u.uploader, u.paths.Memfile(), *memfilePath)
 	})
 
 	eg.Go(func() error {
@@ -63,7 +63,7 @@ func (u *uncompressedUploader) UploadData(ctx context.Context) error {
 			return nil
 		}
 
-		return u.uploadUncompressedFile(ctx, *rootfsPath, u.paths.Rootfs(), storage.RootFSObjectType)
+		return storage.UploadFile(ctx, u.uploader, u.paths.Rootfs(), *rootfsPath)
 	})
 
 	u.scheduleAlwaysUploads(eg, ctx)

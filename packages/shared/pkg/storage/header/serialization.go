@@ -9,7 +9,7 @@ import (
 
 // SerializeHeader serializes a header, dispatching to the version-specific format.
 //
-// V3 (Version <= 3): [Metadata] [v3 mappings…]
+// V3 (Version <= 3): [Metadata] [v3 mappings...]
 // V4 (Version >= 4): [Metadata] [uint32 uncompressedSize] [LZ4( BuildFiles + v4 mappings + FrameTables )]
 func SerializeHeader(h *Header) ([]byte, error) {
 	if h.Metadata.Version <= 3 {
@@ -42,13 +42,8 @@ func DeserializeBytes(data []byte) (*Header, error) {
 
 // LoadHeader fetches a serialized header from storage and deserializes it.
 // Errors (including storage.ErrObjectNotExist) are returned as-is.
-func LoadHeader(ctx context.Context, s storage.StorageProvider, path string) (*Header, error) {
-	blob, err := s.OpenBlob(ctx, path, storage.MetadataObjectType)
-	if err != nil {
-		return nil, fmt.Errorf("open blob %s: %w", path, err)
-	}
-
-	data, err := storage.GetBlob(ctx, blob)
+func LoadHeader(ctx context.Context, s storage.Fetcher, path string) (*Header, error) {
+	data, err := s.GetBlob(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -58,26 +53,11 @@ func LoadHeader(ctx context.Context, s storage.StorageProvider, path string) (*H
 
 // StoreHeader serializes a header and uploads it to storage.
 // Inverse of LoadHeader.
-func StoreHeader(ctx context.Context, s storage.StorageProvider, path string, h *Header) ([]byte, error) {
+func StoreHeader(ctx context.Context, u storage.Uploader, path string, h *Header) ([]byte, error) {
 	data, err := SerializeHeader(h)
 	if err != nil {
 		return nil, fmt.Errorf("serialize header: %w", err)
 	}
 
-	blob, err := s.OpenBlob(ctx, path, storage.MetadataObjectType)
-	if err != nil {
-		return nil, fmt.Errorf("open blob %s: %w", path, err)
-	}
-
-	return data, blob.Put(ctx, data)
-}
-
-// Deserialize reads a header from a storage Blob (legacy API).
-func Deserialize(ctx context.Context, in storage.Blob) (*Header, error) {
-	data, err := storage.GetBlob(ctx, in)
-	if err != nil {
-		return nil, fmt.Errorf("failed to write to buffer: %w", err)
-	}
-
-	return DeserializeBytes(data)
+	return data, u.PutBlob(ctx, path, data)
 }

@@ -159,7 +159,7 @@ func TestCompressStreamRoundTrip(t *testing.T) {
 			up := &memPartUploader{}
 			cfg := defaultCfg(tc.codec, tc.workers, tc.frameSize)
 
-			ft, checksum, err := compressStream(
+			ft, checksum, err := CompressStream(
 				context.Background(),
 				bytes.NewReader(original),
 				cfg,
@@ -205,7 +205,7 @@ func TestCompressStreamContextCancel(t *testing.T) {
 	up := &memPartUploader{}
 	cfg := defaultCfg(CompressionZstd, 4, 2*megabyte)
 
-	_, _, err := compressStream(ctx, bytes.NewReader(data), cfg, up, 4)
+	_, _, err := CompressStream(ctx, bytes.NewReader(data), cfg, up, 4)
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
 }
@@ -236,7 +236,7 @@ func TestCompressStreamPartSizeMinimum(t *testing.T) {
 			cfg := defaultCfg(CompressionZstd, 4, tc.frameSize)
 			cfg.TargetPartSizeMB = tc.targetPartSizeMB
 
-			_, _, err := compressStream(context.Background(), bytes.NewReader(data), cfg, up, 4)
+			_, _, err := CompressStream(context.Background(), bytes.NewReader(data), cfg, up, 4)
 			require.NoError(t, err)
 
 			// Verify: no non-final part is under 5 MiB.
@@ -292,7 +292,7 @@ func TestCompressStreamRace(t *testing.T) {
 				cfg.EncoderConcurrency = 4 // multi-threaded zstd encoders for more contention
 			}
 
-			ft, checksum, err := compressStream(ctx, bytes.NewReader(data), cfg, up, 4)
+			ft, checksum, err := CompressStream(ctx, bytes.NewReader(data), cfg, up, 4)
 			if err != nil {
 				return fmt.Errorf("stream %d: compress: %w", i, err)
 			}
@@ -354,7 +354,7 @@ func BenchmarkCompress(b *testing.B) {
 			for range b.N {
 				up := &ThrottledPartUploader{bandwidth: bcfg.bandwidth}
 
-				_, _, err := compressStream(
+				_, _, err := CompressStream(
 					context.Background(),
 					bytes.NewReader(data),
 					compCfg,
@@ -415,9 +415,15 @@ func BenchmarkStoreFile(b *testing.B) {
 				for range b.N {
 					outDir := b.TempDir()
 					outPath := filepath.Join(outDir, "output.dat")
-					obj := &fsObject{path: outPath}
 
-					ft, _, err := obj.StoreFile(b.Context(), inputPath, compCfg)
+					file, err := os.Open(inputPath)
+					if err != nil {
+						b.Fatal(err)
+					}
+
+					uploader := &fsPartUploader{fullPath: outPath}
+					ft, _, err := CompressStream(b.Context(), file, compCfg, uploader, compCfg.FrameEncodeWorkers)
+					file.Close()
 					if err != nil {
 						b.Fatal(err)
 					}

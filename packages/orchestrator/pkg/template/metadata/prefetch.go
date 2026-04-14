@@ -44,23 +44,18 @@ func PrefetchEntriesToMapping(entries []block.PrefetchBlockEntry, blockSize int6
 }
 
 // UploadMetadata uploads the template metadata to storage.
-func UploadMetadata(ctx context.Context, persistence storage.StorageProvider, t Template) error {
+func UploadMetadata(ctx context.Context, s storage.Store, t Template) error {
 	ctx, span := tracer.Start(ctx, "upload-metadata")
 	defer span.End()
 
 	metadataPath := storage.Paths{BuildID: t.Template.BuildID}.Metadata()
-
-	object, err := persistence.OpenBlob(ctx, metadataPath, storage.MetadataObjectType)
-	if err != nil {
-		return fmt.Errorf("failed to open metadata object: %w", err)
-	}
 
 	metaBytes, err := json.Marshal(t)
 	if err != nil {
 		return fmt.Errorf("failed to serialize metadata: %w", err)
 	}
 
-	err = object.Put(ctx, metaBytes)
+	err = s.PutBlob(ctx, metadataPath, metaBytes)
 	if err != nil {
 		return fmt.Errorf("failed to write metadata: %w", err)
 	}

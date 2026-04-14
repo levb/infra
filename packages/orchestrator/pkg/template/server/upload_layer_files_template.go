@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -23,18 +24,16 @@ func (s *ServerStore) InitLayerFileUpload(ctx context.Context, in *templatemanag
 	}
 
 	path := paths.GetLayerFilesCachePath(cacheScope, in.GetHash())
-	obj, err := s.buildStorage.OpenBlob(ctx, path, storage.BuildLayerFileObjectType)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open layer files cache: %w", err)
-	}
 
-	signedUrl, err := s.buildStorage.UploadSignedURL(ctx, path, signedUrlExpiration)
+	signedUrl, err := s.buildStore.SignedUploadURL(ctx, path, signedUrlExpiration)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get signed url: %w", err)
 	}
 
-	exists, err := obj.Exists(ctx)
-	if err != nil {
+	// Check if the file already exists by trying to get its size
+	_, err = s.buildStore.Size(ctx, path)
+	exists := err == nil
+	if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
 		return nil, fmt.Errorf("failed to check if layer files exists: %w", err)
 	}
 

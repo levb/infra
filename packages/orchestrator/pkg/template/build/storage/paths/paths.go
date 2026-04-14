@@ -4,14 +4,14 @@ import (
 	"path"
 )
 
-func buildStoragePath(cacheScope string, saveType string, file string) string {
+func buildPath(cacheScope string, saveType string, file string) string {
 	return path.Join(cacheScope, saveType, file)
 }
 
 func GetLayerFilesCachePath(cacheScope string, hash string) string {
-	return buildStoragePath(cacheScope, "files", hash+".tar")
+	return buildPath(cacheScope, "files", hash+".tar")
 }
 
 func HashToPath(cacheScope, hash string) string {
-	return buildStoragePath(cacheScope, "index", hash)
+	return buildPath(cacheScope, "index", hash)
 }

@@ -54,7 +54,7 @@ type BaseBuilder struct {
 	proxy  *proxy.SandboxProxy
 
 	sandboxFactory      *sandbox.Factory
-	templateStorage     storage.StorageProvider
+	templateStore       storage.Store
 	artifactRegistry    artifactsregistry.ArtifactsRegistry
 	dockerhubRepository dockerhub.RemoteRepository
 	featureFlags        *featureflags.Client
@@ -70,7 +70,7 @@ func New(
 	featureFlags *featureflags.Client,
 	logger logger.Logger,
 	proxy *proxy.SandboxProxy,
-	templateStorage storage.StorageProvider,
+	templateStore storage.Store,
 	artifactRegistry artifactsregistry.ArtifactsRegistry,
 	dockerhubRepository dockerhub.RemoteRepository,
 	layerExecutor *layer.LayerExecutor,
@@ -85,7 +85,7 @@ func New(
 		logger: logger,
 		proxy:  proxy,
 
-		templateStorage:     templateStorage,
+		templateStore:       templateStore,
 		artifactRegistry:    artifactRegistry,
 		dockerhubRepository: dockerhubRepository,
 		sandboxFactory:      sandboxFactory,

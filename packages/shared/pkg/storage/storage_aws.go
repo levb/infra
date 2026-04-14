@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -26,26 +25,15 @@ const (
 	awsReadTimeout      = 15 * time.Second
 )
 
-type awsStorage struct {
+type awsStore struct {
 	client        *s3.Client
 	presignClient *s3.PresignClient
 	bucketName    string
 }
 
-var _ StorageProvider = (*awsStorage)(nil)
+var _ Store = (*awsStore)(nil)
 
-type awsObject struct {
-	client     *s3.Client
-	path       string
-	bucketName string
-}
-
-var (
-	_ Seekable = (*awsObject)(nil)
-	_ Blob     = (*awsObject)(nil)
-)
-
-func newAWSStorage(ctx context.Context, bucketName string) (*awsStorage, error) {
+func newAWSStore(ctx context.Context, bucketName string) (*awsStore, error) {
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, err
@@ -54,14 +42,110 @@ func newAWSStorage(ctx context.Context, bucketName string) (*awsStorage, error) 
 	client := s3.NewFromConfig(cfg)
 	presignClient := s3.NewPresignClient(client)
 
-	return &awsStorage{
+	return &awsStore{
 		client:        client,
 		presignClient: presignClient,
 		bucketName:    bucketName,
 	}, nil
 }
 
-func (s *awsStorage) DeleteObjectsWithPrefix(ctx context.Context, prefix string) error {
+func (s *awsStore) Fetch(ctx context.Context, path string, offset, length int64) (io.ReadCloser, error) {
+	readRange := aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
+	resp, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucketName),
+		Key:    aws.String(path),
+		Range:  readRange,
+	})
+	if err != nil {
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
+			return nil, ErrObjectNotExist
+		}
+
+		return nil, fmt.Errorf("failed to create S3 range reader for %q: %w", path, err)
+	}
+
+	return resp.Body, nil
+}
+
+func (s *awsStore) GetBlob(ctx context.Context, path string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, awsReadTimeout)
+	defer cancel()
+
+	resp, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &s.bucketName, Key: &path})
+	if err != nil {
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
+			return nil, ErrObjectNotExist
+		}
+
+		return nil, err
+	}
+
+	defer resp.Body.Close()
+
+	return io.ReadAll(resp.Body)
+}
+
+func (s *awsStore) Size(ctx context.Context, path string) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, awsOperationTimeout)
+	defer cancel()
+
+	resp, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &s.bucketName, Key: &path})
+	if err != nil {
+		var nsk *types.NoSuchKey
+		var nfd *types.NotFound
+		if errors.As(err, &nsk) || errors.As(err, &nfd) {
+			return 0, ErrObjectNotExist
+		}
+
+		return 0, err
+	}
+
+	return *resp.ContentLength, nil
+}
+
+func (s *awsStore) PutBlob(ctx context.Context, path string, data []byte) error {
+	ctx, cancel := context.WithTimeout(ctx, awsWriteTimeout)
+	defer cancel()
+
+	_, err := s.client.PutObject(
+		ctx,
+		&s3.PutObjectInput{
+			Bucket: &s.bucketName,
+			Key:    &path,
+			Body:   bytes.NewReader(data),
+		},
+	)
+
+	return err
+}
+
+func (s *awsStore) Upload(ctx context.Context, remotePath string, src io.ReaderAt, size int64) error {
+	ctx, cancel := context.WithTimeout(ctx, awsWriteTimeout)
+	defer cancel()
+
+	uploader := manager.NewUploader(
+		s.client,
+		func(u *manager.Uploader) {
+			u.PartSize = 10 * 1024 * 1024 // 10 MB
+			u.Concurrency = 8             // eight parts in flight
+		},
+	)
+
+	_, err := uploader.Upload(
+		ctx,
+		&s3.PutObjectInput{
+			Bucket: &s.bucketName,
+			Key:    &remotePath,
+			Body:   io.NewSectionReader(src, 0, size),
+		},
+	)
+
+	return err
+}
+
+func (s *awsStore) Delete(ctx context.Context, prefix string) error {
 	ctx, cancel := context.WithTimeout(ctx, awsOperationTimeout)
 	defer cancel()
 
@@ -108,11 +192,7 @@ func (s *awsStorage) DeleteObjectsWithPrefix(ctx context.Context, prefix string)
 	return nil
 }
 
-func (s *awsStorage) GetDetails() string {
-	return fmt.Sprintf("[AWS Storage, bucket set to %s]", s.bucketName)
-}
-
-func (s *awsStorage) UploadSignedURL(ctx context.Context, path string, ttl time.Duration) (string, error) {
+func (s *awsStore) SignedUploadURL(ctx context.Context, path string, ttl time.Duration) (string, error) {
 	input := &s3.PutObjectInput{
 		Bucket: aws.String(s.bucketName),
 		Key:    aws.String(path),
@@ -127,153 +207,8 @@ func (s *awsStorage) UploadSignedURL(ctx context.Context, path string, ttl time.
 	return resp.URL, nil
 }
 
-func (s *awsStorage) OpenSeekable(_ context.Context, path string, _ SeekableObjectType) (Seekable, error) {
-	return &awsObject{
-		client:     s.client,
-		bucketName: s.bucketName,
-		path:       path,
-	}, nil
-}
-
-func (s *awsStorage) OpenBlob(_ context.Context, path string, _ ObjectType) (Blob, error) {
-	return &awsObject{
-		client:     s.client,
-		bucketName: s.bucketName,
-		path:       path,
-	}, nil
-}
-
-func (o *awsObject) WriteTo(ctx context.Context, dst io.Writer) (int64, error) {
-	ctx, cancel := context.WithTimeout(ctx, awsReadTimeout)
-	defer cancel()
-
-	resp, err := o.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &o.bucketName, Key: &o.path})
-	if err != nil {
-		var nsk *types.NoSuchKey
-		if errors.As(err, &nsk) {
-			return 0, ErrObjectNotExist
-		}
-
-		return 0, err
-	}
-
-	defer resp.Body.Close()
-
-	return io.Copy(dst, resp.Body)
-}
-
-func (o *awsObject) StoreFile(ctx context.Context, path string, cfg *CompressConfig) (*FrameTable, [32]byte, error) {
-	if cfg.IsEnabled() {
-		return nil, [32]byte{}, fmt.Errorf("compressed uploads are not supported on AWS (builds target GCP only)")
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, awsWriteTimeout)
-	defer cancel()
-
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, [32]byte{}, fmt.Errorf("failed to open file %s: %w", path, err)
-	}
-	defer f.Close()
-
-	uploader := manager.NewUploader(
-		o.client,
-		func(u *manager.Uploader) {
-			u.PartSize = 10 * 1024 * 1024 // 10 MB
-			u.Concurrency = 8             // eight parts in flight
-		},
-	)
-
-	_, err = uploader.Upload(
-		ctx,
-		&s3.PutObjectInput{
-			Bucket: &o.bucketName,
-			Key:    &o.path,
-			Body:   f,
-		},
-	)
-
-	return nil, [32]byte{}, err
-}
-
-func (o *awsObject) Put(ctx context.Context, data []byte) error {
-	ctx, cancel := context.WithTimeout(ctx, awsWriteTimeout)
-	defer cancel()
-
-	_, err := o.client.PutObject(
-		ctx,
-		&s3.PutObjectInput{
-			Bucket: &o.bucketName,
-			Key:    &o.path,
-			Body:   bytes.NewReader(data),
-		},
-	)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (o *awsObject) OpenRangeReader(ctx context.Context, off, length int64, frameTable *FrameTable) (io.ReadCloser, error) {
-	if frameTable.IsCompressed() {
-		return nil, fmt.Errorf("compressed reads are not supported on AWS")
-	}
-
-	readRange := aws.String(fmt.Sprintf("bytes=%d-%d", off, off+length-1))
-	resp, err := o.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(o.bucketName),
-		Key:    aws.String(o.path),
-		Range:  readRange,
-	})
-	if err != nil {
-		var nsk *types.NoSuchKey
-		if errors.As(err, &nsk) {
-			return nil, ErrObjectNotExist
-		}
-
-		return nil, fmt.Errorf("failed to create S3 range reader for %q: %w", o.path, err)
-	}
-
-	return resp.Body, nil
-}
-
-func (o *awsObject) Size(ctx context.Context) (int64, error) {
-	ctx, cancel := context.WithTimeout(ctx, awsOperationTimeout)
-	defer cancel()
-
-	resp, err := o.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &o.bucketName, Key: &o.path})
-	if err != nil {
-		var nsk *types.NoSuchKey
-		var nfd *types.NotFound
-		if errors.As(err, &nsk) || errors.As(err, &nfd) {
-			return 0, ErrObjectNotExist
-		}
-
-		return 0, err
-	}
-
-	return *resp.ContentLength, nil
-}
-
-func (o *awsObject) Exists(ctx context.Context) (bool, error) {
-	_, err := o.Size(ctx)
-
-	return err == nil, ignoreNotExists(err)
-}
-
-func (o *awsObject) Delete(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, awsOperationTimeout)
-	defer cancel()
-
-	_, err := o.client.DeleteObject(
-		ctx, &s3.DeleteObjectInput{
-			Bucket: aws.String(o.bucketName),
-			Key:    aws.String(o.path),
-		},
-	)
-
-	return err
+func (s *awsStore) GetDetails() string {
+	return fmt.Sprintf("[AWS Storage, bucket set to %s]", s.bucketName)
 }
 
 func ignoreNotExists(err error) error {

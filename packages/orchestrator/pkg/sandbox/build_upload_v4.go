@@ -7,7 +7,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
-	headers "github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
+	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
 )
 
 // compressedUploader implements BuildUploader for V4 (compressed) builds.
@@ -34,7 +34,7 @@ func (c *compressedUploader) UploadData(ctx context.Context) error {
 	if memfilePath != nil {
 		localPath := *memfilePath
 		eg.Go(func() error {
-			ft, checksum, err := c.uploadCompressedFile(ctx, localPath, c.paths.MemfileCompressed(c.cfg.CompressionType()), storage.MemfileObjectType, c.cfg)
+			ft, checksum, err := c.uploadCompressedFile(ctx, localPath, c.paths.MemfileCompressed(c.cfg.CompressionType()), c.cfg)
 			if err != nil {
 				return fmt.Errorf("compressed memfile upload: %w", err)
 			}
@@ -49,7 +49,7 @@ func (c *compressedUploader) UploadData(ctx context.Context) error {
 	if rootfsPath != nil {
 		localPath := *rootfsPath
 		eg.Go(func() error {
-			ft, checksum, err := c.uploadCompressedFile(ctx, localPath, c.paths.RootfsCompressed(c.cfg.CompressionType()), storage.RootFSObjectType, c.cfg)
+			ft, checksum, err := c.uploadCompressedFile(ctx, localPath, c.paths.RootfsCompressed(c.cfg.CompressionType()), c.cfg)
 			if err != nil {
 				return fmt.Errorf("compressed rootfs upload: %w", err)
 			}
@@ -82,9 +82,9 @@ func (c *compressedUploader) FinalizeHeaders(ctx context.Context) (memfileHeader
 				return fmt.Errorf("apply frames to memfile header: %w", err)
 			}
 
-			h.Metadata.Version = headers.MetadataVersionCompressed
+			h.Metadata.Version = header.MetadataVersionCompressed
 
-			data, err := headers.StoreHeader(ctx, c.persistence, c.paths.MemfileHeader(), h)
+			data, err := header.StoreHeader(ctx, c.uploader, c.paths.MemfileHeader(), h)
 			if err != nil {
 				return err
 			}
@@ -103,9 +103,9 @@ func (c *compressedUploader) FinalizeHeaders(ctx context.Context) (memfileHeader
 				return fmt.Errorf("apply frames to rootfs header: %w", err)
 			}
 
-			h.Metadata.Version = headers.MetadataVersionCompressed
+			h.Metadata.Version = header.MetadataVersionCompressed
 
-			data, err := headers.StoreHeader(ctx, c.persistence, c.paths.RootfsHeader(), h)
+			data, err := header.StoreHeader(ctx, c.uploader, c.paths.RootfsHeader(), h)
 			if err != nil {
 				return err
 			}

@@ -112,7 +112,7 @@ func newCompressorPool(cfg *CompressConfig) (*sync.Pool, error) {
 func CompressBytes(ctx context.Context, data []byte, cfg *CompressConfig) (*FrameTable, []byte, [32]byte, error) {
 	up := &memPartUploader{}
 
-	ft, checksum, err := compressStream(ctx, bytes.NewReader(data), cfg, up, 4)
+	ft, checksum, err := CompressStream(ctx, bytes.NewReader(data), cfg, up, 4)
 	if err != nil {
 		return nil, nil, [32]byte{}, err
 	}

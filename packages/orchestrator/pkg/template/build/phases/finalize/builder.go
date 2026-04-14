@@ -37,9 +37,9 @@ var tracer = otel.Tracer("github.com/e2b-dev/infra/packages/orchestrator/pkg/tem
 type PostProcessingBuilder struct {
 	buildcontext.BuildContext
 
-	sandboxFactory  *sandbox.Factory
-	templateStorage storage.StorageProvider
-	proxy           *proxy.SandboxProxy
+	sandboxFactory *sandbox.Factory
+	templateStore  storage.Store
+	proxy          *proxy.SandboxProxy
 
 	layerExecutor *layer.LayerExecutor
 	featureFlags  *featureflags.Client
@@ -50,7 +50,7 @@ type PostProcessingBuilder struct {
 func New(
 	buildContext buildcontext.BuildContext,
 	sandboxFactory *sandbox.Factory,
-	templateStorage storage.StorageProvider,
+	templateStore storage.Store,
 	proxy *proxy.SandboxProxy,
 	layerExecutor *layer.LayerExecutor,
 	featureFlags *featureflags.Client,
@@ -59,9 +59,9 @@ func New(
 	return &PostProcessingBuilder{
 		BuildContext: buildContext,
 
-		sandboxFactory:  sandboxFactory,
-		templateStorage: templateStorage,
-		proxy:           proxy,
+		sandboxFactory: sandboxFactory,
+		templateStore:  templateStore,
+		proxy:          proxy,
 
 		layerExecutor: layerExecutor,
 		featureFlags:  featureFlags,

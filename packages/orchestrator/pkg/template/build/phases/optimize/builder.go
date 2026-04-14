@@ -37,12 +37,12 @@ const prefetchIterations = 2
 type OptimizeBuilder struct {
 	buildcontext.BuildContext
 
-	layerExecutor   *layer.LayerExecutor
-	sandboxFactory  *sandbox.Factory
-	templateStorage storage.StorageProvider
-	templateCache   *sbxtemplate.Cache
-	proxy           *proxy.SandboxProxy
-	sandboxes       *sandbox.Map
+	layerExecutor  *layer.LayerExecutor
+	sandboxFactory *sandbox.Factory
+	templateStore  storage.Store
+	templateCache  *sbxtemplate.Cache
+	proxy          *proxy.SandboxProxy
+	sandboxes      *sandbox.Map
 
 	logger logger.Logger
 }
@@ -50,7 +50,7 @@ type OptimizeBuilder struct {
 func New(
 	buildContext buildcontext.BuildContext,
 	sandboxFactory *sandbox.Factory,
-	templateStorage storage.StorageProvider,
+	templateStore storage.Store,
 	templateCache *sbxtemplate.Cache,
 	proxy *proxy.SandboxProxy,
 	layerExecutor *layer.LayerExecutor,
@@ -60,12 +60,12 @@ func New(
 	return &OptimizeBuilder{
 		BuildContext: buildContext,
 
-		sandboxFactory:  sandboxFactory,
-		templateStorage: templateStorage,
-		templateCache:   templateCache,
-		proxy:           proxy,
-		layerExecutor:   layerExecutor,
-		sandboxes:       sandboxes,
+		sandboxFactory: sandboxFactory,
+		templateStore:  templateStore,
+		templateCache:  templateCache,
+		proxy:          proxy,
+		layerExecutor:  layerExecutor,
+		sandboxes:      sandboxes,
 
 		logger: logger,
 	}
@@ -256,7 +256,7 @@ func (pb *OptimizeBuilder) runSandboxAndCollectPrefetch(
 
 // updateMetadata updates the template metadata in storages.
 func (pb *OptimizeBuilder) updateMetadata(ctx context.Context, t metadata.Template) error {
-	err := metadata.UploadMetadata(ctx, pb.templateStorage, t)
+	err := metadata.UploadMetadata(ctx, pb.templateStore, t)
 	if err != nil {
 		return err
 	}

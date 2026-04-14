@@ -181,10 +181,10 @@ func newTestInfra(t *testing.T, ctx context.Context) *testInfra {
 	ti := &testInfra{}
 
 	// Storage
-	persistenceTemplate, err := storage.GetStorageProvider(ctx, storage.TemplateStorageConfig)
+	templateStore, err := storage.GetStore(ctx, storage.TemplateStoreConfig)
 	require.NoError(t, err)
 
-	persistenceBuild, err := storage.GetStorageProvider(ctx, storage.BuildCacheStorageConfig)
+	buildStore, err := storage.GetStore(ctx, storage.BuildCacheStoreConfig)
 	require.NoError(t, err)
 
 	// NBD
@@ -217,7 +217,7 @@ func newTestInfra(t *testing.T, ctx context.Context) *testInfra {
 
 	// Template cache
 	blockMetrics, _ := blockmetrics.NewMetrics(noop.NewMeterProvider())
-	templateCache, err := sbxtemplate.NewCache(orcConfig, flags, persistenceTemplate, blockMetrics, peerclient.NopResolver())
+	templateCache, err := sbxtemplate.NewCache(orcConfig, flags, templateStore, blockMetrics, peerclient.NopResolver())
 	require.NoError(t, err)
 	templateCache.Start(ctx)
 	ti.closers = append(ti.closers, func(_ context.Context) { templateCache.Stop() })
@@ -235,7 +235,7 @@ func newTestInfra(t *testing.T, ctx context.Context) *testInfra {
 	buildMetrics, _ := metrics.NewBuildMetrics(noop.MeterProvider{})
 	ti.builder = build.NewBuilder(
 		builderConfig, l, flags, factory,
-		persistenceTemplate, persistenceBuild, artifactRegistry,
+		templateStore, buildStore, artifactRegistry,
 		dockerhubRepo, sandboxProxy, sandboxes, templateCache, buildMetrics,
 	)
 

@@ -27,14 +27,14 @@ type LayerExecutor struct {
 
 	logger logger.Logger
 
-	templateCache   *sbxtemplate.Cache
-	proxy           *proxy.SandboxProxy
-	sandboxes       *sandbox.Map
-	templateStorage storage.StorageProvider
-	buildStorage    storage.StorageProvider
-	index           cache.Index
-	uploadTracker   *UploadTracker
-	compressConfig  *storage.CompressConfig // nil = no compression
+	templateCache  *sbxtemplate.Cache
+	proxy          *proxy.SandboxProxy
+	sandboxes      *sandbox.Map
+	templateStore  storage.Store
+	buildStore     storage.Store
+	index          cache.Index
+	uploadTracker  *UploadTracker
+	compressConfig *storage.CompressConfig // nil = no compression
 }
 
 func NewLayerExecutor(
@@ -43,8 +43,8 @@ func NewLayerExecutor(
 	templateCache *sbxtemplate.Cache,
 	proxy *proxy.SandboxProxy,
 	sandboxes *sandbox.Map,
-	templateStorage storage.StorageProvider,
-	buildStorage storage.StorageProvider,
+	templateStore storage.Store,
+	buildStore storage.Store,
 	index cache.Index,
 	uploadTracker *UploadTracker,
 	compressConfig *storage.CompressConfig,
@@ -54,14 +54,14 @@ func NewLayerExecutor(
 
 		logger: logger,
 
-		templateCache:   templateCache,
-		proxy:           proxy,
-		sandboxes:       sandboxes,
-		templateStorage: templateStorage,
-		buildStorage:    buildStorage,
-		index:           index,
-		uploadTracker:   uploadTracker,
-		compressConfig:  compressConfig,
+		templateCache:  templateCache,
+		proxy:          proxy,
+		sandboxes:      sandboxes,
+		templateStore:  templateStore,
+		buildStore:     buildStore,
+		index:          index,
+		uploadTracker:  uploadTracker,
+		compressConfig: compressConfig,
 	}
 }
 
@@ -285,7 +285,7 @@ func (lb *LayerExecutor) PauseAndUpload(
 
 	// Register this upload and get functions to signal completion and wait for previous uploads
 	completeUpload, waitForPreviousUploads := lb.uploadTracker.StartUpload()
-	uploader := sandbox.NewBuildUploader(snapshot, lb.templateStorage, storage.Paths{BuildID: meta.Template.BuildID}, lb.compressConfig, lb.uploadTracker.Pending())
+	uploader := sandbox.NewBuildUploader(snapshot, lb.templateStore, storage.Paths{BuildID: meta.Template.BuildID}, lb.compressConfig, lb.uploadTracker.Pending())
 
 	lb.UploadErrGroup.Go(func() error {
 		ctx := context.WithoutCancel(ctx)

@@ -48,7 +48,7 @@ type Cache struct {
 	config        cfg.Config
 	flags         *featureflags.Client
 	cache         *ttlcache.Cache[string, Template]
-	persistence   storage.StorageProvider
+	store   storage.Store
 	buildStore    *build.DiffStore
 	blockMetrics  blockmetrics.Metrics
 	rootCachePath string
@@ -61,7 +61,7 @@ type Cache struct {
 func NewCache(
 	config cfg.Config,
 	flags *featureflags.Client,
-	persistence storage.StorageProvider,
+	s storage.Store,
 	metrics blockmetrics.Metrics,
 	peers peerclient.Resolver,
 ) (*Cache, error) {
@@ -100,7 +100,7 @@ func NewCache(
 	return &Cache{
 		blockMetrics:  metrics,
 		config:        config,
-		persistence:   persistence,
+		store:         s,
 		buildStore:    buildStore,
 		cache:         cache,
 		flags:         flags,
@@ -157,22 +157,22 @@ func (c *Cache) GetTemplate(
 	))
 	defer span.End()
 
-	persistence := c.persistence
+	s := c.store
 	// Because of the template caching, if we enable the NFS cache feature flag,
 	// it will start working only for new orchestrators or new builds.
 	if path, enabled := c.useNFSCache(ctx, isBuilding, isSnapshot); enabled {
 		logger.L().Info(ctx, "using local template cache", zap.String("path", c.rootCachePath))
-		persistence = storage.WrapInNFSCache(ctx, path, persistence, c.flags)
+		s = storage.WrapInNFSCache(ctx, path, s, c.flags)
 		span.SetAttributes(attribute.Bool("use_cache", true))
 	} else {
 		span.SetAttributes(attribute.Bool("use_cache", false))
 	}
 
-	// Wrap persistence with per-buildID peer routing.
+	// Wrap store with per-buildID peer routing.
 	// Each layer's buildID is checked against Redis to find the source orchestrator.
 	// This allows pulling data directly from the peer before GCS upload completes.
 	if c.flags.BoolFlag(ctx, featureflags.PeerToPeerChunkTransferFlag) {
-		persistence = peerclient.NewRoutingProvider(persistence, c.peers)
+		s = peerclient.NewRoutingProvider(s, c.peers)
 	}
 
 	storageTemplate, err := newTemplateFromStorage(
@@ -180,7 +180,7 @@ func (c *Cache) GetTemplate(
 		buildID,
 		nil,
 		nil,
-		persistence,
+		s,
 		c.blockMetrics,
 		nil,
 		nil,
@@ -219,7 +219,7 @@ func (c *Cache) AddSnapshot(
 		buildId,
 		memfileHeader,
 		rootfsHeader,
-		c.persistence,
+		c.store,
 		c.blockMetrics,
 		localSnapfile,
 		localMetafile,
