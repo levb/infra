@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
@@ -73,9 +72,8 @@ func (c *compressedUploader) Upload(ctx context.Context) (memfileHeader, rootfsH
 	return memfileHeader, rootfsHeader, nil
 }
 
-// uploadFile uploads data (if any), finalizes h with the self-entry, then
-// serializes and PUTs the V4 header. The deferred CancelOnError cancels h
-// if uploadFile returns with an error.
+// uploadFile uploads data, publishes self-dependency into the header, waits for
+// inherited deps, and PUTs the V4 header.
 func (c *compressedUploader) uploadFile(
 	ctx context.Context,
 	localPath string,
@@ -85,22 +83,23 @@ func (c *compressedUploader) uploadFile(
 	dataPath string,
 	headerPath string,
 ) (_ []byte, e error) {
-	defer func() { h.CancelOnError(e) }()
+	defer func() { h.Cancel(e) }()
 
+	var dep headers.Dependency
 	if localPath != "" {
-		dep, err := c.uploadData(ctx, localPath, cfg, dataPath, objType)
+		var err error
+		dep, err = c.uploadData(ctx, localPath, cfg, dataPath, objType)
 		if err != nil {
 			return nil, err
 		}
-		h.FinalizeDependencies(map[uuid.UUID]headers.Dependency{h.Metadata.BuildId: dep}, nil)
-	} else {
-		// Header-only layer: no self data to upload. Unblock waiters so
-		// cached references to h don't hang on dependenciesReady.
-		h.FinalizeDependencies(nil, nil)
+	}
+	h.Finalize(dep)
+
+	if err := h.WaitForDependencies(ctx); err != nil {
+		return nil, fmt.Errorf("wait inherited deps: %w", err)
 	}
 
-	// A header-only layer may exist.
-	headerBytes, err := h.SerializeForV4Upload()
+	headerBytes, err := h.SerializeV4()
 	if err != nil {
 		return nil, fmt.Errorf("serialize header: %w", err)
 	}
