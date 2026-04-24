@@ -18,14 +18,16 @@ const (
 	SandboxKernelVersionAttribute      string         = "kernel-version"
 	SandboxFirecrackerVersionAttribute string         = "firecracker-version"
 
-	TeamKind       ldcontext.Kind = "team"
-	UserKind       ldcontext.Kind = "user"
-	ClusterKind    ldcontext.Kind = "cluster"
-	deploymentKind ldcontext.Kind = "deployment"
-	TierKind       ldcontext.Kind = "tier"
-	ServiceKind    ldcontext.Kind = "service"
-	TemplateKind   ldcontext.Kind = "template"
-	VolumeKind     ldcontext.Kind = "volume"
+	TeamKind             ldcontext.Kind = "team"
+	UserKind             ldcontext.Kind = "user"
+	ClusterKind          ldcontext.Kind = "cluster"
+	deploymentKind       ldcontext.Kind = "deployment"
+	TierKind             ldcontext.Kind = "tier"
+	ServiceKind          ldcontext.Kind = "service"
+	TemplateKind         ldcontext.Kind = "template"
+	VolumeKind           ldcontext.Kind = "volume"
+	CompressFileTypeKind ldcontext.Kind = "compress-file-type"
+	CompressUseCaseKind  ldcontext.Kind = "compress-use-case"
 
 	OrchestratorKind            ldcontext.Kind = "orchestrator"
 	OrchestratorCommitAttribute string         = "commit"
@@ -115,9 +117,10 @@ var (
 	// of synchronous. Only safe to enable after PeerToPeerChunkTransferFlag is ON.
 	PeerToPeerAsyncCheckpointFlag = newBoolFlag("peer-to-peer-async-checkpoint", false)
 
-	PersistentVolumesFlag           = newBoolFlag("can-use-persistent-volumes", env.IsDevelopment())
-	ExecutionMetricsOnWebhooksFlag  = newBoolFlag("execution-metrics-on-webhooks", false) // TODO: Remove NLT 20250315
-	SandboxLabelBasedSchedulingFlag = newBoolFlag("sandbox-label-based-scheduling", false)
+	PersistentVolumesFlag            = newBoolFlag("can-use-persistent-volumes", env.IsDevelopment())
+	ExecutionMetricsOnWebhooksFlag   = newBoolFlag("execution-metrics-on-webhooks", false) // TODO: Remove NLT 20250315
+	SandboxLabelBasedSchedulingFlag  = newBoolFlag("sandbox-label-based-scheduling", false)
+	OptimisticResourceAccountingFlag = newBoolFlag("sandbox-placement-optimistic-resource-accounting", false)
 )
 
 type IntFlag struct {
@@ -165,7 +168,7 @@ var (
 	BuildProvisionVersion        = newIntFlag("build-provision-version", 0)
 
 	// NBDConnectionsPerDevice the number of NBD socket connections per device
-	NBDConnectionsPerDevice = newIntFlag("nbd-connections-per-device", 4)
+	NBDConnectionsPerDevice = newIntFlag("nbd-connections-per-device", 1)
 
 	// MemoryPrefetchMaxFetchWorkers is the maximum number of parallel fetch workers per sandbox for memory prefetching.
 	// Fetching is I/O bound so we can have more parallelism.
@@ -203,6 +206,8 @@ var (
 	// MaxConcurrentSnapshotBuildQueries limits concurrent GetSnapshotBuilds calls (e.g. sandbox delete).
 	// 0 or negative disables throttling (unlimited concurrency).
 	MaxConcurrentSnapshotBuildQueries = newIntFlag("max-concurrent-snapshot-build-queries", 0)
+
+	MinChunkerReadSizeKB = newIntFlag("min-chunker-read-size-kb", 16)
 )
 
 type StringFlag struct {
@@ -240,12 +245,14 @@ const (
 const (
 	DefaultFirecackerV1_10Version = "v1.10.1_30cbb07"
 	DefaultFirecackerV1_12Version = "v1.12.1_210cbac"
+	DefaultFirecackerV1_14Version = "v1.14.1_458ca91"
 	DefaultFirecrackerVersion     = DefaultFirecackerV1_12Version
 )
 
 var FirecrackerVersionMap = map[string]string{
 	"v1.10": DefaultFirecackerV1_10Version,
 	"v1.12": DefaultFirecackerV1_12Version,
+	"v1.14": DefaultFirecackerV1_14Version,
 }
 
 // BuildIoEngine Sync is used by default as there seems to be a bad interaction between Async and a lot of io operations.
@@ -312,17 +319,17 @@ func GetTrackedTemplatesSet(ctx context.Context, ff *Client) map[string]struct{}
 	return result
 }
 
-// ChunkerConfigFlag is a JSON flag controlling the chunker implementation and tuning.
-//
-// NOTE: Changing useStreaming has no effect on chunkers already created for
-// cached templates. A service restart (redeploy) is required for that change
-// to take effect. minReadBatchSizeKB is checked just-in-time on each fetch,
-// so it takes effect immediately.
-//
-// JSON format: {"useStreaming": false, "minReadBatchSizeKB": 16}
-var ChunkerConfigFlag = newJSONFlag("chunker-config", ldvalue.FromJSONMarshal(map[string]any{
-	"useStreaming":       false,
-	"minReadBatchSizeKB": 16,
+// CompressConfigFlag controls compression during template builds.
+// When compressBuilds is true, builds upload exclusively compressed data
+// (no uncompressed fallback). When false, exclusively uncompressed with V3 headers.
+var CompressConfigFlag = newJSONFlag("compress-config", ldvalue.FromJSONMarshal(map[string]any{
+	"compressBuilds":     false,
+	"compressionType":    "",
+	"compressionLevel":   0,
+	"frameSizeKB":        0,
+	"minPartSizeMB":      0,
+	"frameEncodeWorkers": 0,
+	"encoderConcurrency": 0,
 }))
 
 // TCPFirewallEgressThrottleConfig controls per-sandbox egress throttling via Firecracker's
@@ -351,10 +358,8 @@ type TCPFirewallEgressThrottleConfigValue struct {
 	Bandwidth TokenBucketConfig
 }
 
-// GetTCPFirewallEgressThrottleConfig fetches and parses the TCPFirewallEgressThrottleConfig flag.
-func GetTCPFirewallEgressThrottleConfig(ctx context.Context, ff *Client) TCPFirewallEgressThrottleConfigValue {
-	value := ff.JSONFlag(ctx, TCPFirewallEgressThrottleConfig)
-
+// parseThrottleBuckets parses "ops" and "bandwidth" token bucket configs from a JSON flag value.
+func parseThrottleBuckets(value ldvalue.Value) (ops, bandwidth TokenBucketConfig) {
 	parseBucket := func(key string) TokenBucketConfig {
 		b := value.GetByKey(key)
 		if b.IsNull() {
@@ -374,8 +379,45 @@ func GetTCPFirewallEgressThrottleConfig(ctx context.Context, ff *Client) TCPFire
 		}
 	}
 
+	return parseBucket("ops"), parseBucket("bandwidth")
+}
+
+// GetTCPFirewallEgressThrottleConfig fetches and parses the TCPFirewallEgressThrottleConfig flag.
+func GetTCPFirewallEgressThrottleConfig(ctx context.Context, ff *Client) TCPFirewallEgressThrottleConfigValue {
+	value := ff.JSONFlag(ctx, TCPFirewallEgressThrottleConfig)
+	ops, bw := parseThrottleBuckets(value)
+
 	return TCPFirewallEgressThrottleConfigValue{
-		Ops:       parseBucket("ops"),
-		Bandwidth: parseBucket("bandwidth"),
+		Ops:       ops,
+		Bandwidth: bw,
+	}
+}
+
+// BlockDriveThrottleConfig controls per-sandbox block device (disk) throttling via Firecracker's
+// VMM-level token bucket rate limiters on the rootfs drive.
+// Structure mirrors the Firecracker RateLimiter API: two independent token buckets.
+// Set bucketSize to -1 to disable a bucket.
+//
+// Ops bucket (IOPS):       effective rate = ops.bucketSize * 1000 / ops.refillTimeMs ops/s.
+// Bandwidth bucket (bytes): effective rate = bandwidth.bucketSize * 1000 / bandwidth.refillTimeMs bytes/s.
+var BlockDriveThrottleConfig = newJSONFlag("block-drive-throttle-config", ldvalue.FromJSONMarshal(map[string]any{
+	"ops":       map[string]any{"bucketSize": -1, "oneTimeBurst": 0, "refillTimeMs": 1000},
+	"bandwidth": map[string]any{"bucketSize": -1, "oneTimeBurst": 0, "refillTimeMs": 1000},
+}))
+
+// BlockDriveThrottleConfigValue holds the parsed values of BlockDriveThrottleConfig.
+type BlockDriveThrottleConfigValue struct {
+	Ops       TokenBucketConfig
+	Bandwidth TokenBucketConfig
+}
+
+// GetBlockDriveThrottleConfig fetches and parses the BlockDriveThrottleConfig flag.
+func GetBlockDriveThrottleConfig(ctx context.Context, ff *Client) BlockDriveThrottleConfigValue {
+	value := ff.JSONFlag(ctx, BlockDriveThrottleConfig)
+	ops, bw := parseThrottleBuckets(value)
+
+	return BlockDriveThrottleConfigValue{
+		Ops:       ops,
+		Bandwidth: bw,
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -18,7 +19,6 @@ import (
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
 	"github.com/launchdarkly/go-sdk-common/v3/ldlog"
-	"go.opentelemetry.io/otel/metric/noop"
 	"golang.org/x/sys/unix"
 
 	"github.com/e2b-dev/infra/packages/clickhouse/pkg/hoststats"
@@ -44,6 +44,7 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	sbxlogger "github.com/e2b-dev/infra/packages/shared/pkg/logger/sandbox"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
+	"github.com/e2b-dev/infra/packages/shared/pkg/telemetry"
 	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
 
@@ -633,20 +634,18 @@ func (r *runner) pauseOnce(ctx context.Context, opts pauseOptions, verbose bool)
 
 	// Only upload when not in benchmark mode (verbose = true means single run)
 	if verbose {
-		templateFiles := storage.TemplateFiles{BuildID: opts.newBuildID}
+		paths := storage.Paths{BuildID: opts.newBuildID}
 		if opts.isRemoteStorage {
 			fmt.Println("📤 Uploading snapshot...")
-			if err := snapshot.Upload(ctx, r.storage, templateFiles); err != nil {
-				return timings, fmt.Errorf("failed to upload snapshot: %w", err)
-			}
-			fmt.Println("✅ Snapshot uploaded successfully")
 		} else {
 			fmt.Println("💾 Saving snapshot to local storage...")
-			if err := snapshot.Upload(ctx, r.storage, templateFiles); err != nil {
-				return timings, fmt.Errorf("failed to save snapshot: %w", err)
-			}
-			fmt.Println("✅ Snapshot saved successfully")
 		}
+
+		if _, _, err := snapshot.Upload(ctx, r.storage, paths, storage.CompressConfig{}, nil, ""); err != nil {
+			return timings, fmt.Errorf("failed to upload snapshot: %w", err)
+		}
+
+		fmt.Println("✅ Snapshot uploaded successfully")
 
 		fmt.Printf("\n✅ Build finished: %s\n", opts.newBuildID)
 		printArtifactSizes(opts.storagePath, opts.newBuildID)
@@ -965,6 +964,16 @@ func run(ctx context.Context, buildID string, iterations int, coldStart, noPrefe
 	}
 	sbxlogger.SetSandboxLoggerInternal(logger.NewNopLogger())
 
+	tel, err := telemetry.NewAnonymous(ctx, "resume-build")
+	if err != nil {
+		return fmt.Errorf("telemetry: %w", err)
+	}
+	defer func() {
+		if err := tel.Shutdown(context.WithoutCancel(ctx)); err != nil {
+			log.Printf("error shutting down telemetry: %v", err)
+		}
+	}()
+
 	if os.Getenv("NODE_IP") == "" {
 		os.Setenv("NODE_IP", "127.0.0.1")
 	}
@@ -991,7 +1000,7 @@ func run(ctx context.Context, buildID string, iterations int, coldStart, noPrefe
 	if verbose {
 		fmt.Println("🔧 Starting TCP firewall...")
 	}
-	tcpFw := tcpfirewall.New(l, config.NetworkConfig, sandboxes, noop.NewMeterProvider(), flags)
+	tcpFw := tcpfirewall.New(l, config.NetworkConfig, sandboxes, tel.MeterProvider, flags)
 	go tcpFw.Start(ctx)
 	defer tcpFw.Close(context.WithoutCancel(ctx))
 
@@ -1031,13 +1040,16 @@ func run(ctx context.Context, buildID string, iterations int, coldStart, noPrefe
 		return fmt.Errorf("storage provider: %w", err)
 	}
 	if persistence == nil {
-		return fmt.Errorf("storage provider is nil")
+		return errors.New("storage provider is nil")
 	}
 
 	if verbose {
 		fmt.Println("🔧 Creating block metrics...")
 	}
-	blockMetrics, _ := blockmetrics.NewMetrics(&noop.MeterProvider{})
+	blockMetrics, err := blockmetrics.NewMetrics(tel.MeterProvider)
+	if err != nil {
+		return fmt.Errorf("block metrics: %w", err)
+	}
 
 	if verbose {
 		fmt.Println("🔧 Creating template cache...")
@@ -1052,7 +1064,7 @@ func run(ctx context.Context, buildID string, iterations int, coldStart, noPrefe
 	if verbose {
 		fmt.Println("🔧 Creating sandbox factory...")
 	}
-	factory := sandbox.NewFactory(config.BuilderConfig, networkPool, devicePool, flags, hoststats.NewNoopDelivery(), cgroup.NewNoopManager(), sandboxes)
+	factory := sandbox.NewFactory(config.BuilderConfig, networkPool, devicePool, flags, hoststats.NewNoopDelivery(), cgroup.NewNoopManager(), network.NewNoopEgressProxy(), sandboxes)
 
 	fmt.Printf("📦 Loading %s...\n", buildID)
 	tmpl, err := cache.GetTemplate(ctx, buildID, false, false)

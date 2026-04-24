@@ -1,11 +1,13 @@
 package header
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 
-	"github.com/bits-and-blooms/bitset"
+	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -15,19 +17,80 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/telemetry"
 )
 
+const (
+	// metadataVersion is used by template-manager for uncompressed builds (V3 headers).
+	metadataVersion = 3
+	// MetadataVersionV4 is used for compressed builds (V4 headers with FrameTables).
+	MetadataVersionV4 = 4
+)
+
+type Metadata struct {
+	Version    uint64
+	BlockSize  uint64
+	Size       uint64
+	Generation uint64
+	BuildId    uuid.UUID
+	// TODO: Use the base build id when setting up the snapshot rootfs
+	BaseBuildId uuid.UUID
+}
+
+func NewTemplateMetadata(buildId uuid.UUID, blockSize, size uint64) *Metadata {
+	return &Metadata{
+		Version:     metadataVersion,
+		Generation:  0,
+		BlockSize:   blockSize,
+		Size:        size,
+		BuildId:     buildId,
+		BaseBuildId: buildId,
+	}
+}
+
+func (m *Metadata) NextGeneration(buildID uuid.UUID) *Metadata {
+	return &Metadata{
+		Version:     m.Version,
+		Generation:  m.Generation + 1,
+		BlockSize:   m.BlockSize,
+		Size:        m.Size,
+		BuildId:     buildID,
+		BaseBuildId: m.BaseBuildId,
+	}
+}
+
+// metadataSize is the binary size of the Metadata struct, computed from the struct layout.
+var metadataSize = binary.Size(Metadata{})
+
+func deserializeMetadata(data []byte) (*Metadata, error) {
+	var metadata Metadata
+
+	err := binary.Read(bytes.NewReader(data), binary.LittleEndian, &metadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read metadata: %w", err)
+	}
+
+	return &metadata, nil
+}
+
 var ignoreBuildID = uuid.Nil
 
 type DiffMetadata struct {
-	Dirty *bitset.BitSet
-	Empty *bitset.BitSet
+	Dirty *roaring.Bitmap
+	Empty *roaring.Bitmap
 
 	BlockSize int64
+}
+
+func NewDiffMetadata(blockSize int64, dirty *roaring.Bitmap) *DiffMetadata {
+	return &DiffMetadata{
+		Dirty:     dirty,
+		Empty:     roaring.New(),
+		BlockSize: blockSize,
+	}
 }
 
 func (d *DiffMetadata) toDiffMapping(
 	ctx context.Context,
 	buildID uuid.UUID,
-) (mapping []*BuildMap) {
+) (mapping []BuildMap) {
 	dirtyMappings := CreateMapping(
 		&buildID,
 		d.Dirty,
@@ -79,7 +142,7 @@ func (d *DiffMetadata) ToDiffHeader(
 
 	telemetry.SetAttributes(ctx,
 		attribute.Int64("snapshot.header.mappings.length", int64(len(m))),
-		attribute.Int64("snapshot.diff.size", int64(d.Dirty.Count()*uint(originalHeader.Metadata.BlockSize))),
+		attribute.Int64("snapshot.diff.size", int64(d.Dirty.GetCardinality())*int64(originalHeader.Metadata.BlockSize)),
 		attribute.Int64("snapshot.mapped_size", int64(metadata.Size)),
 		attribute.Int64("snapshot.block_size", int64(metadata.BlockSize)),
 		attribute.Int64("snapshot.metadata.version", int64(metadata.Version)),
@@ -88,7 +151,7 @@ func (d *DiffMetadata) ToDiffHeader(
 		attribute.String("snapshot.metadata.base_build_id", metadata.BaseBuildId.String()),
 	)
 
-	header, err := NewHeader(metadata, m)
+	header, err := NewHeaderWithBuilds(metadata, m, originalHeader.Builds)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create header: %w", err)
 	}
@@ -106,16 +169,16 @@ func (d *DiffMetadata) ToDiffHeader(
 }
 
 type DiffMetadataBuilder struct {
-	dirty *bitset.BitSet
-	empty *bitset.BitSet
+	dirty *roaring.Bitmap
+	empty *roaring.Bitmap
 
 	blockSize int64
 }
 
-func NewDiffMetadataBuilder(size, blockSize int64) *DiffMetadataBuilder {
+func NewDiffMetadataBuilder(blockSize int64) *DiffMetadataBuilder {
 	return &DiffMetadataBuilder{
-		dirty: bitset.New(uint(TotalBlocks(size, blockSize))),
-		empty: bitset.New(0),
+		dirty: roaring.New(),
+		empty: roaring.New(),
 
 		blockSize: blockSize,
 	}
@@ -129,12 +192,12 @@ func (b *DiffMetadataBuilder) Process(ctx context.Context, block []byte, out io.
 		return fmt.Errorf("error checking empty block: %w", err)
 	}
 	if isEmpty {
-		b.empty.Set(uint(blockIdx))
+		b.empty.Add(uint32(blockIdx))
 
 		return nil
 	}
 
-	b.dirty.Set(uint(blockIdx))
+	b.dirty.Add(uint32(blockIdx))
 	n, err := out.Write(block)
 	if err != nil {
 		logger.L().Error(ctx, "error writing to out", zap.Error(err))

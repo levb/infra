@@ -43,6 +43,46 @@ resource "google_secret_manager_secret_version" "nomad_acl_token" {
   secret_data = random_uuid.nomad_acl_token.result
 }
 
+resource "random_password" "api_admin_secret" {
+  length  = 32
+  special = true
+}
+
+resource "google_secret_manager_secret" "api_admin_token" {
+  secret_id = "${var.prefix}api-admin-token"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [time_sleep.secrets_api_wait_60_seconds]
+}
+
+resource "google_secret_manager_secret_version" "api_admin_token_value" {
+  secret      = google_secret_manager_secret.api_admin_token.id
+  secret_data = random_password.api_admin_secret.result
+}
+
+resource "random_password" "dashboard_api_admin_secret" {
+  length  = 32
+  special = false
+}
+
+resource "google_secret_manager_secret" "dashboard_api_admin_token" {
+  secret_id = "${var.prefix}dashboard-api-admin-token"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [time_sleep.secrets_api_wait_60_seconds]
+}
+
+resource "google_secret_manager_secret_version" "dashboard_api_admin_token_value" {
+  secret      = google_secret_manager_secret.dashboard_api_admin_token.id
+  secret_data = random_password.dashboard_api_admin_secret.result
+}
+
 
 
 # grafana api key
@@ -168,6 +208,25 @@ resource "google_secret_manager_secret" "supabase_jwt_secrets" {
   }
 
   depends_on = [time_sleep.secrets_api_wait_60_seconds]
+}
+
+resource "google_secret_manager_secret" "supabase_db_connection_string" {
+  secret_id = "${var.prefix}supabase-db-connection-string"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [time_sleep.secrets_api_wait_60_seconds]
+}
+
+resource "google_secret_manager_secret_version" "supabase_db_connection_string" {
+  secret      = google_secret_manager_secret.supabase_db_connection_string.name
+  secret_data = " "
+
+  lifecycle {
+    ignore_changes = [secret_data]
+  }
 }
 
 resource "google_secret_manager_secret_version" "supabase_jwt_secrets" {

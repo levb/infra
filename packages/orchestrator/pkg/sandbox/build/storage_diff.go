@@ -3,30 +3,25 @@ package build
 import (
 	"context"
 	"fmt"
-	"io"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/block"
 	blockmetrics "github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/block/metrics"
 	"github.com/e2b-dev/infra/packages/shared/pkg/featureflags"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
-	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
 
-func storagePath(buildId string, diffType DiffType) string {
-	return fmt.Sprintf("%s/%s", buildId, diffType)
-}
-
 type StorageDiff struct {
-	chunker           *utils.SetOnce[block.Chunker]
+	chunker           *block.Chunker
 	cachePath         string
 	cacheKey          DiffStoreKey
 	storagePath       string
 	storageObjectType storage.SeekableObjectType
 
-	blockSize    int64
-	metrics      blockmetrics.Metrics
-	persistence  storage.StorageProvider
-	featureFlags *featureflags.Client
+	blockSize        int64
+	metrics          blockmetrics.Metrics
+	persistence      storage.StorageProvider
+	featureFlags     *featureflags.Client
+	uncompressedSize int64
 }
 
 var _ Diff = (*StorageDiff)(nil)
@@ -46,9 +41,10 @@ func newStorageDiff(
 	blockSize int64,
 	metrics blockmetrics.Metrics,
 	persistence storage.StorageProvider,
-	featureFlags *featureflags.Client,
+	uncompressedSize int64,
+	ct storage.CompressionType,
+	ff *featureflags.Client,
 ) (*StorageDiff, error) {
-	storagePath := storagePath(buildId, diffType)
 	storageObjectType, ok := storageObjectType(diffType)
 	if !ok {
 		return nil, UnknownDiffTypeError{diffType}
@@ -57,14 +53,14 @@ func newStorageDiff(
 	cachePath := GenerateDiffCachePath(basePath, buildId, diffType)
 
 	return &StorageDiff{
-		storagePath:       storagePath,
+		storagePath:       storage.Paths{BuildID: buildId}.DataFile(string(diffType), ct),
 		storageObjectType: storageObjectType,
 		cachePath:         cachePath,
-		chunker:           utils.NewSetOnce[block.Chunker](),
 		blockSize:         blockSize,
 		metrics:           metrics,
 		persistence:       persistence,
-		featureFlags:      featureFlags,
+		featureFlags:      ff,
+		uncompressedSize:  uncompressedSize,
 		cacheKey:          GetDiffStoreKey(buildId, diffType),
 	}, nil
 }
@@ -90,59 +86,38 @@ func (b *StorageDiff) Init(ctx context.Context) error {
 		return err
 	}
 
-	size, err := obj.Size(ctx)
-	if err != nil {
-		errMsg := fmt.Errorf("failed to get object size: %w", err)
-		b.chunker.SetError(errMsg)
-
-		return errMsg
+	size := b.uncompressedSize
+	if size == 0 {
+		size, err = obj.Size(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get object size: %w", err)
+		}
 	}
 
-	c, err := block.NewChunker(ctx, b.featureFlags, size, b.blockSize, obj, b.cachePath, b.metrics)
+	c, err := block.NewChunker(b.featureFlags, size, b.blockSize, obj, b.cachePath, b.metrics)
 	if err != nil {
-		errMsg := fmt.Errorf("failed to create chunker: %w", err)
-		b.chunker.SetError(errMsg)
-
-		return errMsg
+		return fmt.Errorf("failed to create chunker: %w", err)
 	}
 
-	return b.chunker.SetValue(c)
+	b.chunker = c
+
+	return nil
 }
 
 func (b *StorageDiff) Close() error {
-	c, err := b.chunker.Wait()
-	if err != nil {
-		return err
+	if b.chunker == nil {
+		return nil
 	}
 
-	return c.Close()
+	return b.chunker.Close()
 }
 
-func (b *StorageDiff) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
-	c, err := b.chunker.Wait()
-	if err != nil {
-		return 0, err
-	}
-
-	return c.ReadAt(ctx, p, off)
+func (b *StorageDiff) ReadAt(ctx context.Context, p []byte, off int64, ft *storage.FrameTable) (int, error) {
+	return b.chunker.ReadAt(ctx, p, off, ft)
 }
 
-func (b *StorageDiff) Slice(ctx context.Context, off, length int64) ([]byte, error) {
-	c, err := b.chunker.Wait()
-	if err != nil {
-		return nil, err
-	}
-
-	return c.Slice(ctx, off, length)
-}
-
-func (b *StorageDiff) WriteTo(ctx context.Context, w io.Writer) (int64, error) {
-	c, err := b.chunker.Wait()
-	if err != nil {
-		return 0, err
-	}
-
-	return c.WriteTo(ctx, w)
+func (b *StorageDiff) Slice(ctx context.Context, off, length int64, ft *storage.FrameTable) ([]byte, error) {
+	return b.chunker.Slice(ctx, off, length, ft)
 }
 
 // The local file might not be synced.
@@ -151,12 +126,7 @@ func (b *StorageDiff) CachePath() (string, error) {
 }
 
 func (b *StorageDiff) FileSize() (int64, error) {
-	c, err := b.chunker.Wait()
-	if err != nil {
-		return 0, err
-	}
-
-	return c.FileSize()
+	return b.chunker.FileSize()
 }
 
 func (b *StorageDiff) Size(_ context.Context) (int64, error) {

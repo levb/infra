@@ -9,7 +9,7 @@ import (
 )
 
 type SandboxFiles struct {
-	TemplateCacheFiles
+	CachePaths
 
 	SandboxID string
 	tmpDir    string
@@ -18,28 +18,30 @@ type SandboxFiles struct {
 }
 
 type Config struct {
+	CompressConfig
+
 	SandboxCacheDir  string `env:"SANDBOX_CACHE_DIR,expand"  envDefault:"${ORCHESTRATOR_BASE_PATH}/sandbox"`
 	SnapshotCacheDir string `env:"SNAPSHOT_CACHE_DIR,expand" envDefault:"/mnt/snapshot-cache"`
 	TemplateCacheDir string `env:"TEMPLATE_CACHE_DIR,expand" envDefault:"${ORCHESTRATOR_BASE_PATH}/template"`
 }
 
-func (c TemplateCacheFiles) NewSandboxFiles(sandboxID string) *SandboxFiles {
+func (c CachePaths) NewSandboxFiles(sandboxID string) *SandboxFiles {
 	randomID := id.Generate()
 
 	return &SandboxFiles{
-		TemplateCacheFiles: c,
-		SandboxID:          sandboxID,
-		randomID:           randomID,
-		tmpDir:             os.TempDir(),
+		CachePaths: c,
+		SandboxID:  sandboxID,
+		randomID:   randomID,
+		tmpDir:     os.TempDir(),
 	}
 }
 
-func (c TemplateCacheFiles) NewSandboxFilesWithStaticID(sandboxID string, staticID string) *SandboxFiles {
+func (c CachePaths) NewSandboxFilesWithStaticID(sandboxID string, staticID string) *SandboxFiles {
 	return &SandboxFiles{
-		TemplateCacheFiles: c,
-		SandboxID:          sandboxID,
-		randomID:           staticID,
-		tmpDir:             os.TempDir(),
+		CachePaths: c,
+		SandboxID:  sandboxID,
+		randomID:   staticID,
+		tmpDir:     os.TempDir(),
 	}
 }
 

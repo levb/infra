@@ -382,6 +382,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 		RedisClusterURL:  config.RedisClusterURL,
 		RedisTLSCABase64: config.RedisTLSCABase64,
 		PoolSize:         config.RedisPoolSize,
+		MinIdleConns:     config.RedisMinIdleConns,
 	})
 	if err != nil && !errors.Is(err, sharedFactories.ErrRedisDisabled) {
 		logger.L().Fatal(ctx, "Could not connect to Redis", zap.Error(err))
@@ -466,6 +467,14 @@ func run(config cfg.Config, opts Options) (success bool) {
 	}
 	closers = append(closers, closer{"sandbox observer", sandboxObserver.Close})
 
+	// host metrics — samples CPU in the background so GetCPUMetrics is a
+	// non-blocking cache read on the request path.
+	hostMetrics := metrics.NewHostMetrics()
+	startService("host metrics poller", func() error {
+		return hostMetrics.Start()
+	})
+	closers = append(closers, closer{"host metrics poller", hostMetrics.Close})
+
 	// sandbox proxy
 	sandboxProxy, err := proxy.NewSandboxProxy(tel.MeterProvider, config.ProxyPort, sandboxes, featureFlags)
 	if err != nil {
@@ -533,7 +542,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	closers = append(closers, closer{"network pool", networkPool.Close})
 
 	// sandbox factory
-	sandboxFactory := sandbox.NewFactory(config.BuilderConfig, networkPool, devicePool, featureFlags, hostStatsDelivery, cgroupManager, sandboxes)
+	sandboxFactory := sandbox.NewFactory(config.BuilderConfig, networkPool, devicePool, featureFlags, hostStatsDelivery, cgroupManager, egressSetup.Proxy, sandboxes)
 
 	// isolated filesystems cache (for nfs proxy)
 	builder := chrooted.NewBuilder(config)
@@ -602,7 +611,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	})
 	closers = append(closers, closer{"hyperloop server", hyperloopSrv.Shutdown})
 
-	grpcServer := e2bgrpc.NewGRPCServer(tel)
+	grpcServer := e2bgrpc.NewGRPCServer(tel, e2bgrpc.WithSandboxResumeMetrics())
 	orchestrator.RegisterSandboxServiceServer(grpcServer, orchestratorService)
 	orchestrator.RegisterVolumeServiceServer(grpcServer, volumeService)
 	orchestrator.RegisterChunkServiceServer(grpcServer, orchestratorService)
@@ -640,7 +649,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 		closers = append(closers, closer{"template server", tmpl.Close})
 	}
 
-	infoService := service.NewInfoService(serviceInfo, sandboxes)
+	infoService := service.NewInfoService(serviceInfo, sandboxes, hostMetrics)
 	orchestratorinfo.RegisterInfoServiceServer(grpcServer, infoService)
 
 	grpcHealth := health.NewServer()

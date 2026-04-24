@@ -112,7 +112,7 @@ func New(
 
 	var routingCatalog e2bcatalog.SandboxesCatalog
 	if redisClient != nil {
-		routingCatalog = e2bcatalog.NewRedisSandboxCatalog(redisClient, e2bcatalog.NewReadThroughSandboxCache())
+		routingCatalog = e2bcatalog.NewRedisSandboxCatalog(redisClient)
 	} else {
 		routingCatalog = e2bcatalog.NewMemorySandboxesCatalog()
 	}
@@ -180,6 +180,7 @@ func New(
 		sandbox.Callbacks{
 			AddSandboxToRoutingTable: o.addSandboxToRoutingTable,
 			AsyncNewlyCreatedSandbox: o.handleNewlyCreatedSandbox,
+			RemoveSandboxFromNode:    o.killOrphanSandbox,
 		},
 	)
 

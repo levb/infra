@@ -18,7 +18,7 @@ func (s *APIStore) GetTeams(c *gin.Context) {
 
 	userID := auth.MustGetUserID(c)
 
-	rows, err := s.db.GetDashboardTeamsWithUsersTeamsWithTier(ctx, userID)
+	rows, err := s.db.Dashboard.GetDashboardTeamsWithUsersTeamsWithTier(ctx, userID)
 	if err != nil {
 		logger.L().Error(ctx, "failed to get user teams", zap.Error(err))
 		s.sendAPIStoreError(c, http.StatusInternalServerError, "Failed to get user teams")
@@ -39,6 +39,7 @@ func (s *APIStore) GetTeams(c *gin.Context) {
 			IsBanned:          row.Team.IsBanned,
 			BlockedReason:     row.Team.BlockedReason,
 			IsDefault:         row.IsDefault,
+			CreatedAt:         row.Team.CreatedAt,
 			Limits: api.UserTeamLimits{
 				MaxLengthHours:           row.TeamLimit.MaxLengthHours,
 				ConcurrentSandboxes:      row.TeamLimit.ConcurrentSandboxes,

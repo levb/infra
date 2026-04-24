@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"testing"
+	"unsafe"
 
-	"github.com/bits-and-blooms/bitset"
+	"github.com/RoaringBitmap/roaring/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/uffd/testutils"
 )
@@ -20,6 +24,8 @@ type testConfig struct {
 	numberOfPages uint64
 	// Operations to trigger on the memory area.
 	operations []operation
+	// alwaysWP makes the handler copy with UFFDIO_COPY_MODE_WP for all faults.
+	alwaysWP bool
 }
 
 type operationMode uint32
@@ -35,14 +41,103 @@ type operation struct {
 	mode   operationMode
 }
 
+// handlerPageStates is a snapshot of the pageTracker grouped by state. It
+// lets tests assert on the set of pages that the handler observed in each
+// state, rather than a flat list of "accessed" offsets. Follow-up PRs can
+// add more state-specific fields (e.g. removed) without touching the
+// existing call sites.
+type handlerPageStates struct {
+	faulted []uint
+}
+
+// allAccessed returns the sorted union of offsets that the handler touched
+// in any non-missing state. Tests that only care about "which pages did the
+// handler see" can compare directly against this.
+//
+// pageStatesOnce already returns each per-state slice sorted, and a page
+// has exactly one state at a time in pageTracker, so the per-state slices
+// are disjoint. Follow-up PRs that add more state-specific fields should
+// sorted-merge them here instead of reaching for a bitset — byte offsets
+// make poor bit indices (a single hugepage offset would force ~1.8 MB of
+// backing storage).
+func (s handlerPageStates) allAccessed() []uint {
+	return slices.Clone(s.faulted)
+}
+
 type testHandler struct {
 	memoryArea *[]byte
 	pagesize   uint64
 	data       *MemorySlicer
-	// Returns offsets of the pages that were faulted.
+	// pageStatesOnce returns a per-state snapshot of the handler's pageTracker.
 	// It can only be called once.
-	offsetsOnce func() ([]uint, error)
-	mutex       sync.Mutex
+	pageStatesOnce func() (handlerPageStates, error)
+	mutex          sync.Mutex
+}
+
+func (h *testHandler) executeAll(t *testing.T, operations []operation) {
+	t.Helper()
+
+	for i, op := range operations {
+		err := h.executeOperation(t.Context(), op)
+		require.NoError(t, err, "step %d: %v at offset %d", i, op.mode, op.offset)
+	}
+}
+
+type pageExpectation uint8
+
+const (
+	expectClean pageExpectation = iota // read-only: present + WP set
+	expectDirty                        // written: present + WP cleared
+)
+
+func (h *testHandler) checkDirtiness(t *testing.T, operations []operation) {
+	t.Helper()
+
+	pagemap, err := testutils.NewPagemapReader()
+	require.NoError(t, err)
+	defer pagemap.Close()
+
+	memStart := uintptr(unsafe.Pointer(&(*h.memoryArea)[0]))
+
+	// Track the final expected state per offset by replaying operations in order.
+	expected := make(map[uint]pageExpectation)
+
+	for _, op := range operations {
+		off := uint(op.offset)
+		switch op.mode {
+		case operationModeRead:
+			if _, seen := expected[off]; !seen {
+				expected[off] = expectClean
+			}
+		case operationModeWrite:
+			expected[off] = expectDirty
+		}
+	}
+
+	for off, expect := range expected {
+		entry, err := pagemap.ReadEntry(memStart + uintptr(off))
+		require.NoError(t, err, "pagemap read at offset %d", off)
+
+		switch expect {
+		case expectDirty:
+			assert.True(t, entry.IsPresent(), "written page at offset %d should be present", off)
+			assert.False(t, entry.IsWriteProtected(), "written page at offset %d should be dirty", off)
+		case expectClean:
+			assert.True(t, entry.IsPresent(), "read-only page at offset %d should be present", off)
+			assert.True(t, entry.IsWriteProtected(), "read-only page at offset %d should be clean", off)
+		}
+	}
+}
+
+func (h *testHandler) executeOperation(ctx context.Context, op operation) error {
+	switch op.mode {
+	case operationModeRead:
+		return h.executeRead(ctx, op)
+	case operationModeWrite:
+		return h.executeWrite(ctx, op)
+	default:
+		return fmt.Errorf("invalid operation mode: %d", op.mode)
+	}
 }
 
 func (h *testHandler) executeRead(ctx context.Context, op operation) error {
@@ -81,15 +176,21 @@ func (h *testHandler) executeWrite(ctx context.Context, op operation) error {
 	return nil
 }
 
-// Get a bitset of the offsets of the operations for the given mode.
 func getOperationsOffsets(ops []operation, m operationMode) []uint {
-	b := bitset.New(0)
+	b := roaring.New()
 
 	for _, operation := range ops {
 		if operation.mode&m != 0 {
-			b.Set(uint(operation.offset))
+			b.Add(uint32(operation.offset))
 		}
 	}
 
-	return slices.Collect(b.EachSet())
+	result := make([]uint, 0, b.GetCardinality())
+	b.Iterate(func(x uint32) bool {
+		result = append(result, uint(x))
+
+		return true
+	})
+
+	return result
 }

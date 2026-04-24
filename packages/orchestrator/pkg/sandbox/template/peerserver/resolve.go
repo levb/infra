@@ -2,6 +2,7 @@ package peerserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/block"
@@ -10,14 +11,14 @@ import (
 )
 
 // ErrUnknownFile is returned when the requested file name is not recognised.
-var ErrUnknownFile = fmt.Errorf("unknown file")
+var ErrUnknownFile = errors.New("unknown file")
 
 // ResolveSeekable maps (buildID, fileName) to a SeekableSource.
 // Supported file names: memfile, rootfs.ext4.
 // Returns ErrNotAvailable when the build is not in the local cache.
 // Returns ErrUnknownFile for unrecognised file names.
 func ResolveSeekable(cache Cache, buildID, fileName string) (SeekableSource, error) {
-	switch fileName {
+	switch storage.StripCompression(fileName) {
 	case storage.MemfileName, storage.RootfsName:
 		diff, ok := cache.LookupDiff(buildID, build.DiffType(fileName))
 		if !ok {

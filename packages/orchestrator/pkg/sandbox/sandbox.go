@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -77,6 +76,8 @@ type Config struct {
 	FirecrackerConfig fc.Config
 
 	VolumeMounts []VolumeMountConfig
+
+	MaxSandboxLengthHours int64
 
 	// mu protects mutable sub-fields of Network (Egress, Ingress).
 	// The Network pointer itself is set once at construction and never replaced.
@@ -229,11 +230,11 @@ type Sandbox struct {
 	// It was used to store the config to allow API restarts
 	APIStoredConfig *orchestrator.SandboxConfig
 
+	CABundle string
+
 	exit *utils.ErrorOnce
 
 	stop utils.Lazy[error]
-
-	status atomic.Int32
 }
 
 func (s *Sandbox) LoggerMetadata() sbxlogger.SandboxMetadata {
@@ -242,11 +243,6 @@ func (s *Sandbox) LoggerMetadata() sbxlogger.SandboxMetadata {
 		TemplateID: s.Runtime.TemplateID,
 		TeamID:     s.Runtime.TeamID,
 	}
-}
-
-// IsRunning returns whether the sandbox has finished starting and is running.
-func (s *Sandbox) IsRunning() bool {
-	return SandboxStatus(s.status.Load()) == StatusRunning
 }
 
 // GetStartedAt returns the sandbox start time in a thread-safe manner.
@@ -273,6 +269,7 @@ type Factory struct {
 	featureFlags      *featureflags.Client
 	hostStatsDelivery hoststats.Delivery
 	cgroupManager     cgroup.Manager
+	egressProxy       network.EgressProxy
 }
 
 func NewFactory(
@@ -282,6 +279,7 @@ func NewFactory(
 	featureFlags *featureflags.Client,
 	hostStatsDelivery hoststats.Delivery,
 	cgroupManager cgroup.Manager,
+	egressProxy network.EgressProxy,
 	sandboxes *Map,
 ) *Factory {
 	return &Factory{
@@ -292,6 +290,7 @@ func NewFactory(
 		featureFlags:      featureFlags,
 		hostStatsDelivery: hostStatsDelivery,
 		cgroupManager:     cgroupManager,
+		egressProxy:       egressProxy,
 	}
 }
 
@@ -333,14 +332,8 @@ func (f *Factory) CreateSandbox(
 	}()
 
 	lifecycleID := uuid.NewString()
-	// We want to remove from the map as late as possible
-	cleanup.Add(ctx, func(ctx context.Context) error {
-		f.Sandboxes.Remove(ctx, runtime.SandboxID, lifecycleID)
 
-		return nil
-	})
-
-	ipsPromise := getNetworkSlot(ctx, f.networkPool, cleanup, config.Network)
+	ipsPromise := getNetworkSlot(ctx, f.networkPool, cleanup, config.Network, f.Sandboxes.NetworkReleased)
 
 	sandboxFiles := template.Files().NewSandboxFiles(runtime.SandboxID)
 	cleanup.Add(ctx, cleanupFiles(f.config, sandboxFiles))
@@ -430,6 +423,7 @@ func (f *Factory) CreateSandbox(
 	}
 
 	throttleConfig := featureflags.GetTCPFirewallEgressThrottleConfig(ctx, f.featureFlags)
+	driveThrottleConfig := featureflags.GetBlockDriveThrottleConfig(ctx, f.featureFlags)
 
 	telemetry.ReportEvent(ctx, "created fc client")
 
@@ -467,10 +461,12 @@ func (f *Factory) CreateSandbox(
 
 		APIStoredConfig: apiConfigToStore,
 
+		CABundle: f.egressProxy.CABundle(),
+
 		exit: exit,
 	}
 
-	f.Sandboxes.Insert(ctx, sbx)
+	f.Sandboxes.AssignNetwork(ctx, sbx)
 	cleanup.Add(ctx, func(ctx context.Context) error {
 		f.Sandboxes.MarkStopping(ctx, runtime.SandboxID, sbx.LifecycleID)
 
@@ -500,9 +496,13 @@ func (f *Factory) CreateSandbox(
 		config.RamMB,
 		config.HugePages,
 		processOptions,
-		fc.TxRateLimiterConfig{
+		fc.RateLimiterConfig{
 			Ops:       fc.TokenBucketConfig(throttleConfig.Ops),
 			Bandwidth: fc.TokenBucketConfig(throttleConfig.Bandwidth),
+		},
+		fc.RateLimiterConfig{
+			Ops:       fc.TokenBucketConfig(driveThrottleConfig.Ops),
+			Bandwidth: fc.TokenBucketConfig(driveThrottleConfig.Bandwidth),
 		},
 		cgroupFD,
 	)
@@ -574,12 +574,6 @@ func (f *Factory) ResumeSandbox(
 	}()
 
 	lifecycleID := uuid.NewString()
-	// We want to remove from the map as late as possible
-	cleanup.Add(ctx, func(ctx context.Context) error {
-		f.Sandboxes.Remove(ctx, runtime.SandboxID, lifecycleID)
-
-		return nil
-	})
 
 	sandboxFiles := t.Files().NewSandboxFiles(runtime.SandboxID)
 	cleanup.Add(ctx, cleanupFiles(f.config, sandboxFiles))
@@ -641,7 +635,7 @@ func (f *Factory) ResumeSandbox(
 	}()
 
 	// Slot initialization
-	ipsPromise := getNetworkSlot(ctx, f.networkPool, cleanup, config.Network)
+	ipsPromise := getNetworkSlot(ctx, f.networkPool, cleanup, config.Network, f.Sandboxes.NetworkReleased)
 
 	// Rootfs initialization
 	overlayPromise := utils.NewPromise(func() (rootfs.Provider, error) {
@@ -756,6 +750,7 @@ func (f *Factory) ResumeSandbox(
 	}
 
 	resumeThrottleConfig := featureflags.GetTCPFirewallEgressThrottleConfig(ctx, f.featureFlags)
+	resumeDriveThrottleConfig := featureflags.GetBlockDriveThrottleConfig(ctx, f.featureFlags)
 
 	telemetry.ReportEvent(ctx, "created FC process")
 
@@ -805,6 +800,7 @@ func (f *Factory) ResumeSandbox(
 		cleanup: cleanup,
 
 		APIStoredConfig: apiConfigToStore,
+		CABundle:        f.egressProxy.CABundle(),
 
 		exit: exit,
 	}
@@ -820,10 +816,10 @@ func (f *Factory) ResumeSandbox(
 		return sbx.Stop(ctx)
 	})
 
-	// Insert the sandbox into the map before Resume so it is findable by source address
+	// Register the sandbox IP before Resume so it is findable by source address
 	// during the resume (e.g. for TCP firewall lookups). On failure the deferred cleanup
 	// will remove it.
-	f.Sandboxes.Insert(ctx, sbx)
+	f.Sandboxes.AssignNetwork(ctx, sbx)
 	cleanup.Add(ctx, func(ctx context.Context) error {
 		f.Sandboxes.MarkStopping(ctx, runtime.SandboxID, sbx.LifecycleID)
 
@@ -843,7 +839,7 @@ func (f *Factory) ResumeSandbox(
 	})
 
 	uffdStartCtx, cancelUffdStartCtx := context.WithCancelCause(ctx)
-	defer cancelUffdStartCtx(fmt.Errorf("uffd finished starting"))
+	defer cancelUffdStartCtx(errors.New("uffd finished starting"))
 	go func() {
 		uffdWaitErr := fcUffd.Exit().Wait()
 
@@ -861,9 +857,13 @@ func (f *Factory) ResumeSandbox(
 		fcUffd.Ready(),
 		config.Envd.AccessToken,
 		cgroupFD,
-		fc.TxRateLimiterConfig{
+		fc.RateLimiterConfig{
 			Ops:       fc.TokenBucketConfig(resumeThrottleConfig.Ops),
 			Bandwidth: fc.TokenBucketConfig(resumeThrottleConfig.Bandwidth),
+		},
+		fc.RateLimiterConfig{
+			Ops:       fc.TokenBucketConfig(resumeDriveThrottleConfig.Ops),
+			Bandwidth: fc.TokenBucketConfig(resumeDriveThrottleConfig.Bandwidth),
 		},
 	)
 
@@ -984,16 +984,16 @@ func (s *Sandbox) Shutdown(ctx context.Context) error {
 	}
 
 	// This is required because the FC API doesn't support passing /dev/null
-	tf, err := storage.TemplateFiles{
+	cachePaths, err := storage.Paths{
 		BuildID: uuid.New().String(),
-	}.CacheFiles(s.config.StorageConfig)
+	}.Cache(s.config.StorageConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create template files: %w", err)
+		return fmt.Errorf("failed to create cache paths: %w", err)
 	}
-	defer tf.Close()
+	defer cachePaths.Close()
 
 	// The snapfile is required only because the FC API doesn't support passing /dev/null
-	snapfile := template.NewLocalFileLink(tf.CacheSnapfilePath())
+	snapfile := template.NewLocalFileLink(cachePaths.CacheSnapfile())
 	defer snapfile.Close()
 
 	err = s.process.CreateSnapshot(ctx, snapfile.Path())
@@ -1037,13 +1037,13 @@ func (s *Sandbox) Pause(
 		}
 	}()
 
-	snapshotTemplateFiles, err := storage.TemplateFiles{BuildID: m.Template.BuildID}.CacheFiles(s.config.StorageConfig)
+	cachePaths, err := storage.Paths{BuildID: m.Template.BuildID}.Cache(s.config.StorageConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get template files: %w", err)
+		return nil, fmt.Errorf("failed to create cache paths: %w", err)
 	}
-	cleanup.AddNoContext(ctx, snapshotTemplateFiles.Close)
+	cleanup.AddNoContext(ctx, cachePaths.Close)
 
-	buildID, err := uuid.Parse(snapshotTemplateFiles.BuildID)
+	buildID, err := uuid.Parse(cachePaths.BuildID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse build id: %w", err)
 	}
@@ -1056,7 +1056,7 @@ func (s *Sandbox) Pause(
 	}
 
 	// Snapfile is not closed as it's returned and cached for later use (like resume)
-	snapfile := template.NewLocalFileLink(snapshotTemplateFiles.CacheSnapfilePath())
+	snapfile := template.NewLocalFileLink(cachePaths.CacheSnapfile())
 	cleanup.AddNoContext(ctx, snapfile.Close)
 
 	err = s.process.CreateSnapshot(ctx, snapfile.Path())
@@ -1109,7 +1109,7 @@ func (s *Sandbox) Pause(
 	}
 	cleanup.AddNoContext(ctx, rootfsDiff.Close)
 
-	metadataFileLink := template.NewLocalFileLink(snapshotTemplateFiles.CacheMetadataPath())
+	metadataFileLink := template.NewLocalFileLink(cachePaths.CacheMetadata())
 	cleanup.AddNoContext(ctx, metadataFileLink.Close)
 
 	err = m.ToFile(metadataFileLink.Path())
@@ -1194,7 +1194,7 @@ func pauseProcessRootfs(
 		return nil, nil, fmt.Errorf("failed to create rootfs diff: %w", err)
 	}
 
-	rootfsDiffMetadata, err := diffCreator.process(ctx, rootfsDiffFile)
+	rootfsDiffMetadata, err := diffCreator.process(ctx, rootfsDiffFile.File)
 	if err != nil {
 		err = errors.Join(err, rootfsDiffFile.Close())
 
@@ -1248,6 +1248,7 @@ func getNetworkSlot(
 	networkPool *network.Pool,
 	cleanup *Cleanup,
 	networkConfig *orchestrator.SandboxNetworkConfig,
+	networkReleased func(ctx context.Context, ip string),
 ) *utils.Promise[*network.Slot] {
 	return utils.NewPromise(func() (*network.Slot, error) {
 		ctx, span := tracer.Start(ctx, "get network-slot")
@@ -1264,6 +1265,8 @@ func getNetworkSlot(
 
 			// We can run this cleanup asynchronously, as it is not important for the sandbox lifecycle
 			go func(ctx context.Context) {
+				networkReleased(ctx, slot.HostIPString())
+
 				returnErr := networkPool.Return(ctx, slot)
 				if returnErr != nil {
 					logger.L().Error(ctx, "failed to return network slot", zap.Error(returnErr))
@@ -1316,7 +1319,7 @@ func (s *Sandbox) WaitForExit(ctx context.Context) error {
 
 	select {
 	case <-time.After(timeout):
-		return fmt.Errorf("waiting for exit took too long")
+		return errors.New("waiting for exit took too long")
 	case <-ctx.Done():
 		return nil
 	case <-s.exit.Done():
@@ -1356,7 +1359,7 @@ func (s *Sandbox) WaitForEnvd(
 		select {
 		// Ensure the syncing takes at most timeout seconds.
 		case <-time.After(timeout):
-			cancel(fmt.Errorf("syncing took too long"))
+			cancel(errors.New("syncing took too long"))
 		case <-ctx.Done():
 			return
 		case <-s.process.Exit.Done():
