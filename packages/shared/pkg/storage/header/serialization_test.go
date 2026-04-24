@@ -39,7 +39,7 @@ func TestSerializeDeserialize_V3_RoundTrip(t *testing.T) {
 		},
 	}
 
-	data, err := serializeV3(metadata, mappings)
+	data, err := (&Header{Metadata: metadata, Mapping: mappings}).SerializeV3()
 	require.NoError(t, err)
 
 	got, err := DeserializeBytes(data)
@@ -58,7 +58,7 @@ func TestSerializeDeserialize_V3_RoundTrip(t *testing.T) {
 	require.Equal(t, uint64(123), got.Mapping[1].BuildStorageOffset)
 
 	// V3 headers have no Builds
-	require.Nil(t, got.Builds)
+	require.Empty(t, got.builds)
 }
 
 func TestDeserialize_TruncatedMetadata(t *testing.T) {
@@ -81,7 +81,7 @@ func TestSerializeDeserialize_EmptyMappings_Defaults(t *testing.T) {
 		BaseBuildId: uuid.New(),
 	}
 
-	data, err := serializeV3(metadata, nil)
+	data, err := (&Header{Metadata: metadata}).SerializeV3()
 	require.NoError(t, err)
 
 	got, err := DeserializeBytes(data)
@@ -106,7 +106,7 @@ func TestDeserialize_BlockSizeZero(t *testing.T) {
 		BaseBuildId: uuid.New(),
 	}
 
-	data, err := serializeV3(metadata, nil)
+	data, err := (&Header{Metadata: metadata}).SerializeV3()
 	require.NoError(t, err)
 
 	_, err = DeserializeBytes(data)
@@ -145,20 +145,19 @@ func TestSerializeDeserialize_V4_WithFrameTable(t *testing.T) {
 
 	checksum := sha256.Sum256([]byte("test-data"))
 
-	h, err := NewHeader(metadata, mappings)
-	require.NoError(t, err)
-	h.Builds = map[uuid.UUID]BuildData{
+	h, err := NewHeaderWithResolvedDependencies(metadata, mappings, map[uuid.UUID]Dependency{
 		buildID: {
 			Size: 12345, Checksum: checksum,
-			FrameData: storage.NewFrameTable(storage.CompressionLZ4, []storage.FrameSize{
+			FrameTable: storage.NewFrameTable(storage.CompressionLZ4, []storage.FrameSize{
 				{U: 2048, C: 1024},
 				{U: 2048, C: 900},
 			}),
 		},
 		baseID: {Size: 67890},
-	}
+	})
+	require.NoError(t, err)
 
-	data, err := SerializeHeader(h)
+	data, err := h.SerializeV4()
 	require.NoError(t, err)
 
 	got, err := DeserializeBytes(data)
@@ -170,13 +169,13 @@ func TestSerializeDeserialize_V4_WithFrameTable(t *testing.T) {
 	require.Equal(t, baseID, got.Mapping[1].BuildId)
 
 	// Builds round-trip
-	require.Len(t, got.Builds, 2)
-	require.Equal(t, int64(12345), got.Builds[buildID].Size)
-	require.Equal(t, checksum, got.Builds[buildID].Checksum)
-	require.Equal(t, int64(67890), got.Builds[baseID].Size)
+	require.Len(t, got.builds, 2)
+	require.Equal(t, int64(12345), got.builds[buildID].Dep.Size)
+	require.Equal(t, checksum, got.builds[buildID].Dep.Checksum)
+	require.Equal(t, int64(67890), got.builds[baseID].Dep.Size)
 
 	// Frame data round-trip
-	fd := got.Builds[buildID].FrameData
+	fd := got.builds[buildID].Dep.FrameTable
 	require.NotNil(t, fd)
 	require.Equal(t, storage.CompressionLZ4, fd.CompressionType())
 	require.Equal(t, 2, fd.NumFrames())
@@ -192,7 +191,7 @@ func TestSerializeDeserialize_V4_WithFrameTable(t *testing.T) {
 	require.Equal(t, 900, r.Length)
 
 	// baseID has no frames
-	require.Nil(t, got.Builds[baseID].FrameData)
+	require.Nil(t, got.builds[baseID].Dep.FrameTable)
 }
 
 func TestSerializeDeserialize_V4_Zstd(t *testing.T) {
@@ -217,20 +216,19 @@ func TestSerializeDeserialize_V4_Zstd(t *testing.T) {
 		},
 	}
 
-	h, err := NewHeader(metadata, mappings)
-	require.NoError(t, err)
 	// 3 frames; only the third [8192, 12288) overlaps the mapping.
-	h.Builds = map[uuid.UUID]BuildData{
+	h, err := NewHeaderWithResolvedDependencies(metadata, mappings, map[uuid.UUID]Dependency{
 		buildID: {
-			FrameData: storage.NewFrameTable(storage.CompressionZstd, []storage.FrameSize{
+			FrameTable: storage.NewFrameTable(storage.CompressionZstd, []storage.FrameSize{
 				{U: 4096, C: 2000},
 				{U: 4096, C: 3000},
 				{U: 4096, C: 3500},
 			}),
 		},
-	}
+	})
+	require.NoError(t, err)
 
-	data, err := SerializeHeader(h)
+	data, err := h.SerializeV4()
 	require.NoError(t, err)
 
 	got, err := DeserializeBytes(data)
@@ -239,8 +237,8 @@ func TestSerializeDeserialize_V4_Zstd(t *testing.T) {
 	require.Len(t, got.Mapping, 1)
 	require.Equal(t, uint64(8192), got.Mapping[0].BuildStorageOffset)
 
-	require.Len(t, got.Builds, 1)
-	fd := got.Builds[buildID].FrameData
+	require.Len(t, got.builds, 1)
+	fd := got.builds[buildID].Dep.FrameTable
 	require.NotNil(t, fd)
 	require.Equal(t, storage.CompressionZstd, fd.CompressionType())
 	require.Equal(t, 1, fd.NumFrames())
@@ -283,14 +281,14 @@ func TestSerializeDeserialize_V4_NoFrames(t *testing.T) {
 	h, err := NewHeader(metadata, mappings)
 	require.NoError(t, err)
 
-	data, err := SerializeHeader(h)
+	data, err := h.SerializeV4()
 	require.NoError(t, err)
 
 	got, err := DeserializeBytes(data)
 	require.NoError(t, err)
 
 	require.Len(t, got.Mapping, 2)
-	require.Nil(t, got.Builds)
+	require.Empty(t, got.builds)
 }
 
 func TestSerializeDeserialize_V4_ManyFrames(t *testing.T) {
@@ -321,21 +319,20 @@ func TestSerializeDeserialize_V4_ManyFrames(t *testing.T) {
 		},
 	}
 
-	h, err := NewHeader(metadata, mappings)
+	h, err := NewHeaderWithResolvedDependencies(metadata, mappings, map[uuid.UUID]Dependency{
+		buildID: {FrameTable: storage.NewFrameTable(storage.CompressionLZ4, frames)},
+	})
 	require.NoError(t, err)
-	h.Builds = map[uuid.UUID]BuildData{
-		buildID: {FrameData: storage.NewFrameTable(storage.CompressionLZ4, frames)},
-	}
 
-	data, err := SerializeHeader(h)
+	data, err := h.SerializeV4()
 	require.NoError(t, err)
 
 	got, err := DeserializeBytes(data)
 	require.NoError(t, err)
 
 	require.Len(t, got.Mapping, 1)
-	require.NotNil(t, got.Builds)
-	fd := got.Builds[buildID].FrameData
+	require.NotEmpty(t, got.builds)
+	fd := got.builds[buildID].Dep.FrameTable
 	require.NotNil(t, fd)
 	require.Equal(t, numFrames, fd.NumFrames())
 
@@ -374,14 +371,14 @@ func TestSerializeDeserialize_V4_NoBuilds(t *testing.T) {
 	require.NoError(t, err)
 	// No Builds set (nil map)
 
-	data, err := SerializeHeader(h)
+	data, err := h.SerializeV4()
 	require.NoError(t, err)
 
 	got, err := DeserializeBytes(data)
 	require.NoError(t, err)
 
 	require.Len(t, got.Mapping, 1)
-	require.Nil(t, got.Builds)
+	require.Empty(t, got.builds)
 }
 
 func TestSerializeDeserialize_V4_MultiBuild_LocateCompressed(t *testing.T) {
@@ -430,14 +427,13 @@ func TestSerializeDeserialize_V4_MultiBuild_LocateCompressed(t *testing.T) {
 	checksumA := sha256.Sum256([]byte("build-a"))
 	checksumB := sha256.Sum256([]byte("build-b"))
 
-	h, err := NewHeader(metadata, mappings)
+	h, err := NewHeaderWithResolvedDependencies(metadata, mappings, map[uuid.UUID]Dependency{
+		buildA: {Size: 12288, Checksum: checksumA, FrameTable: ftA},
+		buildB: {Size: 8192, Checksum: checksumB, FrameTable: ftB},
+	})
 	require.NoError(t, err)
-	h.Builds = map[uuid.UUID]BuildData{
-		buildA: {Size: 12288, Checksum: checksumA, FrameData: ftA},
-		buildB: {Size: 8192, Checksum: checksumB, FrameData: ftB},
-	}
 
-	data, err := SerializeHeader(h)
+	data, err := h.SerializeV4()
 	require.NoError(t, err)
 
 	got, err := DeserializeBytes(data)
@@ -445,14 +441,15 @@ func TestSerializeDeserialize_V4_MultiBuild_LocateCompressed(t *testing.T) {
 
 	require.Equal(t, uint64(4), got.Metadata.Version)
 	require.Len(t, got.Mapping, 3)
-	require.Len(t, got.Builds, 2)
+	require.Len(t, got.builds, 2)
 
 	// Verify checksums round-trip.
-	require.Equal(t, checksumA, got.Builds[buildA].Checksum)
-	require.Equal(t, checksumB, got.Builds[buildB].Checksum)
+	require.Equal(t, checksumA, got.builds[buildA].Dep.Checksum)
+	require.Equal(t, checksumB, got.builds[buildB].Dep.Checksum)
 
-	// --- Build A frame lookups via GetBuildFrameData ---
-	fdA := got.GetBuildFrameData(buildA)
+	// --- Build A frame lookups via Dependency ---
+	depA := got.LookupDependency(buildA)
+	fdA := depA.FrameTable
 	require.NotNil(t, fdA)
 	require.Equal(t, storage.CompressionZstd, fdA.CompressionType())
 	// All 3 frames should survive trimming: frame 0 referenced by mapping 0,
@@ -477,8 +474,9 @@ func TestSerializeDeserialize_V4_MultiBuild_LocateCompressed(t *testing.T) {
 	require.Equal(t, int64(2800), r.Offset)
 	require.Equal(t, 2300, r.Length)
 
-	// --- Build B frame lookups via GetBuildFrameData ---
-	fdB := got.GetBuildFrameData(buildB)
+	// --- Build B frame lookups via Dependency ---
+	depB := got.LookupDependency(buildB)
+	fdB := depB.FrameTable
 	require.NotNil(t, fdB)
 	require.Equal(t, storage.CompressionLZ4, fdB.CompressionType())
 	require.Equal(t, 2, fdB.NumFrames())
@@ -533,19 +531,18 @@ func TestSerializeDeserialize_V4_TrimmedOffsets_Error(t *testing.T) {
 		},
 	}
 
-	h, err := NewHeader(metadata, mappings)
+	h, err := NewHeaderWithResolvedDependencies(metadata, mappings, map[uuid.UUID]Dependency{
+		buildID: {FrameTable: ft},
+	})
 	require.NoError(t, err)
-	h.Builds = map[uuid.UUID]BuildData{
-		buildID: {FrameData: ft},
-	}
 
-	data, err := SerializeHeader(h)
+	data, err := h.SerializeV4()
 	require.NoError(t, err)
 
 	got, err := DeserializeBytes(data)
 	require.NoError(t, err)
 
-	fd := got.Builds[buildID].FrameData
+	fd := got.builds[buildID].Dep.FrameTable
 	require.NotNil(t, fd)
 	require.Equal(t, 1, fd.NumFrames(), "only frame 2 should survive trimming")
 
@@ -661,20 +658,19 @@ func TestSerializeDeserialize_V4_SparseTrimming(t *testing.T) {
 		{Offset: 12288, Length: 4096, BuildId: buildID, BuildStorageOffset: 12288},
 	}
 
-	h, err := NewHeader(metadata, mappings)
-	require.NoError(t, err)
-	h.Builds = map[uuid.UUID]BuildData{
-		buildID: {FrameData: ft, Size: 16384},
+	h, err := NewHeaderWithResolvedDependencies(metadata, mappings, map[uuid.UUID]Dependency{
+		buildID: {FrameTable: ft, Size: 16384},
 		otherID: {Size: 8192},
-	}
+	})
+	require.NoError(t, err)
 
-	data, err := SerializeHeader(h)
+	data, err := h.SerializeV4()
 	require.NoError(t, err)
 
 	got, err := DeserializeBytes(data)
 	require.NoError(t, err)
 
-	gotFT := got.Builds[buildID].FrameData
+	gotFT := got.builds[buildID].Dep.FrameTable
 	require.NotNil(t, gotFT)
 	require.Equal(t, 2, gotFT.NumFrames())
 

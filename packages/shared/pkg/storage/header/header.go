@@ -8,64 +8,45 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
+	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
-
-// BuildData holds per-build metadata stored in V4 headers.
-// Each layer's header carries a Builds map; child headers inherit parent
-// entries for still-referenced build IDs via NewHeaderWithBuilds.
-type BuildData struct {
-	Size      int64               // uncompressed file size
-	Checksum  [32]byte            // SHA-256 of uncompressed data; zero value means unknown
-	FrameData *storage.FrameTable // nil for uncompressed builds
-}
 
 const NormalizeFixVersion = 3
 
+// Dependency is the per-build metadata stored in V4 headers: size, checksum,
+// and optional FrameTable for compressed reads.
+type Dependency struct {
+	Size       int64
+	Checksum   [32]byte
+	FrameTable *storage.FrameTable
+}
+
+type build struct {
+	Dep     Dependency
+	Pending *utils.SetOnce[Dependency]
+}
+
 type Header struct {
 	Metadata *Metadata
-	// Builds maps build IDs to per-build metadata (size, checksum, FrameTable).
-	// nil for V3 (uncompressed) headers; the read path falls back to a Size()
-	// RPC and reads uncompressed data when nil.
-	Builds map[uuid.UUID]BuildData
+	Mapping  []BuildMap
 
-	Mapping []BuildMap
+	builds map[uuid.UUID]build
+
+	// DataAvailable signals that the header's data is fully available in the
+	// template cache, and can be accessed locally without the need to finalize
+	// the header.
+	DataAvailable atomic.Bool
 }
 
-// CloneForUpload returns a clone with copied Mapping and Builds, safe to
-// mutate for serialization without racing with concurrent readers of the
-// original. The version is set on the clone.
-func (t *Header) CloneForUpload(version uint64) *Header {
-	metaCopy := *t.Metadata
-	metaCopy.Version = version
-
-	clone := &Header{
-		Metadata: &metaCopy,
-		Mapping:  slices.Clone(t.Mapping),
-	}
-
-	if t.Builds != nil {
-		clone.Builds = make(map[uuid.UUID]BuildData, len(t.Builds))
-		maps.Copy(clone.Builds, t.Builds)
-	}
-
-	return clone
-}
-
-// SetBuild adds or replaces build metadata for the given build ID.
-func (t *Header) SetBuild(buildID uuid.UUID, bd BuildData) {
-	if t.Builds == nil {
-		t.Builds = make(map[uuid.UUID]BuildData)
-	}
-
-	t.Builds[buildID] = bd
-}
-
+// NewHeader creates a minimal header with no dependencies, born final.
+// Use for V3 (uncompressed) paths, skeleton devices, and tests.
 func NewHeader(metadata *Metadata, mapping []BuildMap) (*Header, error) {
 	if metadata.BlockSize == 0 {
 		return nil, errors.New("block size cannot be zero")
@@ -83,34 +64,83 @@ func NewHeader(metadata *Metadata, mapping []BuildMap) (*Header, error) {
 	return &Header{
 		Metadata: metadata,
 		Mapping:  mapping,
+		builds:   map[uuid.UUID]build{},
 	}, nil
 }
 
-// NewHeaderWithBuilds creates a header and copies the subset of sourceBuilds
-// referenced by the mappings. This propagates ancestor build metadata through
-// the template chain (parent → child → grandchild).
-// Returns nil Builds when sourceBuilds is nil (V3 / uncompressed).
-func NewHeaderWithBuilds(metadata *Metadata, mapping []BuildMap, sourceBuilds map[uuid.UUID]BuildData) (*Header, error) {
+func NewHeaderWithResolvedDependencies(metadata *Metadata, mapping []BuildMap, resolvedDependencies map[uuid.UUID]Dependency) (*Header, error) {
 	h, err := NewHeader(metadata, mapping)
 	if err != nil {
 		return nil, err
 	}
 
-	if sourceBuilds != nil {
-		referenced := make(map[uuid.UUID]struct{}, len(h.Mapping))
-		for _, m := range h.Mapping {
-			referenced[m.BuildId] = struct{}{}
-		}
-
-		h.Builds = make(map[uuid.UUID]BuildData, len(referenced))
-		for id := range referenced {
-			if bd, ok := sourceBuilds[id]; ok {
-				h.Builds[id] = bd
-			}
-		}
+	for id, d := range resolvedDependencies {
+		h.builds[id] = build{Dep: d}
 	}
 
 	return h, nil
+}
+
+func newHeaderWithPendingDependencies(metadata *Metadata, mapping []BuildMap, parent *Header) (*Header, error) {
+	h, err := NewHeader(metadata, mapping)
+	if err != nil {
+		return nil, err
+	}
+
+	if parent != nil && len(parent.builds) > 0 {
+		h.builds = maps.Clone(parent.builds)
+	}
+	h.builds[metadata.BuildId] = build{Pending: utils.NewSetOnce[Dependency]()}
+
+	return h, nil
+}
+
+// LookupDependency is non-blocking. Pending entries return zero; the
+// read path falls through to local cache / P2P / obj.Size. Upload
+// errors surface via WaitForDependencies, not here.
+func (t *Header) LookupDependency(buildID uuid.UUID) Dependency {
+	if t.DataAvailable.Load() && buildID == t.Metadata.BuildId {
+		return Dependency{}
+	}
+
+	return t.builds[buildID].Dep
+}
+
+func (t *Header) WaitForDependencies(ctx context.Context) error {
+	for id, entry := range t.builds {
+		if entry.Pending == nil {
+			continue
+		}
+		if _, err := entry.Pending.WaitWithContext(ctx); err != nil {
+			return fmt.Errorf("wait dep %s: %w", id, err)
+		}
+	}
+
+	return nil
+}
+
+func (t *Header) Finalize(dep Dependency) {
+	if t == nil {
+		return
+	}
+	entry, ok := t.builds[t.Metadata.BuildId]
+	if !ok || entry.Pending == nil {
+		return
+	}
+	_ = entry.Pending.SetValue(dep)
+}
+
+// Cancel is first-wins: any subsequent Cancel or Finalize call on the
+// same self-entry silently no-ops. Nil-safe; no-op if err is nil.
+func (t *Header) Cancel(err error) {
+	if t == nil || err == nil {
+		return
+	}
+	entry, ok := t.builds[t.Metadata.BuildId]
+	if !ok || entry.Pending == nil {
+		return
+	}
+	_ = entry.Pending.SetError(err)
 }
 
 func (t *Header) String() string {
@@ -135,8 +165,6 @@ func (t *Header) IsNormalizeFixApplied() bool {
 }
 
 // GetShiftedMapping resolves a virtual offset to a build-local range.
-// The read path uses this to find which build owns the data, then calls
-// GetBuildFrameData to get the FrameTable for C-space lookup.
 func (t *Header) GetShiftedMapping(ctx context.Context, offset int64) (BuildMap, error) {
 	mapping, shift, err := t.getMapping(ctx, offset)
 	if err != nil {
@@ -164,16 +192,6 @@ func (t *Header) GetShiftedMapping(ctx context.Context, offset int64) (BuildMap,
 	}
 
 	return b, nil
-}
-
-// GetBuildFrameData returns the FrameTable for a build, or nil.
-// nil means the build is uncompressed — the caller reads raw bytes instead.
-func (t *Header) GetBuildFrameData(buildID uuid.UUID) *storage.FrameTable {
-	if t.Builds == nil {
-		return nil
-	}
-
-	return t.Builds[buildID].FrameData
 }
 
 func (t *Header) getMapping(ctx context.Context, offset int64) (*BuildMap, int64, error) {

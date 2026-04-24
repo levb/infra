@@ -112,6 +112,7 @@ func (d *DiffMetadata) toDiffMapping(
 	return mappings
 }
 
+// ToDiffHeader returns the header for the paused snapshot's diff file.
 func (d *DiffMetadata) ToDiffHeader(
 	ctx context.Context,
 	originalHeader *Header,
@@ -151,7 +152,7 @@ func (d *DiffMetadata) ToDiffHeader(
 		attribute.String("snapshot.metadata.base_build_id", metadata.BaseBuildId.String()),
 	)
 
-	header, err := NewHeaderWithBuilds(metadata, m, originalHeader.Builds)
+	header, err := newHeaderWithPendingDependencies(metadata, m, originalHeader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create header: %w", err)
 	}
@@ -159,6 +160,8 @@ func (d *DiffMetadata) ToDiffHeader(
 	err = ValidateMappings(header.Mapping, header.Metadata.Size, header.Metadata.BlockSize)
 	if err != nil {
 		if header.IsNormalizeFixApplied() {
+			header.Cancel(err)
+
 			return nil, fmt.Errorf("invalid header mappings: %w", err)
 		}
 

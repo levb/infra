@@ -1092,6 +1092,7 @@ func (s *Sandbox) Pause(
 	if err != nil {
 		return nil, fmt.Errorf("error while post processing: %w", err)
 	}
+	defer func() { memfileDiffHeader.Cancel(e) }()
 	cleanup.AddNoContext(ctx, memfileDiff.Close)
 
 	rootfsDiff, rootfsDiffHeader, err := pauseProcessRootfs(
@@ -1107,6 +1108,7 @@ func (s *Sandbox) Pause(
 	if err != nil {
 		return nil, fmt.Errorf("error while post processing: %w", err)
 	}
+	defer func() { rootfsDiffHeader.Cancel(e) }()
 	cleanup.AddNoContext(ctx, rootfsDiff.Close)
 
 	metadataFileLink := template.NewLocalFileLink(cachePaths.CacheMetadata())
@@ -1176,6 +1178,9 @@ func pauseProcessMemory(
 		return nil, nil, fmt.Errorf("failed to create local diff from cache: %w", errors.Join(err, cache.Close()))
 	}
 
+	// Diff data is on local disk; readers can resolve self via local fd.
+	header.DataAvailable.Store(true)
+
 	return diff, header, nil
 }
 
@@ -1214,6 +1219,9 @@ func pauseProcessRootfs(
 
 		return nil, nil, fmt.Errorf("failed to create rootfs header: %w", err)
 	}
+
+	// Diff data is on local disk; readers can resolve self via local fd.
+	rootfsHeader.DataAvailable.Store(true)
 
 	return rootfsDiff, rootfsHeader, nil
 }
