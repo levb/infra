@@ -3,17 +3,22 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"unsafe"
+
+	"github.com/google/uuid"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/cmd/internal/cmdutil"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage/header"
@@ -30,6 +35,7 @@ func main() {
 	data := flag.Bool("data", false, "inspect data blocks (default: header only)")
 	start := flag.Int64("start", 0, "start block (only with -data)")
 	end := flag.Int64("end", 0, "end block, 0 = all (only with -data)")
+	human := flag.Bool("human", false, "human-friendly output with redundant sizes and drilldowns")
 
 	flag.Parse()
 
@@ -80,19 +86,31 @@ func main() {
 	}
 
 	// Print header info
-	printHeader(h, headerSource)
+	printHeader(h, headerSource, *human)
+
+	// Print builds info (V4 only)
+	if h.Builds != nil {
+		printBuilds(h, *human)
+	}
+
+	// Validate V4 builds map consistency
+	if h.Builds != nil {
+		validateBuildsMap(h)
+	}
 
 	// If -data flag, also inspect data blocks
 	if *data {
 		dataFile := artifactName
-		inspectData(ctx, *storagePath, *build, dataFile, h, *start, *end)
+		inspectData(ctx, *storagePath, *build, dataFile, h, *start, *end, *human)
 	}
 }
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, "Usage: inspect-build (-build <uuid> | -template <id-or-alias>) [-storage <path>] [-memfile|-rootfs] [-data [-start N] [-end N]]\n\n")
+	fmt.Fprintf(os.Stderr, "Usage: inspect-build (-build <uuid> | -template <id-or-alias>) [-storage <path>] [-memfile|-rootfs] [-data [-start N] [-end N]] [-human]\n\n")
 	fmt.Fprintf(os.Stderr, "The -template flag requires E2B_API_KEY environment variable.\n")
 	fmt.Fprintf(os.Stderr, "Set E2B_DOMAIN for non-production environments.\n\n")
+	fmt.Fprintf(os.Stderr, "Flags:\n")
+	fmt.Fprintf(os.Stderr, "  -human             human-friendly output with redundant sizes and drilldowns\n\n")
 	fmt.Fprintf(os.Stderr, "Examples:\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123                           # inspect memfile header\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -template base -storage gs://bucket     # inspect by template alias\n")
@@ -101,23 +119,36 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -data                     # inspect memfile header + data\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -rootfs -data -end 100    # inspect rootfs header + first 100 blocks\n")
 	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -storage gs://bucket      # inspect from GCS\n")
+	fmt.Fprintf(os.Stderr, "  inspect-build -build abc123 -human                    # human-friendly output\n")
 }
 
-func printHeader(h *header.Header, source string) {
+func printHeader(h *header.Header, source string, human bool) {
 	// Validate mappings
 	err := header.ValidateMappings(h.Mapping, h.Metadata.Size, h.Metadata.BlockSize)
 	if err != nil {
-		fmt.Printf("\n⚠️  WARNING: Mapping validation failed!\n%s\n\n", err)
+		fmt.Printf("\nWARNING: Mapping validation failed!\n%s\n\n", err)
+	}
+
+	var headerFormat string
+	if h.Metadata.Version >= header.MetadataVersionV4 {
+		headerFormat = fmt.Sprintf("V%d (compression-capable)", h.Metadata.Version)
+	} else {
+		headerFormat = fmt.Sprintf("V%d (legacy)", h.Metadata.Version)
 	}
 
 	fmt.Printf("\nMETADATA\n")
 	fmt.Printf("========\n")
 	fmt.Printf("Source             %s\n", source)
+	fmt.Printf("Header format      %s\n", headerFormat)
 	fmt.Printf("Version            %d\n", h.Metadata.Version)
 	fmt.Printf("Generation         %d\n", h.Metadata.Generation)
 	fmt.Printf("Build ID           %s\n", h.Metadata.BuildId)
 	fmt.Printf("Base build ID      %s\n", h.Metadata.BaseBuildId)
-	fmt.Printf("Size               %d B (%d MiB)\n", h.Metadata.Size, h.Metadata.Size/1024/1024)
+	if human {
+		fmt.Printf("Size               %s (%d B)\n", fmtSize(h.Metadata.Size), h.Metadata.Size)
+	} else {
+		fmt.Printf("Size               %d B (%s)\n", h.Metadata.Size, fmtSize(h.Metadata.Size))
+	}
 	fmt.Printf("Block size         %d B\n", h.Metadata.BlockSize)
 	fmt.Printf("Blocks             %d\n", (h.Metadata.Size+h.Metadata.BlockSize-1)/h.Metadata.BlockSize)
 
@@ -154,11 +185,171 @@ func printHeader(h *header.Header, source string) {
 		case nilUUID:
 			additionalInfo = " (sparse)"
 		}
-		fmt.Printf("%s%s: %d blocks, %d MiB (%0.2f%%)\n", buildID, additionalInfo, uint64(size)/h.Metadata.BlockSize, uint64(size)/1024/1024, float64(size)/float64(h.Metadata.Size)*100)
+		if human {
+			fmt.Printf("%s%s: %d blocks, %s (%d B, %0.2f%%)\n", buildID, additionalInfo, uint64(size)/h.Metadata.BlockSize, fmtSize(uint64(size)), size, float64(size)/float64(h.Metadata.Size)*100)
+		} else {
+			fmt.Printf("%s%s: %d blocks, %d MiB (%0.2f%%)\n", buildID, additionalInfo, uint64(size)/h.Metadata.BlockSize, uint64(size)/1024/1024, float64(size)/float64(h.Metadata.Size)*100)
+		}
 	}
 }
 
-func inspectData(ctx context.Context, storagePath, buildID, dataFile string, h *header.Header, start, end int64) {
+func printBuilds(h *header.Header, human bool) {
+	fmt.Printf("\nBUILDS (%d entries)\n", len(h.Builds))
+	fmt.Printf("==================\n")
+
+	// Sort build IDs for deterministic output.
+	buildIDs := make([]uuid.UUID, 0, len(h.Builds))
+	for id := range h.Builds {
+		buildIDs = append(buildIDs, id)
+	}
+	sort.Slice(buildIDs, func(i, j int) bool {
+		return buildIDs[i].String() < buildIDs[j].String()
+	})
+
+	if human {
+		printBuildsHuman(h, buildIDs)
+	} else {
+		printBuildsDefault(h, buildIDs)
+	}
+}
+
+func printBuildsDefault(h *header.Header, buildIDs []uuid.UUID) {
+	for _, id := range buildIDs {
+		bd := h.Builds[id]
+		role := buildRole(id, h.Metadata)
+
+		var parts []string
+		parts = append(parts, id.String())
+		parts = append(parts, role)
+
+		if bd.FrameData.IsCompressed() {
+			ct := bd.FrameData.CompressionType()
+			uSize := bd.FrameData.UncompressedSize()
+			cSize := bd.FrameData.CompressedSize()
+			ratio := float64(uSize) / float64(cSize)
+			nFrames := bd.FrameData.NumFrames()
+
+			var frameSize int64
+			if nFrames > 0 {
+				_, endU, _, _ := bd.FrameData.FrameAt(0)
+				startU := int64(0)
+				frameSize = endU - startU
+			}
+
+			parts = append(parts, ct.String())
+			parts = append(parts, fmt.Sprintf("%s -> %s", fmtSize(uint64(uSize)), fmtSize(uint64(cSize))))
+			parts = append(parts, fmt.Sprintf("%.2fx", ratio))
+			if frameSize > 0 {
+				parts = append(parts, fmt.Sprintf("%d frames x %s", nFrames, fmtSize(uint64(frameSize))))
+			} else {
+				parts = append(parts, fmt.Sprintf("%d frames", nFrames))
+			}
+		} else {
+			parts = append(parts, "none")
+			if bd.Size > 0 {
+				parts = append(parts, fmtSize(uint64(bd.Size)))
+			} else {
+				parts = append(parts, "-")
+			}
+		}
+
+		parts = append(parts, fmtChecksum(bd.Checksum))
+
+		fmt.Printf("  %s\n", strings.Join(parts, "  "))
+	}
+}
+
+func printBuildsHuman(h *header.Header, buildIDs []uuid.UUID) {
+	for _, id := range buildIDs {
+		bd := h.Builds[id]
+		role := buildRole(id, h.Metadata)
+
+		if bd.FrameData.IsCompressed() {
+			ct := bd.FrameData.CompressionType()
+			uSize := bd.FrameData.UncompressedSize()
+			cSize := bd.FrameData.CompressedSize()
+			ratio := float64(uSize) / float64(cSize)
+			saved := (1.0 - float64(cSize)/float64(uSize)) * 100
+			nFrames := bd.FrameData.NumFrames()
+
+			var frameSizeStr string
+			if nFrames > 0 {
+				_, endU, _, _ := bd.FrameData.FrameAt(0)
+				frameSizeStr = fmtSize(uint64(endU))
+			}
+
+			fmt.Printf("\n%s (%s, %s):\n", id, role, ct.String())
+			fmt.Printf("  Uncompressed     %s (%d B)\n", fmtSize(uint64(uSize)), uSize)
+			fmt.Printf("  Compressed       %s (%d B)\n", fmtSize(uint64(cSize)), cSize)
+			fmt.Printf("  Ratio            %.2fx (saved %.1f%%)\n", ratio, saved)
+			if frameSizeStr != "" {
+				fmt.Printf("  Frames           %d x %s\n", nFrames, frameSizeStr)
+			} else {
+				fmt.Printf("  Frames           %d\n", nFrames)
+			}
+			fmt.Printf("  Checksum         %s\n", fmtChecksumLong(bd.Checksum))
+
+			// Compression bar
+			pct := float64(cSize) / float64(uSize) * 100
+			barWidth := 30
+			filled := int(pct / 100 * float64(barWidth))
+			if filled > barWidth {
+				filled = barWidth
+			}
+			bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+			fmt.Printf("  Compression      [%s] %.0f%% of original\n", bar, pct)
+		} else {
+			fmt.Printf("\n%s (%s, uncompressed):\n", id, role)
+			if bd.Size > 0 {
+				fmt.Printf("  Size             %s (%d B)\n", fmtSize(uint64(bd.Size)), bd.Size)
+			}
+			fmt.Printf("  Checksum         %s\n", fmtChecksumLong(bd.Checksum))
+		}
+	}
+}
+
+func validateBuildsMap(h *header.Header) {
+	// Check that every non-nil build ID in mappings has a Builds entry.
+	referenced := make(map[uuid.UUID]struct{})
+	for _, m := range h.Mapping {
+		if m.BuildId != uuid.Nil {
+			referenced[m.BuildId] = struct{}{}
+		}
+	}
+
+	for id := range referenced {
+		if _, ok := h.Builds[id]; !ok {
+			fmt.Printf("\nWARNING: build %s is referenced in mappings but has no entry in Builds map\n", id)
+		}
+	}
+
+	// Check for unreferenced builds.
+	for id := range h.Builds {
+		if _, ok := referenced[id]; !ok {
+			fmt.Printf("\nWARNING: build %s exists in Builds map but is not referenced by any mapping\n", id)
+		}
+	}
+}
+
+func inspectData(ctx context.Context, storagePath, buildID, dataFile string, h *header.Header, start, end int64, human bool) {
+	// Resolve compressed filename if needed.
+	if h.Builds != nil {
+		if bd, ok := h.Builds[h.Metadata.BuildId]; ok && bd.FrameData.IsCompressed() {
+			ct := bd.FrameData.CompressionType()
+			compressedFile := dataFile + ct.Suffix()
+
+			fmt.Printf("\nDATA (compressed: %s)\n", ct.String())
+			fmt.Printf("====\n")
+			fmt.Printf("Data file is compressed (%s); showing frame summary instead of block scan.\n", ct.String())
+			fmt.Printf("Storage file       %s\n", compressedFile)
+
+			inspectFrames(ctx, storagePath, buildID, compressedFile, bd, human)
+
+			return
+		}
+	}
+
+	// Uncompressed path — original logic.
 	blockSize := int64(h.Metadata.BlockSize)
 
 	reader, size, source, err := cmdutil.OpenDataFile(ctx, storagePath, buildID, dataFile)
@@ -187,7 +378,7 @@ func inspectData(ctx context.Context, storagePath, buildID, dataFile string, h *
 	fmt.Printf("\nDATA\n")
 	fmt.Printf("====\n")
 	fmt.Printf("Source             %s\n", source)
-	fmt.Printf("Size               %d B (%d MiB)\n", size, size/1024/1024)
+	fmt.Printf("Size               %d B (%s)\n", size, fmtSize(uint64(size)))
 
 	b := make([]byte, blockSize)
 	emptyCount := 0
@@ -219,10 +410,96 @@ func inspectData(ctx context.Context, storagePath, buildID, dataFile string, h *
 	fmt.Printf("Empty blocks: %d\n", emptyCount)
 	fmt.Printf("Non-empty blocks: %d\n", nonEmptyCount)
 	fmt.Printf("Total blocks inspected: %d\n", emptyCount+nonEmptyCount)
-	fmt.Printf("Total size inspected: %d B (%d MiB)\n", int64(emptyCount+nonEmptyCount)*blockSize, int64(emptyCount+nonEmptyCount)*blockSize/1024/1024)
-	fmt.Printf("Empty size: %d B (%d MiB)\n", int64(emptyCount)*blockSize, int64(emptyCount)*blockSize/1024/1024)
+	if human {
+		fmt.Printf("Total size inspected: %s (%d B)\n", fmtSize(uint64(emptyCount+nonEmptyCount)*uint64(blockSize)), int64(emptyCount+nonEmptyCount)*blockSize)
+		fmt.Printf("Empty size: %s (%d B)\n", fmtSize(uint64(emptyCount)*uint64(blockSize)), int64(emptyCount)*blockSize)
+	} else {
+		fmt.Printf("Total size inspected: %d B (%s)\n", int64(emptyCount+nonEmptyCount)*blockSize, fmtSize(uint64(emptyCount+nonEmptyCount)*uint64(blockSize)))
+		fmt.Printf("Empty size: %d B (%s)\n", int64(emptyCount)*blockSize, fmtSize(uint64(emptyCount)*uint64(blockSize)))
+	}
 
 	reader.Close()
+}
+
+func inspectFrames(_ context.Context, _ string, _ string, _ string, bd header.BuildData, human bool) {
+	ft := bd.FrameData
+	n := ft.NumFrames()
+	uTotal := ft.UncompressedSize()
+	cTotal := ft.CompressedSize()
+	ratio := float64(uTotal) / float64(cTotal)
+
+	var minC, maxC int64
+	minC = math.MaxInt64
+	for i := range n {
+		_, _, startC, endC := ft.FrameAt(i)
+		frameC := endC - startC
+		if frameC < minC {
+			minC = frameC
+		}
+		if frameC > maxC {
+			maxC = frameC
+		}
+	}
+	avgC := cTotal / int64(n)
+
+	fmt.Printf("\nFRAME SUMMARY\n")
+	fmt.Printf("=============\n")
+	fmt.Printf("Frames             %d\n", n)
+	if human {
+		fmt.Printf("Uncompressed       %s (%d B)\n", fmtSize(uint64(uTotal)), uTotal)
+		fmt.Printf("Compressed         %s (%d B)\n", fmtSize(uint64(cTotal)), cTotal)
+		fmt.Printf("Ratio              %.2fx (saved %.1f%%)\n", ratio, (1.0-float64(cTotal)/float64(uTotal))*100)
+		fmt.Printf("Frame compressed   min %s, avg %s, max %s\n", fmtSize(uint64(minC)), fmtSize(uint64(avgC)), fmtSize(uint64(maxC)))
+	} else {
+		fmt.Printf("Uncompressed       %d B (%s)\n", uTotal, fmtSize(uint64(uTotal)))
+		fmt.Printf("Compressed         %d B (%s)\n", cTotal, fmtSize(uint64(cTotal)))
+		fmt.Printf("Ratio              %.2fx\n", ratio)
+		fmt.Printf("Frame compressed   min %d B, avg %d B, max %d B\n", minC, avgC, maxC)
+	}
+}
+
+// --- helpers ---
+
+func fmtSize(b uint64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(b)/float64(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(b)/float64(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(b)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
+}
+
+func fmtChecksum(cs [32]byte) string {
+	if cs == [32]byte{} {
+		return "unknown"
+	}
+
+	return "sha256:" + hex.EncodeToString(cs[:4]) + "..."
+}
+
+func fmtChecksumLong(cs [32]byte) string {
+	if cs == [32]byte{} {
+		return "unknown"
+	}
+
+	return "sha256:" + hex.EncodeToString(cs[:])
+}
+
+func buildRole(id uuid.UUID, meta *header.Metadata) string {
+	switch {
+	case id == uuid.Nil:
+		return "sparse"
+	case id == meta.BuildId:
+		return "current"
+	case id == meta.BaseBuildId:
+		return "parent"
+	default:
+		return "ancestor"
+	}
 }
 
 // templateInfo represents a template from the E2B API.
