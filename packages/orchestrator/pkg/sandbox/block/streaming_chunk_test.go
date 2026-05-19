@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	lz4 "github.com/pierrec/lz4/v4"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/metric/noop"
 	"golang.org/x/sync/errgroup"
@@ -82,7 +83,7 @@ func (s *fakeSeekable) StoreFile(context.Context, string, ...storage.PutOption) 
 	panic("not used")
 }
 
-func (s *fakeSeekable) OpenRangeReader(_ context.Context, offsetU int64, length int64, frameTable *storage.FrameTable) (io.ReadCloser, error) {
+func (s *fakeSeekable) OpenRangeReader(_ context.Context, offsetU int64, length int64, frameTable *storage.FrameTable) (storage.RangeReader, error) {
 	s.fetchCount.Add(1)
 
 	if s.ctrl != nil {
@@ -97,13 +98,13 @@ func (s *fakeSeekable) OpenRangeReader(_ context.Context, offsetU int64, length 
 
 		end := min(offsetU+length, int64(len(s.data)))
 
-		return &controlledReader{
+		return storage.NewRangeReader(&controlledReader{
 			data:     s.data[offsetU:end],
 			step:     max(16*1024, testBlockSize),
 			advance:  s.ctrl.advance,
 			consumed: s.ctrl.consumed,
 			closed:   s.ctrl.closed,
-		}, nil
+		}), nil
 	}
 
 	var fetchOff, fetchLen int64
@@ -127,10 +128,11 @@ func (s *fakeSeekable) OpenRangeReader(_ context.Context, offsetU int64, length 
 
 	r := io.Reader(bytes.NewReader(s.data[fetchOff:end]))
 	if frameTable.IsCompressed() {
-		return storage.NewDecompressingReader(r, frameTable.CompressionType())
+		// makeCompressedTestData only ever produces LZ4 frames.
+		return storage.NewRangeReader(io.NopCloser(lz4.NewReader(r))), nil
 	}
 
-	return io.NopCloser(r), nil
+	return storage.NewRangeReader(io.NopCloser(r)), nil
 }
 
 func makeCompressedTestData(tb testing.TB, data []byte) (*storage.FrameTable, *fakeSeekable) {
@@ -428,13 +430,13 @@ func (s *panicSeekable) StoreFile(context.Context, string, ...storage.PutOption)
 	panic("not used")
 }
 
-func (s *panicSeekable) OpenRangeReader(_ context.Context, off int64, length int64, _ *storage.FrameTable) (io.ReadCloser, error) {
+func (s *panicSeekable) OpenRangeReader(_ context.Context, off int64, length int64, _ *storage.FrameTable) (storage.RangeReader, error) {
 	end := min(off+length, int64(len(s.data)))
 
-	return &panicReader{
+	return storage.NewRangeReader(&panicReader{
 		data:       s.data[off:end],
 		panicAfter: int(s.panicAfter - off),
-	}, nil
+	}), nil
 }
 
 type panicReader struct {

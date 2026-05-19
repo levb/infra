@@ -264,7 +264,12 @@ func (o *gcpObject) Size(ctx context.Context) (int64, error) {
 	return attrs.Size, nil
 }
 
-func (o *gcpObject) openRangeReader(ctx context.Context, off, length int64) (io.ReadCloser, error) {
+// openRangeReader returns a GCS range reader with idle-based timeout behavior
+// (#2803): the timer resets on each successful Read so a slow-but-progressing
+// stream isn't killed, while a stalled stream is. The CancelFunc is returned so
+// the io_wrappers chain can compose it into the final reader's Close path; the
+// idleTimeoutReader also calls it on Close, both paths being idempotent.
+func (o *gcpObject) openRangeReader(ctx context.Context, off, length int64) (io.ReadCloser, context.CancelFunc, error) {
 	readCtx, cancel := context.WithCancel(ctx)
 
 	openTimer := time.AfterFunc(googleReadTimeout, cancel)
@@ -279,17 +284,17 @@ func (o *gcpObject) openRangeReader(ctx context.Context, off, length int64) (io.
 		cancel()
 
 		if errors.Is(err, storage.ErrObjectNotExist) {
-			return nil, fmt.Errorf("failed to create GCS range reader for %q at %d+%d: %w", o.path, off, length, ErrObjectNotExist)
+			return nil, nil, fmt.Errorf("failed to create GCS range reader for %q at %d+%d: %w", o.path, off, length, ErrObjectNotExist)
 		}
 
-		return nil, fmt.Errorf("failed to create GCS range reader for %q at %d+%d: %w", o.path, off, length, err)
+		return nil, nil, fmt.Errorf("failed to create GCS range reader for %q at %d+%d: %w", o.path, off, length, err)
 	}
 
 	return &idleTimeoutReader{
 		ReadCloser: reader,
 		cancel:     cancel,
 		timer:      time.AfterFunc(googleReadTimeout, cancel),
-	}, nil
+	}, cancel, nil
 }
 
 // idleTimeoutReader fires cancel() after googleReadTimeout with no Read
@@ -598,20 +603,21 @@ func parseServiceAccountBase64(serviceAccount string) (*gcpServiceToken, error) 
 	return &sa, nil
 }
 
-func (o *gcpObject) OpenRangeReader(ctx context.Context, offsetU int64, length int64, frameTable *FrameTable) (io.ReadCloser, error) {
+func (o *gcpObject) OpenRangeReader(ctx context.Context, offsetU int64, length int64, frameTable *FrameTable) (RangeReader, error) {
 	timer := googleReadTimerFactory.Begin(attribute.String(gcsOperationAttr, gcsOperationAttrReadAt))
 
 	if !frameTable.IsCompressed() {
-		rc, err := o.openRangeReader(ctx, offsetU, length)
+		rc, cancel, err := o.openRangeReader(ctx, offsetU, length)
 		if err != nil {
 			timer.Failure(ctx, 0)
 
 			return nil, err
 		}
 
-		gcsConcurrentReads.Add(ctx, 1)
-
-		return &timedReadCloser{inner: rc, timer: timer, ctx: ctx}, nil
+		return newReader(NewRangeReader(rc)).
+			withTimer(timer).
+			withGauge(ctx, gcsConcurrentReads).
+			withCancel(cancel), nil
 	}
 
 	r, err := frameTable.LocateCompressed(offsetU)
@@ -621,59 +627,26 @@ func (o *gcpObject) OpenRangeReader(ctx context.Context, offsetU int64, length i
 		return nil, fmt.Errorf("get frame for offset %d, GCS:%s: %w", offsetU, o.path, err)
 	}
 
-	raw, err := o.openRangeReader(ctx, r.Offset, int64(r.Length))
+	raw, cancel, err := o.openRangeReader(ctx, r.Offset, int64(r.Length))
 	if err != nil {
 		timer.Failure(ctx, 0)
 
 		return nil, err
 	}
 
-	decompressed, err := newDecompressingReadCloser(raw, frameTable.CompressionType())
+	rd, err := newReader(NewRangeReader(raw)).withDecompress(frameTable.CompressionType())
 	if err != nil {
 		raw.Close()
+		cancel()
 		timer.Failure(ctx, 0)
 
 		return nil, err
 	}
 
-	gcsConcurrentReads.Add(ctx, 1)
-
-	return &timedReadCloser{inner: decompressed, timer: timer, ctx: ctx}, nil
-}
-
-// timedReadCloser wraps a reader with OTEL timer metrics.
-// Close records success (with total bytes read) or failure on the timer.
-type timedReadCloser struct {
-	inner     io.ReadCloser
-	timer     *telemetry.Stopwatch
-	ctx       context.Context //nolint:containedctx // needed for timer recording in Close
-	bytesRead int64
-	closeErr  error
-}
-
-func (r *timedReadCloser) Read(p []byte) (int, error) {
-	n, err := r.inner.Read(p)
-	r.bytesRead += int64(n)
-
-	if err != nil && err != io.EOF {
-		r.closeErr = err
-	}
-
-	return n, err
-}
-
-func (r *timedReadCloser) Close() error {
-	gcsConcurrentReads.Add(r.ctx, -1)
-
-	err := r.inner.Close()
-
-	if r.closeErr != nil || err != nil {
-		r.timer.Failure(r.ctx, r.bytesRead)
-	} else {
-		r.timer.Success(r.ctx, r.bytesRead)
-	}
-
-	return err
+	return rd.
+		withTimer(timer).
+		withGauge(ctx, gcsConcurrentReads).
+		withCancel(cancel), nil
 }
 
 func isResourceExhausted(err error) bool {

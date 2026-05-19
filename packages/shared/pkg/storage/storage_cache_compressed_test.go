@@ -69,10 +69,10 @@ func TestDecompressingCacheReader(t *testing.T) {
 		framePath := makeFrameFilename(c.path, Range{Offset: 0, Length: len(compressed)})
 
 		rc, err := newDecompressingCacheReader(
-			io.NopCloser(bytes.NewReader(compressed)),
+			bytesRangeReader(compressed),
 			CompressionLZ4,
 			len(compressed),
-			&c, t.Context(), framePath, 0,
+			&c, framePath, 0,
 		)
 		require.NoError(t, err)
 
@@ -80,7 +80,7 @@ func TestDecompressingCacheReader(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, original, got)
 
-		require.NoError(t, rc.Close())
+		require.NoError(t, rc.Close(t.Context()))
 		c.wg.Wait()
 
 		cached, err := os.ReadFile(framePath)
@@ -105,10 +105,10 @@ func TestDecompressingCacheReader(t *testing.T) {
 		framePath := makeFrameFilename(c.path, Range{Offset: 0, Length: len(compressedProd)})
 
 		rc, err := newDecompressingCacheReader(
-			io.NopCloser(bytes.NewReader(compressedProd)),
+			bytesRangeReader(compressedProd),
 			CompressionLZ4,
 			len(compressedProd),
-			&c, t.Context(), framePath, 0,
+			&c, framePath, 0,
 		)
 		require.NoError(t, err)
 
@@ -118,7 +118,7 @@ func TestDecompressingCacheReader(t *testing.T) {
 		require.Equal(t, len(original), n)
 		require.Equal(t, original, out)
 
-		require.NoError(t, rc.Close(), "writeback failure must not surface as a read error")
+		require.NoError(t, rc.Close(t.Context()), "writeback failure must not surface as a read error")
 		c.wg.Wait()
 
 		_, err = os.Stat(framePath)
@@ -132,10 +132,10 @@ func TestDecompressingCacheReader(t *testing.T) {
 		framePath := makeFrameFilename(c.path, Range{Offset: 0, Length: len(compressed)})
 
 		rc, err := newDecompressingCacheReader(
-			io.NopCloser(bytes.NewReader(compressed)),
+			bytesRangeReader(compressed),
 			CompressionLZ4,
 			len(compressed)+100, // wrong size
-			&c, t.Context(), framePath, 0,
+			&c, framePath, 0,
 		)
 		require.NoError(t, err)
 
@@ -143,7 +143,7 @@ func TestDecompressingCacheReader(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, original, got, "decompressed data should be correct regardless")
 
-		require.NoError(t, rc.Close(), "writeback failure must not surface as a read error")
+		require.NoError(t, rc.Close(t.Context()), "writeback failure must not surface as a read error")
 
 		c.wg.Wait()
 
