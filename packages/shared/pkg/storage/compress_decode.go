@@ -74,6 +74,13 @@ type decompressReader struct {
 	readErr      error
 }
 
+// NewDecompressingReader wraps inner so Read returns decompressed bytes;
+// metric attribution falls back to defaults (callers that care provide it via
+// newDecompressReader directly).
+func NewDecompressingReader(inner RangeReader, ct CompressionType) (RangeReader, error) {
+	return newDecompressReader(inner, ct, SourceMmap, UnknownSeekableObjectType)
+}
+
 func newDecompressReader(inner RangeReader, ct CompressionType, src Source, ot SeekableObjectType) (*decompressReader, error) {
 	compressed := &meteredReader{inner: inner}
 

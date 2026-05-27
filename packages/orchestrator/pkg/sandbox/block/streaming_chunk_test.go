@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	lz4 "github.com/pierrec/lz4/v4"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/metric/noop"
 	"golang.org/x/sync/errgroup"
@@ -128,8 +127,9 @@ func (s *fakeSeekable) OpenRangeReader(_ context.Context, offsetU int64, length 
 
 	r := io.Reader(bytes.NewReader(s.data[fetchOff:end]))
 	if frameTable.IsCompressed() {
-		// makeCompressedTestData only ever produces LZ4 frames.
-		return storage.NewRangeReader(io.NopCloser(lz4.NewReader(r))), storage.SourceFS, nil
+		dec, err := storage.NewDecompressingReader(storage.NewRangeReader(io.NopCloser(r)), frameTable.CompressionType())
+
+		return dec, storage.SourceFS, err
 	}
 
 	return storage.NewRangeReader(io.NopCloser(r)), storage.SourceFS, nil
