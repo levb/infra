@@ -80,9 +80,9 @@ func (b *File) SwapHeader(h *header.Header) {
 	b.header.Store(h)
 }
 
-func (b *File) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
+func (b *File) ReadAt(ctx context.Context, p []byte, off int64) (n int, err error) {
 	start := time.Now()
-	n, err := b.readAt(ctx, p, off)
+	n, err = b.readAt(ctx, p, off)
 	if err != nil {
 		fileReadAtTimer.Record(ctx, time.Since(start), int64(n), b.errAttrs(err))
 
